@@ -1,44 +1,48 @@
 #include <iostream>
-#include <thread>
+#include <fstream>
+#include <filesystem> // 确保包含了filesystem头文件
+#include "VeritasSync/StateManager.h"
 
-#include "VeritasSync/P2PManager.h"
-#include "VeritasSync/TrackerClient.h"
+// create_dummy_files 函数保持不变
+void create_dummy_files(const std::string& dir) {
+  std::filesystem::path root(dir);
+  std::filesystem::path docs_dir = root / "docs";
+  if (!std::filesystem::exists(docs_dir)) {
+    std::filesystem::create_directory(docs_dir);
+  }
+  std::ofstream file1(root / "hello.txt");
+  file1 << "This is the first file." << std::endl;
+  file1.close();
+  std::ofstream file2(docs_dir / "report.txt");
+  file2 << "This is a report." << std::endl;
+  file2.close();
+}
 
 int main(int argc, char* argv[]) {
-  try {
-    std::cout << "--- Veritas Sync Peer ---" << std::endl;
+  std::cout << "--- Veritas Sync StateManager Test ---" << std::endl;
 
-    // 1. 获取我们自己的P2P端口
-    unsigned short my_port = 9001;
-    if (argc > 1) {
-      my_port = static_cast<unsigned short>(std::stoul(argv[1]));
-    }
-    std::cout << "[Main] Our P2P port is " << my_port << std::endl;
+  std::string sync_folder = "SyncFolder";
 
-    // 2. 连接Tracker并获取节点列表
-    VeritasSync::TrackerClient tracker_client("127.0.0.1", 9988);
-    std::string sync_key = "my-secret-room";
-    std::vector<std::string> peers =
-        tracker_client.register_and_query(sync_key, my_port);
-    std::cout << "[Main] Found " << peers.size()
-              << " other peer(s) from tracker." << std::endl;
-
-    // 3. 初始化P2P管理器
-    VeritasSync::P2PManager p2p_manager(my_port);
-
-    // 4. 尝试向所有发现的节点发送“打洞”消息
-    if (!peers.empty()) {
-      p2p_manager.connect_to_peers(peers);
-    }
-
-    // 5. 让主程序持续运行，以便后台线程能处理P2P消息
-    std::cout << "[Main] P2P Manager is running. Press Enter to exit."
-              << std::endl;
-    std::cin.get();
-
-  } catch (const std::exception& e) {
-    std::cerr << "Exception in main: " << e.what() << std::endl;
+  if (std::filesystem::exists(sync_folder)) {
+    std::filesystem::remove_all(sync_folder);
   }
+  create_dummy_files(sync_folder);
+  std::cout << "[TestSetup] Dummy files and folder have been created/reset." << std::endl;
+
+  // 创建StateManager实例
+  VeritasSync::StateManager state_manager(sync_folder);
+
+  // 执行扫描
+  state_manager.scan_directory();
+
+  // 打印扫描结果到控制台
+  state_manager.print_current_state();
+
+  // 获取并打印将要发送给其他节点的JSON消息
+  std::string json_message = state_manager.get_state_as_json_string();
+  std::cout << "\n--- Generated JSON Message ---" << std::endl;
+  std::cout << json_message << std::endl;
+  std::cout << "----------------------------" << std::endl;
 
   return 0;
 }

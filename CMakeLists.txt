@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenSSL REQUIRED)
 find_package(efsw CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
+find_package(nlohmann_json CONFIG REQUIRED)
 # --------------------------------------------------------------------
 
 # 定义可执行文件目标1
@@ -20,6 +21,7 @@ target_sources(veritas_sync PRIVATE
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
+    src/peer/StateManager.cpp
 )
 
 # --------------------------------------------------------------------
@@ -29,6 +31,7 @@ target_link_libraries(veritas_sync PRIVATE
     efsw::efsw
     Boost::system
     Boost::asio
+    nlohmann_json::nlohmann_json
 )
 # --------------------------------------------------------------------
 target_include_directories(veritas_sync PRIVATE
