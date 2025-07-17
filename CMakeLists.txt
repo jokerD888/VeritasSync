@@ -17,11 +17,14 @@ find_package(nlohmann_json CONFIG REQUIRED)
 # 定义可执行文件目标1
 add_executable(veritas_sync src/main.cpp)
 
+
+
 target_sources(veritas_sync PRIVATE
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
     src/peer/StateManager.cpp
+    src/peer/SyncManager.cpp
 )
 
 # --------------------------------------------------------------------
