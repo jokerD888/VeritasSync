@@ -51,6 +51,7 @@ namespace VeritasSync {
     // `type` 字段的各种值
     static constexpr const char* TYPE_SHARE_STATE = "share_state";
     static constexpr const char* TYPE_REQUEST_FILE = "request_file";
+    static constexpr const char* TYPE_FILE_CHUNK = "file_chunk";
     // ... 未来我们可以在这里添加更多消息类型, 如 MSG_FILE_CHUNK ...
   };
 

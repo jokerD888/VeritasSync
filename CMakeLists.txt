@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+ï»¿cmake_minimum_required(VERSION 3.15)
 
 project(VeritasSync VERSION 1.0)
 
@@ -6,15 +6,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --------------------------------------------------------------------
-# Õâ»á¸æËßCMakeÈ¥Ñ°ÕÒOpenSSL¡£µ±ÅäºÏvcpkg¹¤¾ßÁ´Ê¹ÓÃÊ±£¬
-# vcpkg»á×Ô¶¯¸æËßCMakeÔÚÄÄÀï¿ÉÒÔÕÒµ½Ëü¡£
+# è¿™ä¼šå‘Šè¯‰CMakeå»å¯»æ‰¾OpenSSLã€‚å½“é…åˆvcpkgå·¥å…·é“¾ä½¿ç”¨æ—¶ï¼Œ
+# vcpkgä¼šè‡ªåŠ¨å‘Šè¯‰CMakeåœ¨å“ªé‡Œå¯ä»¥æ‰¾åˆ°å®ƒã€‚
 find_package(OpenSSL REQUIRED)
 find_package(efsw CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
 # --------------------------------------------------------------------
 
-# ¶¨Òå¿ÉÖ´ĞĞÎÄ¼şÄ¿±ê1
+# å®šä¹‰å¯æ‰§è¡Œæ–‡ä»¶ç›®æ ‡1
 add_executable(veritas_sync src/main.cpp)
 
 
@@ -28,7 +28,7 @@ target_sources(veritas_sync PRIVATE
 )
 
 # --------------------------------------------------------------------
-# Í¨¹ıÁ´½Óµ½OpenSSL::CryptoÕâ¸ö¡°Ä¿±ê¡±£¬CMake»á×Ô¶¯½«OpenSSLµÄÍ·ÎÄ¼şÄ¿Â¼Ìí¼Óµ½ÎÒÃÇµÄÏîÄ¿ÖĞ¡£
+# é€šè¿‡é“¾æ¥åˆ°OpenSSL::Cryptoè¿™ä¸ªâ€œç›®æ ‡â€ï¼ŒCMakeä¼šè‡ªåŠ¨å°†OpenSSLçš„å¤´æ–‡ä»¶ç›®å½•æ·»åŠ åˆ°æˆ‘ä»¬çš„é¡¹ç›®ä¸­ã€‚
 target_link_libraries(veritas_sync PRIVATE
     OpenSSL::Crypto
     efsw::efsw
@@ -42,9 +42,9 @@ target_include_directories(veritas_sync PRIVATE
 )
 
 # -----------------------------------------------------------
-# Ä¿±ê 2: Tracker·şÎñÆ÷³ÌĞò
+# ç›®æ ‡ 2: TrackeræœåŠ¡å™¨ç¨‹åº
 add_executable(veritas_tracker src/tracker/main.cpp)
-# TrackerÒ²ĞèÒªÁ´½ÓBoost::system (AsioµÄÒÀÀµ)
+# Trackerä¹Ÿéœ€è¦é“¾æ¥Boost::system (Asioçš„ä¾èµ–)
 target_link_libraries(veritas_tracker PRIVATE
     Boost::system
     Boost::asio

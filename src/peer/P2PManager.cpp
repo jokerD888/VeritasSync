@@ -3,9 +3,22 @@
 #include "VeritasSync/Protocol.h" 
 #include "VeritasSync/SyncManager.h"
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <sstream>
+#include <fstream>
+#define BUFFERSIZE 8192
+
+
+#include <b64/decode.h>
+#include <b64/encode.h>
+
+
 
 namespace VeritasSync {
+
+// 定义文件块大小 (例如 8KB)
+// 必须小于 MAX_UDP_PAYLOAD 以留出JSON元数据的空间
+constexpr size_t CHUNK_DATA_SIZE = 8192;
 
 P2PManager::P2PManager(unsigned short port, StateManager& state_manager)
     : m_socket(m_io_context, udp::endpoint(udp::v4(), port)),
@@ -42,8 +55,9 @@ void P2PManager::connect_to_peers(
 
 void P2PManager::start_receive() {
   auto remote_endpoint = std::make_shared<udp::endpoint>();
-  auto recv_buffer = std::make_shared<std::array<char, 4096>>();
+  auto recv_buffer = std::make_shared<std::array<char, MAX_UDP_PAYLOAD>>();
 
+  std::cout << "ok -=----------------" << std::endl;
   m_socket.async_receive_from(
       boost::asio::buffer(*recv_buffer), *remote_endpoint,
       [this, remote_endpoint, recv_buffer](
@@ -56,7 +70,9 @@ void P2PManager::start_receive() {
 void P2PManager::handle_receive(
     const boost::system::error_code& error, std::size_t bytes_transferred,
     std::shared_ptr<udp::endpoint> remote_endpoint,
-    std::shared_ptr<std::array<char, 4096>> recv_buffer) {
+    std::shared_ptr<std::array<char, MAX_UDP_PAYLOAD>> recv_buffer) {
+  std::cout << "ok A -=----------------" << std::endl;
+
   if (!error) {
     std::string received_msg(recv_buffer->data(), bytes_transferred);
     if (received_msg == "PING") {
@@ -65,13 +81,17 @@ void P2PManager::handle_receive(
       m_state_manager.scan_directory();
       std::string json_state = m_state_manager.get_state_as_json_string();
       send(json_state, *remote_endpoint);
+      std::cout << "ok B-=----------------" << std::endl;
+
     } else {
+      std::cout << "ok C-=----------------" << std::endl;
       // 尝试将收到的消息作为JSON处理
       try {
         auto json = nlohmann::json::parse(received_msg);
         const std::string msg_type = json.at(Protocol::MSG_TYPE);
+        auto& payload = json.at(Protocol::MSG_PAYLOAD);
 
-        // --- 核心逻辑修改 ---
+        // 
         if (msg_type == Protocol::TYPE_SHARE_STATE) {
           std::cout << "[P2P] Received 'share_state' message from "
                     << *remote_endpoint << "." << std::endl;
@@ -108,25 +128,32 @@ void P2PManager::handle_receive(
               request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
               send(request_msg.dump(), *remote_endpoint);
             }
+            std::cout<<"send ok----------------------"<<std::endl;
           }
         } else if (msg_type == Protocol::TYPE_REQUEST_FILE) {
-          // e. 处理收到的文件请求
-          const std::string requested_path =
-              json.at(Protocol::MSG_PAYLOAD).at("path");
+          const std::string requested_path = payload.at("path");
           std::cout << "[P2P] Received a request for file: '" << requested_path
                     << "' from " << *remote_endpoint << std::endl;
-          // (在下一阶段，我们将在这里实现文件发送逻辑)
-        } else {
-          std::cerr << "[P2P] Received unknown message type: " << msg_type
-                    << std::endl;
+          // 调用文件发送处理器
+          handle_file_request(requested_path, *remote_endpoint);
+        } else if (msg_type == Protocol::TYPE_FILE_CHUNK) {
+          // 调用文件块接收处理器
+          handle_file_chunk(payload);
         }
 
       } catch (const nlohmann::json::parse_error& e) {
-        std::cerr << "[P2P] Failed to parse received message as JSON: "
-                  << e.what() << std::endl;
-      } catch (const nlohmann::json::out_of_range& e) {
-        std::cerr << "[P2P] JSON message is missing a required field: "
-                  << e.what() << std::endl;
+        std::cerr << "[P2P] JSON PARSE ERROR: " << e.what() << std::endl;
+        std::cerr << "       Problematic message: " << received_msg
+                  << std::endl;
+      } catch (const nlohmann::json::exception&
+                   e) {  // Catch other nlohmann exceptions
+        std::cerr << "[P2P] JSON LOGIC ERROR: " << e.what() << std::endl;
+      } catch (const std::exception& e) {  // Catch all standard exceptions
+        std::cerr << "[P2P] UNHANDLED STANDARD EXCEPTION: " << e.what()
+                  << std::endl;
+      } catch (...) {  // Catch anything else
+        std::cerr << "[P2P] UNKNOWN EXCEPTION CAUGHT. Program will continue."
+                  << std::endl;
       }
     }
   }
@@ -139,6 +166,113 @@ void P2PManager::send(const std::string& msg,
   m_socket.async_send_to(
       boost::asio::buffer(*message_to_send), target_endpoint,
       [message_to_send](const boost::system::error_code&, std::size_t) {});
+}
+
+void P2PManager::handle_file_request(const std::string& file_path,
+                                     const udp::endpoint& peer) {
+  // 构建文件的完整路径
+  std::filesystem::path full_path = m_state_manager.get_root_path() / file_path;
+
+  if (!std::filesystem::exists(full_path)) {
+    std::cerr << "[P2P] Requested file does not exist: " << full_path
+              << std::endl;
+    return;
+  }
+
+  std::ifstream file(full_path, std::ios::binary | std::ios::ate);
+  if (!file.is_open()) {
+    std::cerr << "[P2P] Could not open file: " << full_path << std::endl;
+    return;
+  }
+
+  std::streamsize size = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  int total_chunks =
+      static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE);
+  std::vector<char> buffer(CHUNK_DATA_SIZE);
+
+  std::cout << "[P2P] Sending file '" << file_path << "' (" << size
+            << " bytes) in " << total_chunks << " chunk(s) to " << peer
+            << std::endl;
+
+  for (int i = 0; i < total_chunks; ++i) {
+    file.read(buffer.data(), CHUNK_DATA_SIZE);
+    std::streamsize bytes_read = file.gcount();
+
+ 
+    std::stringstream raw_data_stream;
+    raw_data_stream.write(buffer.data(), bytes_read);
+
+    std::stringstream encoded_stream;
+    base64::encoder E;
+    E.encode(raw_data_stream, encoded_stream);
+
+    nlohmann::json chunk_msg;
+    chunk_msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_CHUNK;
+    chunk_msg[Protocol::MSG_PAYLOAD] = {
+        {"path", file_path},
+        {"chunk_index", i},
+        {"total_chunks", total_chunks},
+        {"data", encoded_stream.str()}  // 3. 将编码后的字符串放入JSON
+    };
+
+    send(chunk_msg.dump(), peer);
+  }
+}
+
+void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
+  std::string file_path = payload.at("path");
+  int chunk_index = payload.at("chunk_index");
+  int total_chunks = payload.at("total_chunks");
+
+  // 从JSON中获取Base64字符串
+  std::string encoded_data = payload.at("data").get<std::string>();
+
+  // 使用b64流式接口进行解码
+  std::stringstream encoded_stream(encoded_data);
+  std::stringstream decoded_stream;
+  base64::decoder D;
+  D.decode(encoded_stream, decoded_stream);
+
+  // 将解码后的二进制数据存入文件重组缓冲区
+  auto& assembly_info = m_file_assembly_buffer[file_path];
+  assembly_info.first = total_chunks;
+  assembly_info.second[chunk_index].data = decoded_stream.str();
+
+  std::cout << "[P2P] Received chunk " << chunk_index + 1 << "/" << total_chunks
+            << " for file '" << file_path << "' ("
+            << assembly_info.second[chunk_index].data.size() << " bytes)."
+            << std::endl;
+
+  if (assembly_info.second.size() == total_chunks) {
+    std::cout << "[P2P] All chunks for '" << file_path
+              << "' received. Assembling file..." << std::endl;
+
+    std::filesystem::path full_path =
+        m_state_manager.get_root_path() / file_path;
+    if (full_path.has_parent_path()) {
+      std::filesystem::create_directories(full_path.parent_path());
+    }
+
+    std::ofstream output_file(full_path, std::ios::binary);
+    if (!output_file.is_open()) {
+      std::cerr << "[P2P] Failed to create file for writing: " << full_path
+                << std::endl;
+      return;
+    }
+
+    for (int i = 0; i < total_chunks; ++i) {
+      output_file.write(assembly_info.second[i].data.c_str(),
+                        assembly_info.second[i].data.length());
+    }
+    output_file.close();
+
+    std::cout << "[P2P] SUCCESS: File '" << file_path << "' has been saved."
+              << std::endl;
+
+    m_file_assembly_buffer.erase(file_path);
+  }
 }
 
 }

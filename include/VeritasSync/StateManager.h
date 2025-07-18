@@ -21,6 +21,8 @@ namespace VeritasSync {
     // (用于调试) 打印当前所有文件的状态到控制台
     void print_current_state() const;
 
+    const std::filesystem::path& get_root_path() const { return m_root_path; }
+
   private:
     // 同步目录的根路径
     std::filesystem::path m_root_path;
