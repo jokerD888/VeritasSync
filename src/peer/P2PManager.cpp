@@ -6,8 +6,9 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <fstream>
-#define BUFFERSIZE 8192
+#include <algorithm>
 
+#define BUFFERSIZE 8192
 
 #include <b64/decode.h>
 #include <b64/encode.h>
@@ -130,14 +131,36 @@ void P2PManager::handle_receive(
             }
             std::cout<<"send ok----------------------"<<std::endl;
           }
-        } else if (msg_type == Protocol::TYPE_REQUEST_FILE) {
+
+          std::sort(local_files.begin(), local_files.end(), [](const auto& a, const auto& b) { return a.path < b.path; });
+          std::sort(remote_files.begin(), remote_files.end(), [](const auto& a, const auto& b) { return a.path < b.path; });
+
+          // --- FIX: Use a custom comparator that ignores modification time ---
+          bool states_are_equal = std::equal(
+            local_files.begin(), local_files.end(),
+            remote_files.begin(), remote_files.end(),
+            [](const FileInfo& a, const FileInfo& b) {
+              // Only compare path and hash for sync completion check
+              return a.path == b.path && a.hash == b.hash;
+            }
+          );
+
+          if (!states_are_equal) {
+            std::cout << "[P2P] States are different. Replying with our own state to " << *remote_endpoint << " to continue sync." << std::endl;
+            send(temp_json.dump(), *remote_endpoint);
+          }
+          else {
+            std::cout << "[P2P] States are identical (path/hash). Synchronization with " << *remote_endpoint << " is complete." << std::endl;
+          }
+
+        }
+        else if (msg_type == Protocol::TYPE_REQUEST_FILE) {
           const std::string requested_path = payload.at("path");
           std::cout << "[P2P] Received a request for file: '" << requested_path
-                    << "' from " << *remote_endpoint << std::endl;
-          // 调用文件发送处理器
+            << "' from " << *remote_endpoint << std::endl;
           handle_file_request(requested_path, *remote_endpoint);
-        } else if (msg_type == Protocol::TYPE_FILE_CHUNK) {
-          // 调用文件块接收处理器
+        }
+        else if (msg_type == Protocol::TYPE_FILE_CHUNK) {
           handle_file_chunk(payload);
         }
 

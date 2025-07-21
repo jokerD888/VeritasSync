@@ -5,21 +5,22 @@ project(VeritasSync VERSION 1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# --------------------------------------------------------------------
-# 这会告诉CMake去寻找OpenSSL。当配合vcpkg工具链使用时，
-# vcpkg会自动告诉CMake在哪里可以找到它。
+# --- 查找依赖包 ---
 find_package(OpenSSL REQUIRED)
 find_package(efsw CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
-# --------------------------------------------------------------------
 
-# 定义可执行文件目标1
-add_executable(veritas_sync src/main.cpp)
+# --- 包含目录 ---
+include_directories(${PROJECT_SOURCE_DIR}/include)
+include_directories("d:/vcpkg/installed/x64-windows-static/include")
 
 
-
-target_sources(veritas_sync PRIVATE
+# ===========================================================
+# 目标 1: veritas_sync (主程序)
+# ===========================================================
+add_executable(veritas_sync
+    src/main.cpp
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
@@ -27,26 +28,28 @@ target_sources(veritas_sync PRIVATE
     src/peer/SyncManager.cpp
 )
 
-# --------------------------------------------------------------------
-# 通过链接到OpenSSL::Crypto这个“目标”，CMake会自动将OpenSSL的头文件目录添加到我们的项目中。
+
+# --- 为 veritas_sync 链接库 ---
 target_link_libraries(veritas_sync PRIVATE
     OpenSSL::Crypto
     efsw::efsw
     Boost::system
     Boost::asio
     nlohmann_json::nlohmann_json
-)
-# --------------------------------------------------------------------
-target_include_directories(veritas_sync PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
+    b64
 )
 
-# -----------------------------------------------------------
-# 目标 2: Tracker服务器程序
+target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-static/lib")
+
+
+# ===========================================================
+# 目标 2: veritas_tracker (服务器程序)
+# ===========================================================
 add_executable(veritas_tracker src/tracker/main.cpp)
-# Tracker也需要链接Boost::system (Asio的依赖)
+
+
+# --- 为 veritas_tracker 链接库 ---
 target_link_libraries(veritas_tracker PRIVATE
     Boost::system
     Boost::asio
 )
-# -----------------------------------------------------------

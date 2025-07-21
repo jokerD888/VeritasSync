@@ -9,29 +9,26 @@
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
 
-// --- 函数已修改 ---
-// 现在它会根据同步目录名创建不同的文件，以方便测试
+// ---：创建不冲突的文件集 ---
 void create_dummy_files(const std::string& dir) {
   std::filesystem::path root(dir);
-  std::filesystem::create_directories(root);  // 确保根目录存在
+  std::filesystem::create_directories(root);
 
   if (dir.find("SyncNode1") != std::string::npos) {
-    std::ofstream(root / "file1.txt") << "This is a file unique to Node 1.";
-    std::ofstream(root / "shared.txt")
-        << "This is the original version of the shared file.";
-  } else if (dir.find("SyncNode2") != std::string::npos) {
-    std::ofstream(root / "file2.log") << "This is a log file unique to Node 2.";
-    std::ofstream(root / "shared.txt")
-        << "This is a MODIFIED version of the shared file on Node 2.";
-  } else {
-    // 默认情况
-    std::ofstream(root / "default.txt") << "default content";
+    std::cout << "[TestSetup] Creating files for Node 1..." << std::endl;
+    std::ofstream(root / "file_from_node1.txt") << "This file originated on Node 1.";
+    std::filesystem::create_directory(root / "common_dir");
+    std::ofstream(root / "common_dir" / "doc_A.txt") << "Document A";
+  }
+  else if (dir.find("SyncNode2") != std::string::npos) {
+    std::cout << "[TestSetup] Creating files for Node 2..." << std::endl;
+    std::ofstream(root / "log_from_node2.log") << "This log file originated on Node 2.";
+    std::filesystem::create_directory(root / "common_dir");
+    std::ofstream(root / "common_dir" / "doc_B.txt") << "Document B";
   }
 }
 
 int main(int argc, char* argv[]) {
-  // ... main函数的其余部分保持不变 ...
-  // --- 参数检查 ---
   if (argc != 4) {
     std::cerr << "Usage: " << argv[0] << " <sync_key> <p2p_port> <sync_folder>"
               << std::endl;
