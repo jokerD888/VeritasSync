@@ -1,19 +1,76 @@
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/Hashing.h"
+#include "VeritasSync/P2PManager.h" 
 #include <iostream>
+#include <efsw/efsw.hpp>
+
+
+#include <boost/asio.hpp>
 
 namespace VeritasSync {
 
-  StateManager::StateManager(const std::string& root_path)
-    : m_root_path(root_path) {
-    // 确保同步目录存在，如果不存在则创建它
-    if (!std::filesystem::exists(m_root_path)) {
-      std::cout << "[StateManager] Root path " << m_root_path << " does not exist. Creating it." << std::endl;
-      std::filesystem::create_directory(m_root_path);
+
+
+// 这个类继承自 efsw::FileWatchListener，用于接收文件变化通知
+class UpdateListener : public efsw::FileWatchListener {
+ public:
+  UpdateListener(P2PManager& p2p_manager)
+      : m_p2p_manager(p2p_manager),
+        m_debounce_timer(p2p_manager.get_io_context()) {}
+
+  void handleFileAction(efsw::WatchID, const std::string& dir,
+                        const std::string& filename, efsw::Action action,
+                        std::string) override {
+    if (filename == "." || filename == "..") {
+      return;
     }
+
+    // 日志打印逻辑不变
+    std::cout << "[Watcher] 检测到变化: " << dir + filename << std::endl;
+
+    m_debounce_timer.cancel();
+    m_debounce_timer.expires_after(std::chrono::milliseconds(200));
+
+    // 直接捕获 [this]，因为 StateManager 保证了我们的生命周期
+    m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
+      if (!ec) {
+        std::cout << "[Watcher] 文件系统稳定，触发状态广播。" << std::endl;
+        boost::asio::post(m_p2p_manager.get_io_context(), [this]() {
+          m_p2p_manager.broadcast_current_state();
+        });
+      }
+    });
   }
 
-  // 在 src/peer/StateManager.cpp 中
+ private:
+  P2PManager& m_p2p_manager;
+  boost::asio::steady_timer m_debounce_timer;
+};
+
+  StateManager::StateManager(const std::string& root_path,
+                            P2PManager& p2p_manager)
+    : m_root_path(root_path) {
+  if (!std::filesystem::exists(m_root_path)) {
+    std::cout << "[StateManager] 根目录 " << m_root_path
+              << " 不存在，正在创建。" << std::endl;
+    std::filesystem::create_directory(m_root_path);
+  }
+
+  m_file_watcher = std::make_unique<efsw::FileWatcher>();
+
+  // 直接创建 unique_ptr 实例
+  m_listener = std::make_unique<UpdateListener>(p2p_manager);
+
+  m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
+  m_file_watcher->watch();
+  std::cout << "[StateManager] 已启动对目录 '" << m_root_path.string()
+            << "' 的实时监控。" << std::endl;
+  }
+
+  StateManager::~StateManager() {
+  std::cout << "[StateManager] 正在停止文件监控..." << std::endl;
+  // unique_ptr 会自动处理销毁，无需代码
+  }
 
   void StateManager::scan_directory() {
     std::cout << "[StateManager] Scanning directory: " << m_root_path << std::endl;
@@ -39,18 +96,26 @@ namespace VeritasSync {
 
       FileInfo info;
 
-      // 1. 获取相对路径
-      info.path = std::filesystem::relative(entry.path(), m_root_path).generic_string();
+        // 1. 获取相对路径
+      std::filesystem::path relative_path =
+          std::filesystem::relative(entry.path(), m_root_path);
 
-      // 2. 获取最后修改时间
+      // 2. 使用 u8string() 方法将路径安全地转换为UTF-8编码的字符串
+      //    这可以正确处理包括中文在内的所有Unicode字符。
+      const std::u8string u8_path_str = relative_path.u8string();
+      info.path =
+          std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                      u8_path_str.length());
+
+      // 2. 获取最后修改时间 (这部分逻辑不变)
       auto ftime = std::filesystem::last_write_time(entry, ec);
-      if (ec) continue; // 如果获取时间失败，跳过
+      if (ec) continue;
       auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
       info.modified_time = sctp.time_since_epoch().count();
 
-      // 3. 计算哈希值
+      // 3. 计算哈希值 (这部分逻辑不变)
       info.hash = Hashing::CalculateSHA256(entry.path());
-      if (info.hash.empty()) continue; // 如果计算哈希失败，跳过
+      if (info.hash.empty()) continue;
 
       // 4. 存入map
       m_file_map[info.path] = info;

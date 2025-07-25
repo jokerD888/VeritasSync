@@ -5,11 +5,17 @@ project(VeritasSync VERSION 1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- 为Windows平台添加必要的宏定义 ---
+if(WIN32)
+  add_definitions(-D_WIN32_WINNT=0x0A00) # 将目标平台设置为 Windows 10
+endif()
+
 # --- 查找依赖包 ---
 find_package(OpenSSL REQUIRED)
 find_package(efsw CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(kcp CONFIG REQUIRED)
 
 # --- 包含目录 ---
 include_directories(${PROJECT_SOURCE_DIR}/include)
@@ -37,6 +43,7 @@ target_link_libraries(veritas_sync PRIVATE
     Boost::asio
     nlohmann_json::nlohmann_json
     b64
+    kcp::kcp
 )
 
 target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-static/lib")

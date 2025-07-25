@@ -71,9 +71,21 @@ int main(int argc, char* argv[]) {
   create_dummy_files(sync_folder);
   std::cout << "[TestSetup] Dummy files created in " << sync_folder
             << std::endl;
+  // 1. 创建 P2PManager
+  auto p2p_manager = VeritasSync::P2PManager::create(p2p_port);
 
-  VeritasSync::StateManager state_manager(sync_folder);
-  VeritasSync::P2PManager p2p_manager(p2p_port, state_manager);
+  // 2. 创建 StateManager，并将p2p_manager的引用传递给它
+  VeritasSync::StateManager state_manager(sync_folder, *p2p_manager);
+
+  // 3. 将 StateManager 的地址“注入”到 P2PManager 中
+  p2p_manager->set_state_manager(&state_manager);
+
+  // 初始化文件并进行一次初始扫描和广播
+  create_dummy_files(sync_folder);
+  std::cout << "[TestSetup] Dummy files created in " << sync_folder
+            << std::endl;
+  state_manager.scan_directory();
+  p2p_manager->broadcast_current_state();  // 可选：启动时广播一次状态
 
   std::cout << "\n--- Phase 1: Contacting Tracker ---" << std::endl;
   VeritasSync::TrackerClient tracker_client("127.0.0.1", 9988);
@@ -88,7 +100,7 @@ int main(int argc, char* argv[]) {
 
   std::cout << "\n--- Phase 2: P2P State Synchronization ---" << std::endl;
   if (!peer_addresses.empty()) {
-    p2p_manager.connect_to_peers(peer_addresses);
+    p2p_manager->connect_to_peers(peer_addresses);
   } else {
     std::cout
         << "[P2P] No other peers in the group. Waiting for others to join."
@@ -96,7 +108,7 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n--- Node is running. Press Ctrl+C to exit. ---" << std::endl;
-  std::this_thread::sleep_for(std::chrono::seconds(20));
+  std::this_thread::sleep_for(std::chrono::seconds(100));
   std::cout << "--- Test finished. Shutting down. ---" << std::endl;
 
   return 0;

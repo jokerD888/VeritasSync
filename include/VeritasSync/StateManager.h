@@ -4,13 +4,25 @@
 #include <filesystem>
 #include <string>
 #include <map>
+#include <functional>
+#include <memory> 
+
+
+namespace efsw {
+class FileWatcher;
+class FileWatchListener;
+}
+
+
 
 namespace VeritasSync {
+class P2PManager;
 
   class StateManager {
   public:
-    // 构造函数，传入要管理的同步目录的根路径
-    StateManager(const std::string& root_path);
+    // 构造函数接收一个 P2PManager 的引用
+    StateManager(const std::string& root_path, P2PManager& p2p_manager);
+    ~StateManager();
 
     // 扫描同步目录，生成当前所有文件的状态快照
     void scan_directory();
@@ -31,6 +43,8 @@ namespace VeritasSync {
     // key: 文件的相对路径 (例如 "docs/report.txt")
     // value: 文件的详细信息 (FileInfo)
     std::map<std::string, FileInfo> m_file_map;
+    std::unique_ptr<efsw::FileWatcher> m_file_watcher;
+    std::unique_ptr<efsw::FileWatchListener> m_listener;
   };
 
 } // namespace VeritasSync
