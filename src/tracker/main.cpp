@@ -53,11 +53,14 @@ class Session : public std::enable_shared_from_this<Session> {
 
       auto& peer_set = m_peer_groups[sync_key];
 
-      // 1. 准备响应数据，并将其存储在成员变量 m_response_data 中
-      // 这样可以保证它的生命周期足够长
+      // 1. 准备响应数据 (遍历已存在的节点)
+      //    我们只发送 *其他* 节点给这个新节点。
       std::ostringstream oss;
       for (const auto& peer : peer_set) {
-        oss << peer << "\n";
+        // (可选) 确保我们不会把节点自己发给自己
+        if (peer != new_peer_id) {
+          oss << peer << "\n";
+        }
       }
       m_response_data = oss.str();
 

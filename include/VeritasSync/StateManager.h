@@ -8,15 +8,17 @@
 #include <memory> 
 
 
-namespace efsw {
-class FileWatcher;
-class FileWatchListener;
-}
+
 
 
 
 namespace VeritasSync {
 class P2PManager;
+
+  // 前向声明我们的实现类
+  // 我们使用 Pimpl 模式来隐藏复杂的实现细节
+  class DirectoryWatcher;
+  class FileEventStateMachine;
 
   class StateManager {
   public:
@@ -35,6 +37,11 @@ class P2PManager;
 
     const std::filesystem::path& get_root_path() const { return m_root_path; }
 
+    // 获取文件状态map的只读引用
+    const std::map<std::string, FileInfo>& get_file_map() const {
+      return m_file_map;
+    }
+
   private:
     // 同步目录的根路径
     std::filesystem::path m_root_path;
@@ -43,8 +50,10 @@ class P2PManager;
     // key: 文件的相对路径 (例如 "docs/report.txt")
     // value: 文件的详细信息 (FileInfo)
     std::map<std::string, FileInfo> m_file_map;
-    std::unique_ptr<efsw::FileWatcher> m_file_watcher;
-    std::unique_ptr<efsw::FileWatchListener> m_listener;
+
+
+    std::unique_ptr<DirectoryWatcher> m_watcher;
+    std::unique_ptr<FileEventStateMachine> m_state_machine;
   };
 
 } // namespace VeritasSync

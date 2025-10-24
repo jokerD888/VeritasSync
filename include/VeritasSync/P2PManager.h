@@ -7,7 +7,6 @@
 #include <memory>
 #include <functional>
 #include <string>
-#include <thread>
 #include <vector>
 #include <ikcp.h>
 
@@ -94,7 +93,6 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
 
   boost::asio::io_context m_io_context;
   udp::socket m_socket;
-  std::jthread m_thread;
   boost::asio::steady_timer m_kcp_update_timer;
 
   StateManager* m_state_manager = nullptr;

@@ -2,50 +2,58 @@
 
 #include <iostream>
 #include <map>
+#include <set>  // 用于辅助
 
 namespace VeritasSync {
 
-std::vector<std::string> SyncManager::compare_states_and_get_requests(
-    const std::vector<FileInfo>& local_files,
-    const std::vector<FileInfo>& remote_files) {
-  std::vector<std::string> files_to_request;
-
-  // 为了高效查找，将本地文件列表转换为一个map
-  // 键: 文件路径, 值: 文件哈希值
-  std::map<std::string, std::string> local_file_hashes;
-  for (const auto& info : local_files) {
-    local_file_hashes[info.path] = info.hash;
-  }
+SyncActions SyncManager::analyze_states(
+    const std::map<std::string, FileInfo>& local_files,  // key 是 UTF-8 string
+    const std::map<std::string, FileInfo>& remote_files) {
+  SyncActions actions;
 
   std::cout << "[SyncManager] 正在比较本地状态 (" << local_files.size()
-            << " 个文件) 与远程状态 (" << remote_files.size() << " 个文件)."
+            << " 个条目) 与远程状态 (" << remote_files.size() << " 个条目)."
             << std::endl;
 
-  // 遍历远程节点拥有的每一个文件
-  for (const auto& remote_file : remote_files) {
-    auto it = local_file_hashes.find(remote_file.path);
+  // 1. 遍历本地文件/目录
+  for (const auto& [path, local_info] : local_files) {
+    auto it = remote_files.find(path);
 
-    // 情况一: 本地完全没有这个文件。请求它。
-    if (it == local_file_hashes.end()) {
-      std::cout << "[SyncManager] -> 需要请求新文件: " << remote_file.path
-                << std::endl;
-      files_to_request.push_back(remote_file.path);
+    if (it == remote_files.end()) {
+      // 情况一: 远程没有此条目。它们需要拉取。
+      std::cout << "[SyncManager] -> 远程需要: " << path << std::endl;
+      actions.push_to_remote.push_back(path);
+    } else {
+      // 情况二: 远程也有此条目。
+      const auto& remote_info = it->second;
+
+      // 【重要 文件夹修复】 如果两者都是目录，则它们相同
+      if (local_info.hash == "DIRECTORY" && remote_info.hash == "DIRECTORY") {
+        // 都是目录，什么都不做
+      }
+      // 检查哈希值是否不同 (现在也包括 文件 vs 目录 的情况)
+      else if (local_info.hash != remote_info.hash) {
+        // 哈希值不同，这是一个冲突。
+        std::cout << "[SyncManager] -> 冲突: " << path
+                  << " (L:" << local_info.hash.substr(0, 7)
+                  << ", R:" << remote_info.hash.substr(0, 7) << ")"
+                  << std::endl;
+        actions.conflicts.push_back(path);
+      }
+      // else: 哈希值相同 (包括都是目录的情况)，什么都不做。
     }
-    // 情况二: 本地有这个文件，但哈希值不同。请求它。
-    // (注意: 更复杂的实现可能还会检查修改时间)
-    else if (it->second != remote_file.hash) {
-      std::cout << "[SyncManager] -> 需要请求更新的文件: " << remote_file.path
-                << std::endl;
-      files_to_request.push_back(remote_file.path);
-    }
-    // 情况三: 本地拥有相同版本的文件。什么都不做。
   }
 
-  if (files_to_request.empty()) {
-    std::cout << "[SyncManager] 所有文件都已是最新。无需请求。" << std::endl;
+  // 2. 遍历远程文件/目录 (只查找本地没有的)
+  for (const auto& [path, remote_info] : remote_files) {
+    if (local_files.find(path) == local_files.end()) {
+      // 情况三: 本地没有此条目。我们需要拉取。
+      std::cout << "[SyncManager] -> 本地需要: " << path << std::endl;
+      actions.request_from_remote.push_back(path);
+    }
   }
 
-  return files_to_request;
+  return actions;
 }
 
 }  // namespace VeritasSync

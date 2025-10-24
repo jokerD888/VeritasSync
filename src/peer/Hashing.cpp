@@ -1,23 +1,32 @@
 #include "VeritasSync/Hashing.h"
 
+#include <openssl/sha.h>
+
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <vector>
 
-#include <openssl/sha.h>
-
 namespace VeritasSync {
 
 std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
-  // 1. 检查文件是否存在且为常规文件
-  if (!std::filesystem::exists(filePath) ||
-      !std::filesystem::is_regular_file(filePath)) {
+  // 1. 检查文件是否存在
+  if (!std::filesystem::exists(filePath)) {
     return "";  // 返回空表示失败
   }
 
+  // 【修复 Bug 1】 如果是目录，返回一个特殊的哈希值
+  if (std::filesystem::is_directory(filePath)) {
+    return "DIRECTORY";
+  }
+
+  if (!std::filesystem::is_regular_file(filePath)) {
+    return "";  // 不是常规文件，也不是目录
+  }
+
   // 2. 以二进制模式打开文件
-  std::ifstream file(filePath, std::ios::binary);
+  // 【修复 Bug 2】 在 Windows 上必须使用 .wstring() 来处理非-ASCII 路径
+  std::ifstream file(filePath.wstring(), std::ios::binary);
   if (!file.is_open()) {
     return "";
   }
@@ -56,4 +65,4 @@ std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
   return ss.str();
 }
 
-}
+}  // namespace VeritasSync
