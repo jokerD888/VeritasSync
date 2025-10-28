@@ -1,51 +1,67 @@
-#include "VeritasSync/SyncManager.h"
+ï»¿#include "VeritasSync/SyncManager.h"
 
 #include <iostream>
 #include <map>
+#include <set>
 
 namespace VeritasSync {
-
-std::vector<std::string> SyncManager::compare_states_and_get_requests(
+SyncActions SyncManager::compare_states_and_get_requests(
     const std::vector<FileInfo>& local_files,
     const std::vector<FileInfo>& remote_files) {
-  std::vector<std::string> files_to_request;
+  SyncActions actions;
 
-  // ÎªÁË¸ßĞ§²éÕÒ£¬½«±¾µØÎÄ¼şÁĞ±í×ª»»ÎªÒ»¸ömap
-  // ¼ü: ÎÄ¼şÂ·¾¶, Öµ: ÎÄ¼ş¹şÏ£Öµ
+  // --- é˜¶æ®µ 1ï¼šæ„å»ºæŸ¥æ‰¾è¡¨ ---
+
+  // æœ¬åœ°æ–‡ä»¶ Map (è·¯å¾„ -> å“ˆå¸Œ)
   std::map<std::string, std::string> local_file_hashes;
   for (const auto& info : local_files) {
     local_file_hashes[info.path] = info.hash;
   }
 
-  std::cout << "[SyncManager] ÕıÔÚ±È½Ï±¾µØ×´Ì¬ (" << local_files.size()
-            << " ¸öÎÄ¼ş) ÓëÔ¶³Ì×´Ì¬ (" << remote_files.size() << " ¸öÎÄ¼ş)."
+  // è¿œç¨‹æ–‡ä»¶ Set (è·¯å¾„)
+  std::set<std::string> remote_file_paths;
+  for (const auto& info : remote_files) {
+    remote_file_paths.insert(info.path);
+  }
+
+  std::cout << "[SyncManager] æ­£åœ¨æ¯”è¾ƒæœ¬åœ°çŠ¶æ€ (" << local_files.size()
+            << " ä¸ªæ–‡ä»¶) ä¸è¿œç¨‹çŠ¶æ€ (" << remote_files.size() << " ä¸ªæ–‡ä»¶)."
             << std::endl;
 
-  // ±éÀúÔ¶³Ì½ÚµãÓµÓĞµÄÃ¿Ò»¸öÎÄ¼ş
+  // --- é˜¶æ®µ 2ï¼šæŸ¥æ‰¾éœ€è¦â€œè¯·æ±‚â€çš„æ–‡ä»¶ (éå†è¿œç¨‹åˆ—è¡¨) ---
   for (const auto& remote_file : remote_files) {
     auto it = local_file_hashes.find(remote_file.path);
 
-    // Çé¿öÒ»: ±¾µØÍêÈ«Ã»ÓĞÕâ¸öÎÄ¼ş¡£ÇëÇóËü¡£
+    // æƒ…å†µä¸€: æœ¬åœ°å®Œå…¨æ²¡æœ‰è¿™ä¸ªæ–‡ä»¶ã€‚è¯·æ±‚å®ƒã€‚
     if (it == local_file_hashes.end()) {
-      std::cout << "[SyncManager] -> ĞèÒªÇëÇóĞÂÎÄ¼ş: " << remote_file.path
+      std::cout << "[SyncManager] -> éœ€è¦è¯·æ±‚æ–°æ–‡ä»¶: " << remote_file.path
                 << std::endl;
-      files_to_request.push_back(remote_file.path);
+      actions.files_to_request.push_back(remote_file.path);
     }
-    // Çé¿ö¶ş: ±¾µØÓĞÕâ¸öÎÄ¼ş£¬µ«¹şÏ£Öµ²»Í¬¡£ÇëÇóËü¡£
-    // (×¢Òâ: ¸ü¸´ÔÓµÄÊµÏÖ¿ÉÄÜ»¹»á¼ì²éĞŞ¸ÄÊ±¼ä)
+    // æƒ…å†µäºŒ: æœ¬åœ°æœ‰è¿™ä¸ªæ–‡ä»¶ï¼Œä½†å“ˆå¸Œå€¼ä¸åŒã€‚è¯·æ±‚å®ƒã€‚
     else if (it->second != remote_file.hash) {
-      std::cout << "[SyncManager] -> ĞèÒªÇëÇó¸üĞÂµÄÎÄ¼ş: " << remote_file.path
+      std::cout << "[SyncManager] -> éœ€è¦è¯·æ±‚æ›´æ–°çš„æ–‡ä»¶: " << remote_file.path
                 << std::endl;
-      files_to_request.push_back(remote_file.path);
+      actions.files_to_request.push_back(remote_file.path);
     }
-    // Çé¿öÈı: ±¾µØÓµÓĞÏàÍ¬°æ±¾µÄÎÄ¼ş¡£Ê²Ã´¶¼²»×ö¡£
+    // æƒ…å†µä¸‰: æœ¬åœ°æ‹¥æœ‰ç›¸åŒç‰ˆæœ¬çš„æ–‡ä»¶ã€‚ä»€ä¹ˆéƒ½ä¸åšã€‚
   }
 
-  if (files_to_request.empty()) {
-    std::cout << "[SyncManager] ËùÓĞÎÄ¼ş¶¼ÒÑÊÇ×îĞÂ¡£ÎŞĞèÇëÇó¡£" << std::endl;
+  // --- é˜¶æ®µ 3ï¼šæŸ¥æ‰¾éœ€è¦â€œåˆ é™¤â€çš„æ–‡ä»¶ (éå†æœ¬åœ°åˆ—è¡¨) ---
+  for (const auto& local_file : local_files) {
+    // å¦‚æœæœ¬åœ°æ–‡ä»¶åœ¨è¿œç¨‹æ–‡ä»¶åˆ—è¡¨ä¸­æ‰¾ä¸åˆ°ï¼Œè¯´æ˜å®ƒåº”è¯¥è¢«åˆ é™¤ã€‚
+    if (remote_file_paths.find(local_file.path) == remote_file_paths.end()) {
+      std::cout << "[SyncManager] -> éœ€è¦åˆ é™¤å¤šä½™æ–‡ä»¶: " << local_file.path
+                << std::endl;
+      actions.files_to_delete.push_back(local_file.path);
+    }
   }
 
-  return files_to_request;
+  if (actions.files_to_request.empty() && actions.files_to_delete.empty()) {
+    std::cout << "[SyncManager] æ‰€æœ‰æ–‡ä»¶éƒ½å·²æ˜¯æœ€æ–°ã€‚æ— éœ€æ“ä½œã€‚" << std::endl;
+  }
+
+  return actions;
 }
 
 }  // namespace VeritasSync

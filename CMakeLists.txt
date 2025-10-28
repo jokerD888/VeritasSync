@@ -2,6 +2,10 @@
 
 project(VeritasSync VERSION 1.0)
 
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -30,6 +34,7 @@ add_executable(veritas_sync
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
+    src/peer/Crypto.cpp
     src/peer/StateManager.cpp
     src/peer/SyncManager.cpp
 )

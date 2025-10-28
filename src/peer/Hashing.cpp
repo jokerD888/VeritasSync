@@ -1,35 +1,51 @@
-#include "VeritasSync/Hashing.h"
+ï»¿#include "VeritasSync/Hashing.h"
+
+#include <openssl/sha.h>
 
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <vector>
-
-#include <openssl/sha.h>
+#include <iostream>
+#include <thread>
 
 namespace VeritasSync {
 
 std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
-  // 1. ¼ì²éÎÄ¼şÊÇ·ñ´æÔÚÇÒÎª³£¹æÎÄ¼ş
-  if (!std::filesystem::exists(filePath) ||
-      !std::filesystem::is_regular_file(filePath)) {
-    return "";  // ·µ»Ø¿Õ±íÊ¾Ê§°Ü
+  // --- ä¿®æ”¹ï¼šä½¿ç”¨ non-throwing (ec) é‡è½½ ---
+  std::error_code ec;
+
+  // 1. æ£€æŸ¥æ–‡ä»¶æ˜¯å¦å­˜åœ¨ä¸”ä¸ºå¸¸è§„æ–‡ä»¶
+  if (!std::filesystem::exists(filePath, ec) || ec ||
+      !std::filesystem::is_regular_file(filePath, ec) || ec) {
+    return "";  // è¿”å›ç©ºè¡¨ç¤ºå¤±è´¥ (åŒ…æ‹¬ç›®å½•ã€ä¸å­˜åœ¨æˆ–å‡ºé”™)
   }
 
-  // 2. ÒÔ¶ş½øÖÆÄ£Ê½´ò¿ªÎÄ¼ş
+  // 2. ä»¥äºŒè¿›åˆ¶æ¨¡å¼æ‰“å¼€æ–‡ä»¶
   std::ifstream file(filePath, std::ios::binary);
   if (!file.is_open()) {
-    return "";
+    std::cerr << "[Hashing] æ— æ³•ç«‹å³æ‰“å¼€æ–‡ä»¶ (å¯èƒ½è¢«é”å®š): "
+              << filePath.string() << ". 250ms åé‡è¯•..." << std::endl;
+    // ç­‰å¾… 250 æ¯«ç§’
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    // å†æ¬¡å°è¯•æ‰“å¼€
+    file.open(filePath, std::ios::binary);
+
+    if (!file.is_open()) {
+      std::cerr << "[Hashing] æ— æ³•æ‰“å¼€æ–‡ä»¶ (é‡è¯•å): " << filePath.string()
+                << std::endl;
+      return "";  // æ”¾å¼ƒ
+    }
   }
 
-  // 3. ³õÊ¼»¯SHA256ÉÏÏÂÎÄ
+  // 3. åˆå§‹åŒ–SHA256ä¸Šä¸‹æ–‡
   SHA256_CTX sha256Context;
   if (!SHA256_Init(&sha256Context)) {
     return "";
   }
 
-  // 4. ·Ö¿é¶ÁÈ¡ÎÄ¼ş²¢¸üĞÂ¹şÏ£Öµ
-  std::vector<char> buffer(4096);  // 4KBµÄ»º³åÇø
+  // 4. åˆ†å—è¯»å–æ–‡ä»¶å¹¶æ›´æ–°å“ˆå¸Œå€¼
+  std::vector<char> buffer(4096);  // 4KBçš„ç¼“å†²åŒº
   while (file.good()) {
     file.read(buffer.data(), buffer.size());
     std::streamsize bytesRead = file.gcount();
@@ -40,13 +56,13 @@ std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
     }
   }
 
-  // 5. ¼ÆËã×îÖÕµÄ¹şÏ£ÕªÒª
+  // 5. è®¡ç®—æœ€ç»ˆçš„å“ˆå¸Œæ‘˜è¦
   unsigned char hash[SHA256_DIGEST_LENGTH];
   if (!SHA256_Final(hash, &sha256Context)) {
     return "";
   }
 
-  // 6. ½«¶ş½øÖÆ¹şÏ£×ª»»ÎªÊ®Áù½øÖÆ×Ö·û´®
+  // 6. å°†äºŒè¿›åˆ¶å“ˆå¸Œè½¬æ¢ä¸ºåå…­è¿›åˆ¶å­—ç¬¦ä¸²
   std::stringstream ss;
   for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
     ss << std::hex << std::setw(2) << std::setfill('0')
@@ -56,4 +72,4 @@ std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
   return ss.str();
 }
 
-}
+}  // namespace VeritasSync

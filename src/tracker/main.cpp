@@ -1,4 +1,4 @@
-#include <boost/asio.hpp>
+ï»¿#include <boost/asio.hpp>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -9,10 +9,10 @@
 
 using boost::asio::ip::tcp;
 
-// SessionÀà¸ºÔğ´¦Àíµ¥¸ö¿Í»§¶ËµÄÍêÕûÉúÃüÖÜÆÚ
+// Sessionç±»è´Ÿè´£å¤„ç†å•ä¸ªå®¢æˆ·ç«¯çš„å®Œæ•´ç”Ÿå‘½å‘¨æœŸ
 class Session : public std::enable_shared_from_this<Session> {
  public:
-  // ¹¹Ôìº¯ÊıÏÖÔÚĞèÒª½ÓÊÕ¶Ô·şÎñÆ÷¹²ÏíÊı¾İºÍ»¥³âËøµÄÒıÓÃ
+  // æ„é€ å‡½æ•°ç°åœ¨éœ€è¦æ¥æ”¶å¯¹æœåŠ¡å™¨å…±äº«æ•°æ®å’Œäº’æ–¥é”çš„å¼•ç”¨
   Session(tcp::socket socket,
           std::map<std::string, std::set<std::string>>& peer_groups,
           std::mutex& mutex)
@@ -21,7 +21,7 @@ class Session : public std::enable_shared_from_this<Session> {
         m_mutex(mutex) {}
 
   void start() {
-    // Òì²½¶ÁÈ¡Êı¾İ£¬Ö±µ½Óöµ½»»ĞĞ·û'\n'
+    // å¼‚æ­¥è¯»å–æ•°æ®ï¼Œç›´åˆ°é‡åˆ°æ¢è¡Œç¬¦'\n'
     boost::asio::async_read_until(
         m_socket, m_buffer, '\n',
         [self = shared_from_this()](const boost::system::error_code& ec,
@@ -48,25 +48,25 @@ class Session : public std::enable_shared_from_this<Session> {
           m_socket.remote_endpoint().address().to_string();
       std::string new_peer_id = remote_address + ":" + std::to_string(port);
 
-      // Ê¹ÓÃ lock_guard À´È·±£»¥³âËøÔÚÀë¿ª×÷ÓÃÓòÊ±×Ô¶¯ÊÍ·Å
+      // ä½¿ç”¨ lock_guard æ¥ç¡®ä¿äº’æ–¥é”åœ¨ç¦»å¼€ä½œç”¨åŸŸæ—¶è‡ªåŠ¨é‡Šæ”¾
       std::lock_guard<std::mutex> lock(m_mutex);
 
       auto& peer_set = m_peer_groups[sync_key];
 
-      // 1. ×¼±¸ÏìÓ¦Êı¾İ£¬²¢½«Æä´æ´¢ÔÚ³ÉÔ±±äÁ¿ m_response_data ÖĞ
-      // ÕâÑù¿ÉÒÔ±£Ö¤ËüµÄÉúÃüÖÜÆÚ×ã¹»³¤
+      // 1. å‡†å¤‡å“åº”æ•°æ®ï¼Œå¹¶å°†å…¶å­˜å‚¨åœ¨æˆå‘˜å˜é‡ m_response_data ä¸­
+      // è¿™æ ·å¯ä»¥ä¿è¯å®ƒçš„ç”Ÿå‘½å‘¨æœŸè¶³å¤Ÿé•¿
       std::ostringstream oss;
       for (const auto& peer : peer_set) {
         oss << peer << "\n";
       }
       m_response_data = oss.str();
 
-      // 2. ½«ĞÂ½Úµã¼ÓÈëÁĞ±í
+      // 2. å°†æ–°èŠ‚ç‚¹åŠ å…¥åˆ—è¡¨
       peer_set.insert(new_peer_id);
       std::cout << "[Tracker] Registered " << new_peer_id << " to group '"
                 << sync_key << "'" << std::endl;
 
-      // 3. Ê¹ÓÃ³ÉÔ±±äÁ¿ m_response_data ½øĞĞÒì²½Ğ´Èë
+      // 3. ä½¿ç”¨æˆå‘˜å˜é‡ m_response_data è¿›è¡Œå¼‚æ­¥å†™å…¥
       boost::asio::async_write(
           m_socket, boost::asio::buffer(m_response_data),
           [self = shared_from_this()](const boost::system::error_code& ec,
@@ -81,14 +81,14 @@ class Session : public std::enable_shared_from_this<Session> {
 
   tcp::socket m_socket;
   boost::asio::streambuf m_buffer;
-  std::string m_response_data;  // ÓÃÓÚ°²È«µØ´æ´¢ÏìÓ¦Êı¾İµÄ³ÉÔ±±äÁ¿
+  std::string m_response_data;  // ç”¨äºå®‰å…¨åœ°å­˜å‚¨å“åº”æ•°æ®çš„æˆå‘˜å˜é‡
 
-  // Í¨¹ıÒıÓÃ·ÃÎÊ·şÎñÆ÷³ÖÓĞµÄ¹²ÏíÊı¾İ
+  // é€šè¿‡å¼•ç”¨è®¿é—®æœåŠ¡å™¨æŒæœ‰çš„å…±äº«æ•°æ®
   std::map<std::string, std::set<std::string>>& m_peer_groups;
   std::mutex& m_mutex;
 };
 
-// TrackerServerÀà£¬¸ºÔğ½ÓÊÜÁ¬½ÓºÍ¹ÜÀí¹²Ïí×´Ì¬
+// TrackerServerç±»ï¼Œè´Ÿè´£æ¥å—è¿æ¥å’Œç®¡ç†å…±äº«çŠ¶æ€
 class TrackerServer {
  public:
   TrackerServer(boost::asio::io_context& io_context, short port)
@@ -101,7 +101,7 @@ class TrackerServer {
     m_acceptor.async_accept(
         [this](boost::system::error_code ec, tcp::socket socket) {
           if (!ec) {
-            // ½«¹²ÏíÊı¾İºÍ»¥³âËøµÄÒıÓÃÖ±½Ó´«µİ¸øSession
+            // å°†å…±äº«æ•°æ®å’Œäº’æ–¥é”çš„å¼•ç”¨ç›´æ¥ä¼ é€’ç»™Session
             std::make_shared<Session>(std::move(socket), m_peer_groups, m_mutex)
                 ->start();
           }

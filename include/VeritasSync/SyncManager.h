@@ -1,20 +1,21 @@
-#pragma once
+ï»¿#pragma once
 
 #include <string>
 #include <vector>
 
-#include "VeritasSync/Protocol.h"  // ĞèÒªÒıÈëÒÔÊ¹ÓÃ FileInfo ½á¹¹Ìå
+#include "VeritasSync/Protocol.h"  // éœ€è¦å¼•å…¥ä»¥ä½¿ç”¨ FileInfo ç»“æ„ä½“
 
 namespace VeritasSync {
+struct SyncActions {
+  std::vector<std::string> files_to_request;  // éœ€è¦ä¸‹è½½/æ›´æ–°çš„æ–‡ä»¶
+  std::vector<std::string> files_to_delete;   // æœ¬åœ°å¤šä½™ï¼Œéœ€è¦åˆ é™¤çš„æ–‡ä»¶
+};
 
 class SyncManager {
  public:
-  // ±È½Ï±¾µØºÍÔ¶³ÌµÄ×´Ì¬£¬²¢È·¶¨±¾µØ¿Í»§¶ËĞèÒªÏòÔ¶³Ì½ÚµãÇëÇóÄÄĞ©ÎÄ¼ş¡£
-  //
-  // @param local_files ´ú±í±¾µØÄ¿Â¼×´Ì¬µÄ FileInfo ÏòÁ¿¡£
-  // @param remote_files ´ú±íÔ¶³ÌÄ¿Â¼×´Ì¬µÄ FileInfo ÏòÁ¿¡£
-  // @return Ò»¸ö×Ö·û´®ÏòÁ¿£¬Ã¿¸ö×Ö·û´®¶¼ÊÇÒ»¸öĞèÒªÇëÇóµÄÎÄ¼şµÄÏà¶ÔÂ·¾¶¡£
-  static std::vector<std::string> compare_states_and_get_requests(
+  // æ¯”è¾ƒæœ¬åœ°å’Œè¿œç¨‹çš„çŠ¶æ€ï¼Œå¹¶ç¡®å®šéœ€è¦æ‰§è¡Œçš„åŒæ­¥æ“ä½œã€‚
+  // @return ä¸€ä¸ª SyncActions ç»“æ„ä½“ï¼ŒåŒ…å«è¦è¯·æ±‚çš„å’Œè¦åˆ é™¤çš„æ–‡ä»¶åˆ—è¡¨ã€‚
+  static SyncActions compare_states_and_get_requests(
       const std::vector<FileInfo>& local_files,
       const std::vector<FileInfo>& remote_files);
 };

@@ -1,22 +1,22 @@
-#include "VeritasSync/StateManager.h"
+ï»¿#include "VeritasSync/StateManager.h"
 #include "VeritasSync/Hashing.h"
-#include "VeritasSync/P2PManager.h" 
-#include <iostream>
-#include <efsw/efsw.hpp>
-
+#include "VeritasSync/P2PManager.h"
 
 #include <boost/asio.hpp>
+#include <efsw/efsw.hpp>
+#include <iostream>
+
 
 namespace VeritasSync {
 
-
-
-// Õâ¸öÀà¼Ì³Ğ×Ô efsw::FileWatchListener£¬ÓÃÓÚ½ÓÊÕÎÄ¼ş±ä»¯Í¨Öª
+// è¿™ä¸ªç±»ç»§æ‰¿è‡ª efsw::FileWatchListenerï¼Œç”¨äºæ¥æ”¶æ–‡ä»¶å˜åŒ–é€šçŸ¥
 class UpdateListener : public efsw::FileWatchListener {
  public:
-  UpdateListener(P2PManager& p2p_manager)
-      : m_p2p_manager(p2p_manager),
-        m_debounce_timer(p2p_manager.get_io_context()) {}
+  // --- ä¿®æ”¹ï¼šæ„é€ å‡½æ•°ç°åœ¨æ¥æ”¶ StateManager* ---
+  UpdateListener(StateManager* owner)
+      : m_owner(owner),
+        m_debounce_timer(owner->get_io_context()) {
+  }  // ä» owner è·å– io_context
 
   void handleFileAction(efsw::WatchID, const std::string& dir,
                         const std::string& filename, efsw::Action action,
@@ -25,130 +25,226 @@ class UpdateListener : public efsw::FileWatchListener {
       return;
     }
 
-    // ÈÕÖ¾´òÓ¡Âß¼­²»±ä
-    std::cout << "[Watcher] ¼ì²âµ½±ä»¯: " << dir + filename << std::endl;
+    // 1. é€šçŸ¥ StateManager å°†å˜åŒ–æš‚å­˜
+    std::filesystem::path dir_path(dir);
+    std::filesystem::path file_path = dir_path / filename;
+    m_owner->notify_change_detected(file_path.generic_string());
 
+    // 2. é‡ç½®é˜²æŠ–è®¡æ—¶å™¨
     m_debounce_timer.cancel();
     m_debounce_timer.expires_after(std::chrono::milliseconds(200));
 
-    // Ö±½Ó²¶»ñ [this]£¬ÒòÎª StateManager ±£Ö¤ÁËÎÒÃÇµÄÉúÃüÖÜÆÚ
+    // 3. è®¡æ—¶å™¨è§¦å‘åï¼Œè°ƒç”¨ StateManager çš„å¤„ç†å‡½æ•°
     m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
       if (!ec) {
-        std::cout << "[Watcher] ÎÄ¼şÏµÍ³ÎÈ¶¨£¬´¥·¢×´Ì¬¹ã²¥¡£" << std::endl;
-        boost::asio::post(m_p2p_manager.get_io_context(), [this]() {
-          m_p2p_manager.broadcast_current_state();
-        });
+        // ä½¿ç”¨ post ç¡®ä¿åœ¨ io_context çº¿ç¨‹ä¸Šæ‰§è¡Œ
+        boost::asio::post(m_owner->get_io_context(),
+                          [this]() { m_owner->process_debounced_changes(); });
       }
     });
   }
 
  private:
-  P2PManager& m_p2p_manager;
+  StateManager* m_owner;  // --- ä¿®æ”¹ï¼šæŒæœ‰ StateManager æŒ‡é’ˆ ---
   boost::asio::steady_timer m_debounce_timer;
 };
 
-  StateManager::StateManager(const std::string& root_path,
-                            P2PManager& p2p_manager)
-    : m_root_path(root_path) {
+StateManager::StateManager(const std::string& root_path,
+                           P2PManager& p2p_manager, bool enable_watcher)
+    : m_root_path(root_path), m_p2p_manager(&p2p_manager) {
   if (!std::filesystem::exists(m_root_path)) {
-    std::cout << "[StateManager] ¸ùÄ¿Â¼ " << m_root_path
-              << " ²»´æÔÚ£¬ÕıÔÚ´´½¨¡£" << std::endl;
+    std::cout << "[StateManager] æ ¹ç›®å½• " << m_root_path
+              << " ä¸å­˜åœ¨ï¼Œæ­£åœ¨åˆ›å»ºã€‚" << std::endl;
     std::filesystem::create_directory(m_root_path);
   }
 
-  m_file_watcher = std::make_unique<efsw::FileWatcher>();
+if (enable_watcher) {
+    m_file_watcher = std::make_unique<efsw::FileWatcher>();
+    // --- ä¿®æ”¹ï¼šå°† 'this' ä¼ é€’ç»™ UpdateListener ---
+    m_listener = std::make_unique<UpdateListener>(this);
+    m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
+    m_file_watcher->watch();
+    std::cout << "[StateManager] å·²å¯åŠ¨å¯¹ç›®å½• '" << m_root_path.string()
+              << "' çš„å®æ—¶ç›‘æ§ (Source æ¨¡å¼)ã€‚" << std::endl;
+  } else {
+    std::cout << "[StateManager] ä»¥ 'Destination' æ¨¡å¼å¯åŠ¨ï¼Œæ–‡ä»¶ç›‘æ§å·²ç¦ç”¨ã€‚"
+              << std::endl;
+  }
+}
 
-  // Ö±½Ó´´½¨ unique_ptr ÊµÀı
-  m_listener = std::make_unique<UpdateListener>(p2p_manager);
+StateManager::~StateManager() {
+  if (m_file_watcher) {
+    std::cout << "[StateManager] æ­£åœ¨åœæ­¢æ–‡ä»¶ç›‘æ§..." << std::endl;
+  }
+  // unique_ptr ä¼šè‡ªåŠ¨å¤„ç†é”€æ¯ï¼Œæ— éœ€ä»£ç 
+}
 
-  m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
-  m_file_watcher->watch();
-  std::cout << "[StateManager] ÒÑÆô¶¯¶ÔÄ¿Â¼ '" << m_root_path.string()
-            << "' µÄÊµÊ±¼à¿Ø¡£" << std::endl;
+boost::asio::io_context& StateManager::get_io_context() {
+  return m_p2p_manager->get_io_context();
+}
+
+// --- æ–°å¢ï¼šå®ç° notify_change_detected (ç”± UpdateListener è°ƒç”¨) ---
+void StateManager::notify_change_detected(const std::string& full_path) {
+  std::lock_guard<std::mutex> lock(m_changes_mutex);
+  m_pending_changes.insert(full_path);
+  std::cout << "[Watcher] æ£€æµ‹åˆ°å˜åŒ–: " << full_path << std::endl;
+}
+
+// --- æ–°å¢ï¼šå®ç° process_debounced_changes (ç”± UpdateListener å®šæ—¶å™¨è°ƒç”¨) ---
+void StateManager::process_debounced_changes() {
+  std::cout << "[Watcher] æ–‡ä»¶ç³»ç»Ÿç¨³å®šï¼Œæ­£åœ¨å¤„ç†å¢é‡å˜åŒ–..." << std::endl;
+
+  std::set<std::string> changes_to_process;
+  {
+    std::lock_guard<std::mutex> lock(m_changes_mutex);
+    // äº¤æ¢æ•°æ®ï¼Œå¿«é€Ÿé‡Šæ”¾é”
+    m_pending_changes.swap(changes_to_process);
   }
 
-  StateManager::~StateManager() {
-  std::cout << "[StateManager] ÕıÔÚÍ£Ö¹ÎÄ¼ş¼à¿Ø..." << std::endl;
-  // unique_ptr »á×Ô¶¯´¦ÀíÏú»Ù£¬ÎŞĞè´úÂë
-  }
+  std::lock_guard<std::mutex> map_lock(m_file_map_mutex);  // é”å®š m_file_map
 
-  void StateManager::scan_directory() {
-    std::cout << "[StateManager] Scanning directory: " << m_root_path << std::endl;
-    m_file_map.clear();
+  for (const auto& full_path_str : changes_to_process) {
+    std::filesystem::path full_path(full_path_str);
+    std::filesystem::path relative_path;
 
-    // --- ¹Ø¼üĞŞ¸Ä ---
-    // Îªµü´úÆ÷¹¹Ôìº¯ÊıÌá¹©Ò»¸öerror_code¶ÔÏó£¬ÒÔ±ÜÃâÔÚÂ·¾¶³ö´íÊ±Å×³öÒì³£
+    // efsw å¯èƒ½ä¼šåœ¨æ ¹ç›®å½•åˆ›å»º/åˆ é™¤æ—¶ç»™å‡ºæ ¹ç›®å½•æœ¬èº«çš„è·¯å¾„
+    if (full_path == m_root_path) continue;
+
     std::error_code ec;
-    auto iterator = std::filesystem::recursive_directory_iterator(m_root_path, ec);
+    relative_path = std::filesystem::relative(full_path, m_root_path, ec);
+    if (ec) continue;
 
-    if (ec) {
-      std::cerr << "[StateManager] Error creating directory iterator for path "
-        << m_root_path << ": " << ec.message() << std::endl;
-      return; // Èç¹û´´½¨µü´úÆ÷Ê§°Ü£¬ÔòÖ±½Ó·µ»Ø
-    }
+    // å°† std::filesystem::path å®‰å…¨åœ°è½¬ä¸º UTF-8 å­—ç¬¦ä¸²
+    const std::u8string u8_path_str = relative_path.u8string();
+    std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                             u8_path_str.length());
 
-    for (const auto& entry : iterator) {
-      // ÔÚÑ­»·ÄÚ²¿Ò²½øĞĞ¼ì²é£¬È·±£entry±¾ÉíÊÇÓĞĞ§µÄ
-      if (!entry.is_regular_file(ec) || ec) {
-        // Èç¹û²»ÊÇ³£¹æÎÄ¼ş»ò¼ì²éÊ±³ö´í£¬Ìø¹ıÕâ¸öÌõÄ¿
+    // --- åˆ¤æ–­æ˜¯â€œæ›´æ–°â€è¿˜æ˜¯â€œåˆ é™¤â€ ---
+    if (std::filesystem::exists(full_path, ec) && !ec) {
+      // æ–‡ä»¶å­˜åœ¨ (Add æˆ– Modified)
+      if (!std::filesystem::is_regular_file(full_path, ec) || ec) {
+        // å¦‚æœæ˜¯ç›®å½•æˆ–å…¶ä»–ï¼Œåˆ™è·³è¿‡
         continue;
       }
 
       FileInfo info;
+      info.path = rel_path_str;
 
-        // 1. »ñÈ¡Ïà¶ÔÂ·¾¶
-      std::filesystem::path relative_path =
-          std::filesystem::relative(entry.path(), m_root_path);
-
-      // 2. Ê¹ÓÃ u8string() ·½·¨½«Â·¾¶°²È«µØ×ª»»ÎªUTF-8±àÂëµÄ×Ö·û´®
-      //    Õâ¿ÉÒÔÕıÈ·´¦Àí°üÀ¨ÖĞÎÄÔÚÄÚµÄËùÓĞUnicode×Ö·û¡£
-      const std::u8string u8_path_str = relative_path.u8string();
-      info.path =
-          std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
-                      u8_path_str.length());
-
-      // 2. »ñÈ¡×îºóĞŞ¸ÄÊ±¼ä (Õâ²¿·ÖÂß¼­²»±ä)
-      auto ftime = std::filesystem::last_write_time(entry, ec);
+      auto ftime = std::filesystem::last_write_time(full_path, ec);
       if (ec) continue;
       auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
       info.modified_time = sctp.time_since_epoch().count();
 
-      // 3. ¼ÆËã¹şÏ£Öµ (Õâ²¿·ÖÂß¼­²»±ä)
-      info.hash = Hashing::CalculateSHA256(entry.path());
+      info.hash = Hashing::CalculateSHA256(full_path);
       if (info.hash.empty()) continue;
 
-      // 4. ´æÈëmap
+      // æ›´æ–° m_file_map å¹¶å¹¿æ’­
       m_file_map[info.path] = info;
+      std::cout << "[StateManager] å¹¿æ’­æ›´æ–°: " << info.path << std::endl;
+      m_p2p_manager->broadcast_file_update(info);
+
+    } else {
+      // æ–‡ä»¶ä¸å­˜åœ¨ (Delete)
+      if (m_file_map.erase(rel_path_str) > 0) {
+        // ä»…å½“æ–‡ä»¶ä¹‹å‰åœ¨ map ä¸­æ—¶æ‰å¹¿æ’­
+        std::cout << "[StateManager] å¹¿æ’­åˆ é™¤: " << rel_path_str << std::endl;
+        m_p2p_manager->broadcast_file_delete(rel_path_str);
+      }
     }
-    std::cout << "[StateManager] Scan complete. Found " << m_file_map.size() << " files." << std::endl;
+  }
+}
+
+// --- æ–°å¢ï¼šå®ç° remove_path_from_map (ç”± P2PManager è°ƒç”¨) ---
+void StateManager::remove_path_from_map(const std::string& relative_path) {
+  std::lock_guard<std::mutex> lock(m_file_map_mutex);
+  m_file_map.erase(relative_path);
+}
+
+void StateManager::scan_directory() {
+  std::cout << "[StateManager] Scanning directory: " << m_root_path
+            << std::endl;
+  std::lock_guard<std::mutex> lock(m_file_map_mutex);  // é”å®š
+  m_file_map.clear();
+
+  // --- å…³é”®ä¿®æ”¹ ---
+  // ä¸ºè¿­ä»£å™¨æ„é€ å‡½æ•°æä¾›ä¸€ä¸ªerror_codeå¯¹è±¡ï¼Œä»¥é¿å…åœ¨è·¯å¾„å‡ºé”™æ—¶æŠ›å‡ºå¼‚å¸¸
+  std::error_code ec;
+  auto iterator =
+      std::filesystem::recursive_directory_iterator(m_root_path, ec);
+
+  if (ec) {
+    std::cerr << "[StateManager] Error creating directory iterator for path "
+              << m_root_path << ": " << ec.message() << std::endl;
+    return;  // å¦‚æœåˆ›å»ºè¿­ä»£å™¨å¤±è´¥ï¼Œåˆ™ç›´æ¥è¿”å›
   }
 
-  std::string StateManager::get_state_as_json_string() {
-    // 1. ½«mapÖĞµÄFileInfo¶ÔÏó×ª»»³ÉÒ»¸övector
-    std::vector<FileInfo> files;
+  for (const auto& entry : iterator) {
+    // åœ¨å¾ªç¯å†…éƒ¨ä¹Ÿè¿›è¡Œæ£€æŸ¥ï¼Œç¡®ä¿entryæœ¬èº«æ˜¯æœ‰æ•ˆçš„
+    if (!entry.is_regular_file(ec) || ec) {
+      // å¦‚æœä¸æ˜¯å¸¸è§„æ–‡ä»¶æˆ–æ£€æŸ¥æ—¶å‡ºé”™ï¼Œè·³è¿‡è¿™ä¸ªæ¡ç›®
+      continue;
+    }
+
+    FileInfo info;
+
+    // 1. è·å–ç›¸å¯¹è·¯å¾„
+    std::filesystem::path relative_path =
+        std::filesystem::relative(entry.path(), m_root_path);
+
+    // 2. ä½¿ç”¨ u8string() æ–¹æ³•å°†è·¯å¾„å®‰å…¨åœ°è½¬æ¢ä¸ºUTF-8ç¼–ç çš„å­—ç¬¦ä¸²
+    //    è¿™å¯ä»¥æ­£ç¡®å¤„ç†åŒ…æ‹¬ä¸­æ–‡åœ¨å†…çš„æ‰€æœ‰Unicodeå­—ç¬¦ã€‚
+    const std::u8string u8_path_str = relative_path.u8string();
+    info.path = std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                            u8_path_str.length());
+
+    // 2. è·å–æœ€åä¿®æ”¹æ—¶é—´ (è¿™éƒ¨åˆ†é€»è¾‘ä¸å˜)
+    auto ftime = std::filesystem::last_write_time(entry, ec);
+    if (ec) continue;
+    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+    info.modified_time = sctp.time_since_epoch().count();
+
+    // 3. è®¡ç®—å“ˆå¸Œå€¼ (è¿™éƒ¨åˆ†é€»è¾‘ä¸å˜)
+    info.hash = Hashing::CalculateSHA256(entry.path());
+    if (info.hash.empty()) continue;
+
+    // 4. å­˜å…¥map
+    m_file_map[info.path] = info;
+  }
+  std::cout << "[StateManager] Scan complete. Found " << m_file_map.size()
+            << " files." << std::endl;
+}
+
+std::string StateManager::get_state_as_json_string() {
+  // 1. å°†mapä¸­çš„FileInfoå¯¹è±¡è½¬æ¢æˆä¸€ä¸ªvector
+  std::vector<FileInfo> files;
+  {
+    std::lock_guard<std::mutex> lock(m_file_map_mutex);  // é”å®š
     for (const auto& pair : m_file_map) {
       files.push_back(pair.second);
     }
-
-    // 2. Ê¹ÓÃnlohmann/json¿â¹¹½¨JSON¶ÔÏó
-    nlohmann::json payload;
-    payload["files"] = files; // ÕâÀïÀûÓÃÁËÎÒÃÇÖ®Ç°¶¨ÒåµÄ to_json º¯Êı
-
-    nlohmann::json message;
-    message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
-    message[Protocol::MSG_PAYLOAD] = payload;
-
-    // 3. ½«JSON¶ÔÏóĞòÁĞ»¯Îª×Ö·û´®
-    return message.dump(2); // dump(2) ±íÊ¾Ê¹ÓÃ2¸ö¿Õ¸ñ½øĞĞ¸ñÊ½»¯£¬±ãÓÚÔÄ¶Á
   }
 
-  void StateManager::print_current_state() const {
-    std::cout << "\n--- Current Directory State ---" << std::endl;
-    for (const auto& pair : m_file_map) {
-      std::cout << "  - Path: " << pair.second.path << std::endl;
-      std::cout << "    MTime: " << pair.second.modified_time << std::endl;
-      std::cout << "    Hash: " << pair.second.hash.substr(0, 12) << "..." << std::endl;
-    }
-    std::cout << "-----------------------------" << std::endl;
-  }
+  // 2. ä½¿ç”¨nlohmann/jsonåº“æ„å»ºJSONå¯¹è±¡
+  nlohmann::json payload;
+  payload["files"] = files;  // è¿™é‡Œåˆ©ç”¨äº†æˆ‘ä»¬ä¹‹å‰å®šä¹‰çš„ to_json å‡½æ•°
+
+  nlohmann::json message;
+  message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
+  message[Protocol::MSG_PAYLOAD] = payload;
+
+  // 3. å°†JSONå¯¹è±¡åºåˆ—åŒ–ä¸ºå­—ç¬¦ä¸²
+  return message.dump(2);  // dump(2) è¡¨ç¤ºä½¿ç”¨2ä¸ªç©ºæ ¼è¿›è¡Œæ ¼å¼åŒ–ï¼Œä¾¿äºé˜…è¯»
 }
+
+void StateManager::print_current_state() const {
+  std::lock_guard<std::mutex> lock(m_file_map_mutex);
+  std::cout << "\n--- Current Directory State ---" << std::endl;
+  for (const auto& pair : m_file_map) {
+    std::cout << "  - Path: " << pair.second.path << std::endl;
+    std::cout << "    MTime: " << pair.second.modified_time << std::endl;
+    std::cout << "    Hash: " << pair.second.hash.substr(0, 12) << "..."
+              << std::endl;
+  }
+  std::cout << "-----------------------------" << std::endl;
+}
+}  // namespace VeritasSync

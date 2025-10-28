@@ -1,50 +1,68 @@
-#pragma once
+ï»¿#pragma once
 
-#include "VeritasSync/Protocol.h" // ÎÒÃÇĞèÒªÓÃµ½FileInfo½á¹¹Ìå
+#include <boost/asio/io_context.hpp>  // éœ€è¦åŒ…å«
 #include <filesystem>
-#include <string>
-#include <map>
 #include <functional>
-#include <memory> 
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
 
+#include "VeritasSync/Protocol.h"
 
 namespace efsw {
 class FileWatcher;
 class FileWatchListener;
-}
-
-
+}  // namespace efsw
 
 namespace VeritasSync {
 class P2PManager;
 
-  class StateManager {
-  public:
-    // ¹¹Ôìº¯Êı½ÓÊÕÒ»¸ö P2PManager µÄÒıÓÃ
-    StateManager(const std::string& root_path, P2PManager& p2p_manager);
-    ~StateManager();
+class StateManager {
+ public:
+  // æ„é€ å‡½æ•°æ¥æ”¶ä¸€ä¸ª P2PManager çš„å¼•ç”¨
+  StateManager(const std::string& root_path, P2PManager& p2p_manager,
+               bool enable_watcher);
+  ~StateManager();
 
-    // É¨ÃèÍ¬²½Ä¿Â¼£¬Éú³Éµ±Ç°ËùÓĞÎÄ¼şµÄ×´Ì¬¿ìÕÕ
-    void scan_directory();
+  // æ‰«æåŒæ­¥ç›®å½•ï¼Œç”Ÿæˆå½“å‰æ‰€æœ‰æ–‡ä»¶çš„çŠ¶æ€å¿«ç…§
+  void scan_directory();
 
-    // ½«µ±Ç°µÄÎÄ¼ş×´Ì¬´ò°ü³ÉÒ»¸ö share_state ÀàĞÍµÄJSON×Ö·û´®
-    std::string get_state_as_json_string();
+  // å°†å½“å‰çš„æ–‡ä»¶çŠ¶æ€æ‰“åŒ…æˆä¸€ä¸ª share_state ç±»å‹çš„JSONå­—ç¬¦ä¸²
+  std::string get_state_as_json_string();
 
-    // (ÓÃÓÚµ÷ÊÔ) ´òÓ¡µ±Ç°ËùÓĞÎÄ¼şµÄ×´Ì¬µ½¿ØÖÆÌ¨
-    void print_current_state() const;
+  // (ç”¨äºè°ƒè¯•) æ‰“å°å½“å‰æ‰€æœ‰æ–‡ä»¶çš„çŠ¶æ€åˆ°æ§åˆ¶å°
+  void print_current_state() const;
 
-    const std::filesystem::path& get_root_path() const { return m_root_path; }
+  const std::filesystem::path& get_root_path() const { return m_root_path; }
 
-  private:
-    // Í¬²½Ä¿Â¼µÄ¸ùÂ·¾¶
-    std::filesystem::path m_root_path;
+  // --- æ–°å¢ï¼šP2PManager éœ€è¦çš„è¾…åŠ©å‡½æ•° ---
+  boost::asio::io_context& get_io_context();
+  // (ä¾› P2PManager::handle_file_delete è°ƒç”¨)
+  void remove_path_from_map(const std::string& relative_path);
 
-    // ÎÄ¼ş×´Ì¬µÄºËĞÄ´æ´¢½á¹¹
-    // key: ÎÄ¼şµÄÏà¶ÔÂ·¾¶ (ÀıÈç "docs/report.txt")
-    // value: ÎÄ¼şµÄÏêÏ¸ĞÅÏ¢ (FileInfo)
-    std::map<std::string, FileInfo> m_file_map;
-    std::unique_ptr<efsw::FileWatcher> m_file_watcher;
-    std::unique_ptr<efsw::FileWatchListener> m_listener;
-  };
+ private:
+  // --- æ–°å¢ï¼šä¾› UpdateListener è°ƒç”¨çš„å†…éƒ¨æ–¹æ³• ---
+  friend class UpdateListener;
+  void notify_change_detected(const std::string& full_path);
+  void process_debounced_changes();
 
-} // namespace VeritasSync
+  // --- æˆå‘˜å˜é‡ ---
+  std::filesystem::path m_root_path;
+  P2PManager* m_p2p_manager;  // ä¿å­˜ P2PManager çš„æŒ‡é’ˆ
+
+  // æ–‡ä»¶çŠ¶æ€çš„æ ¸å¿ƒå­˜å‚¨ç»“æ„
+  std::map<std::string, FileInfo> m_file_map;
+  mutable std::mutex m_file_map_mutex;  // ä¿æŠ¤ m_file_map
+
+  // æ–‡ä»¶ç›‘æ§å™¨
+  std::unique_ptr<efsw::FileWatcher> m_file_watcher;
+  std::unique_ptr<efsw::FileWatchListener> m_listener;
+
+  // å¾…å¤„ç†å˜æ›´çš„é›†åˆ
+  std::set<std::string> m_pending_changes;
+  std::mutex m_changes_mutex;
+};
+
+}  // namespace VeritasSync

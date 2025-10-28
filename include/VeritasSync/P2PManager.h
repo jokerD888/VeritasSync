@@ -1,110 +1,127 @@
-#pragma once
+ï»¿#pragma once
+#include "VeritasSync/Protocol.h"  // éœ€è¦åŒ…å« Protocol.h
+
+
+#include <ikcp.h>
 
 #include <array>
 #include <boost/asio.hpp>
-#include <nlohmann/json.hpp>
+#include <functional>
 #include <map>
 #include <memory>
-#include <functional>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
-#include <ikcp.h>
+
 
 namespace VeritasSync {
+
+// --- å®šä¹‰åŒæ­¥è§’è‰² ---
+enum class SyncRole { Source, Destination };
+
 class StateManager;
 class P2PManager;
 
 using boost::asio::ip::udp;
 
-// ÓÃÓÚ´æ´¢ÎÄ¼ş¿éµÄ½á¹¹Ìå
-struct FileChunk {
-  std::string data;
-};
-
-// ·â×°ÁËKCP¶ÔÏóºÍÆäËûÓë¸Ã½ÚµãÏà¹ØµÄ×´Ì¬
+// (PeerContext ç»“æ„ä½“ä¸å˜)
 struct PeerContext {
   udp::endpoint endpoint;
   ikcpcb* kcp = nullptr;
-  std::shared_ptr<P2PManager> p2p_manager_ptr;  // Ò»¸öÖ¸»ØP2PManagerµÄÖ¸Õë
-
+  std::shared_ptr<P2PManager> p2p_manager_ptr;
   PeerContext(udp::endpoint ep, std::shared_ptr<P2PManager> manager_ptr);
   ~PeerContext();
   void setup_kcp(uint32_t conv);
 };
 
-class StateManager; 
+class StateManager;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
  public:
   boost::asio::io_context& get_io_context();
-  // ÓÃÓÚ°²È«´´½¨ shared_ptr µÄ¹¤³§·½·¨
   static std::shared_ptr<P2PManager> create(unsigned short port);
-  // ÒÀÀµ×¢Èë
+
+  // --- ä¾èµ–æ³¨å…¥ ---
   void set_state_manager(StateManager* sm);
+  void set_role(SyncRole role);
+
+  void set_encryption_key(const std::string& sync_key);
+
   static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp,
                                  void* user);
 
   ~P2PManager();
   void connect_to_peers(const std::vector<std::string>& peer_addresses);
 
-  // ¹«¹²·½·¨£¬ÓÃÓÚÍ¨¹ıUDP·¢ËÍÔ­Ê¼Êı¾İ (ÓÉKCP»Øµ÷º¯ÊıÊ¹ÓÃ)
   void raw_udp_send(const char* data, size_t len,
                     const udp::endpoint& endpoint);
 
-  // µ±ÎÄ¼şÏµÍ³·¢Éú±ä»¯Ê±£¬StateManager½«µ÷ÓÃ´Ë·½·¨
-  void broadcast_current_state();
+  // --- å¹¿æ’­æ–¹æ³• (ç”± StateManager è°ƒç”¨) ---
+  // (Source æ¨¡å¼)
+  void broadcast_current_state();  // ç”¨äºå¯åŠ¨æ—¶çš„å…¨é‡åŒæ­¥
+  void broadcast_file_update(const FileInfo& file_info);
+  void broadcast_file_delete(const std::string& relative_path);
 
  private:
-     // --- ³ÉÔ±±äÁ¿ ---
   static constexpr size_t MAX_UDP_PAYLOAD = 16384;
   static constexpr size_t CHUNK_DATA_SIZE = 8192;
-  // ¹¹Ôìº¯ÊıÉèÎªË½ÓĞ£¬ÒÔÇ¿ÖÆÍ¨¹ı¹¤³§·½·¨´´½¨ÊµÀı
-  P2PManager(unsigned short port);
-  void init();  // ¹¹ÔìºóÖ´ĞĞµÄ³õÊ¼»¯
 
-  // --- ºËĞÄÍøÂçÑ­»· ---
+  P2PManager(unsigned short port);
+  void init();
+
+  // --- æ ¸å¿ƒç½‘ç»œå¾ªç¯ ---
   void start_receive();
   void handle_receive(
       const boost::system::error_code& error, std::size_t bytes_transferred,
       std::shared_ptr<udp::endpoint> remote_endpoint,
       std::shared_ptr<std::array<char, MAX_UDP_PAYLOAD>> recv_buffer);
 
-  // --- KCP ¼¯³É ---
+  // --- KCP é›†æˆ ---
   void schedule_kcp_update();
   void update_all_kcps();
-
   std::shared_ptr<PeerContext> get_or_create_peer_context(
       const udp::endpoint& endpoint);
 
-  // --- ÉÏ²ãÓ¦ÓÃÂß¼­ (ÓÉKCPµ÷ÓÃ) ---
-  void send_over_kcp(const std::string& msg,
+  // --- ä¸Šå±‚åº”ç”¨é€»è¾‘ (ç”±KCPè°ƒç”¨) ---
+  void send_over_kcp(const std::string& plaintext_msg,
                      const udp::endpoint& target_endpoint);
-  void handle_kcp_message(const std::string& msg,
-                          const udp::endpoint& from_endpoint);
+  void handle_kcp_message(
+      const std::string& plaintext_msg,  // --- msg é‡å‘½åä¸º plaintext_msg
+      const udp::endpoint& from_endpoint);
 
-  // --- ¾ßÌåµÄÏûÏ¢´¦ÀíÆ÷ ---
+  // --- å…·ä½“çš„æ¶ˆæ¯å¤„ç†å™¨ ---
+  // (Destination æ¨¡å¼)
   void handle_share_state(const nlohmann::json& payload,
                           const udp::endpoint& from_endpoint);
+  void handle_file_update(const nlohmann::json& payload,
+                          const udp::endpoint& from_endpoint);
+  void handle_file_delete(const nlohmann::json& payload,
+                          const udp::endpoint& from_endpoint);
+  // (Source æ¨¡å¼)
   void handle_file_request(const nlohmann::json& payload,
                            const udp::endpoint& from_endpoint);
+  // (Destination æ¨¡å¼)
   void handle_file_chunk(const nlohmann::json& payload);
 
+  std::string encrypt_message(const std::string& plaintext);
+  std::string decrypt_message(const std::string& ciphertext_package);
 
-
+  // --- æˆå‘˜å˜é‡ ---
+  std::vector<unsigned char> m_encryption_key;
   boost::asio::io_context m_io_context;
   udp::socket m_socket;
   std::jthread m_thread;
   boost::asio::steady_timer m_kcp_update_timer;
 
   StateManager* m_state_manager = nullptr;
+  SyncRole m_role = SyncRole::Source;
 
   std::map<udp::endpoint, std::shared_ptr<PeerContext>> m_peers;
   std::mutex m_peers_mutex;
 
-  // ÎÄ¼şÖØ×é»º³åÇø
   std::map<std::string, std::pair<int, std::map<int, std::string>>>
       m_file_assembly_buffer;
 };
 
-}
+}  // namespace VeritasSync

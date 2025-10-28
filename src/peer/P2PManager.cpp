@@ -1,7 +1,9 @@
-#include "VeritasSync/P2PManager.h"
+ï»¿#include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
+#include "VeritasSync/Hashing.h"
 #include "VeritasSync/Protocol.h" 
 #include "VeritasSync/SyncManager.h"
+#include "VeritasSync/Crypto.h"
 
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -19,8 +21,10 @@
 
 namespace VeritasSync {
 
+
+
 //================================================================================
-// PeerContext ÊµÏÖ
+// PeerContext å®ç°
 //================================================================================
 PeerContext::PeerContext(udp::endpoint ep,
                          std::shared_ptr<P2PManager> manager_ptr)
@@ -35,40 +39,38 @@ PeerContext::~PeerContext() {
 
 void PeerContext::setup_kcp(uint32_t conv) {
   kcp =
-      ikcp_create(conv, this);  // 'this' (PeerContext*) ÊÇ´«µİ¸ø»Øµ÷µÄÓÃ»§Ö¸Õë
+      ikcp_create(conv, this);  // 'this' (PeerContext*) æ˜¯ä¼ é€’ç»™å›è°ƒçš„ç”¨æˆ·æŒ‡é’ˆ
   kcp->output = &P2PManager::kcp_output_callback;
-  ikcp_nodelay(kcp, 1, 10, 2, 1);  // ÉèÖÃÎª¼«ËÙÄ£Ê½
-  ikcp_wndsize(kcp, 256, 256);     // Ôö´ó´°¿Ú´óĞ¡
+  ikcp_nodelay(kcp, 1, 10, 2, 1);  // è®¾ç½®ä¸ºæé€Ÿæ¨¡å¼
+  ikcp_wndsize(kcp, 256, 256);     // å¢å¤§çª—å£å¤§å°
 }
 
 
 
 
-// ¶¨ÒåÎÄ¼ş¿é´óĞ¡ (ÀıÈç 8KB)
-// ±ØĞëĞ¡ÓÚ MAX_UDP_PAYLOAD ÒÔÁô³öJSONÔªÊı¾İµÄ¿Õ¼ä
+// å®šä¹‰æ–‡ä»¶å—å¤§å° (ä¾‹å¦‚ 8KB)
+// å¿…é¡»å°äº MAX_UDP_PAYLOAD ä»¥ç•™å‡ºJSONå…ƒæ•°æ®çš„ç©ºé—´
 constexpr size_t CHUNK_DATA_SIZE = 8192;
 
 
 //================================================================================
-// P2PManager ÊµÏÖ
+// P2PManager å®ç°
 //================================================================================
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
 void P2PManager::broadcast_current_state() {
-  if (!m_state_manager) return;  // Ôö¼ÓÒ»¸ö°²È«¼ì²é
-
-  // ¼ì²é StateManager ÊÇ·ñÒÑ¾­±»ÉèÖÃ
-  // ÔÚÎÒÃÇµÄĞÂ¼Ü¹¹ÖĞ£¬ÎÒÃÇ½«È·±£ÔÚÊ¹ÓÃÇ°Ëü×ÜÊÇ±»ÉèÖÃºÃµÄ
-  std::cout << "[P2P] ÎÄ¼şÏµÍ³·¢Éú±ä»¯£¬ÕıÔÚÏòËùÓĞ½Úµã¹ã²¥×îĞÂ×´Ì¬..."
+  if (m_role != SyncRole::Source) return;
+  if (!m_state_manager) return;
+  std::cout << "[P2P] (Source) æ–‡ä»¶ç³»ç»Ÿå‘ç”Ÿå˜åŒ–ï¼Œæ­£åœ¨å‘æ‰€æœ‰èŠ‚ç‚¹å¹¿æ’­æœ€æ–°çŠ¶æ€..."
             << std::endl;
 
-  // 1. »ñÈ¡×îĞÂ×´Ì¬µÄJSON×Ö·û´®
-  m_state_manager->scan_directory();  // È·±£×´Ì¬ÊÇ×îĞÂµÄ
+  // 1. è·å–æœ€æ–°çŠ¶æ€çš„JSONå­—ç¬¦ä¸²
+  m_state_manager->scan_directory();  // ç¡®ä¿çŠ¶æ€æ˜¯æœ€æ–°çš„
   std::string json_state = m_state_manager->get_state_as_json_string();
 
-  // 2. ±éÀúËùÓĞ¶ÔµÈ½Úµã²¢·¢ËÍ
-  // ÕâÀïÎÒÃÇ²»ÄÜÔÚ m_peers_mutex ËøÄÚ·¢ËÍ£¬ËùÒÔÏÈ¸´ÖÆÒ»·İ endpoint ÁĞ±í
+  // 2. éå†æ‰€æœ‰å¯¹ç­‰èŠ‚ç‚¹å¹¶å‘é€
+  // è¿™é‡Œæˆ‘ä»¬ä¸èƒ½åœ¨ m_peers_mutex é”å†…å‘é€ï¼Œæ‰€ä»¥å…ˆå¤åˆ¶ä¸€ä»½ endpoint åˆ—è¡¨
   std::vector<udp::endpoint> endpoints;
   {
     std::lock_guard<std::mutex> lock(m_peers_mutex);
@@ -82,10 +84,54 @@ void P2PManager::broadcast_current_state() {
   }
 }
 
+void P2PManager::broadcast_file_update(const FileInfo& file_info) {
+  if (m_role != SyncRole::Source) return;
 
-// --- ¾²Ì¬¹¤³§Óë¹¹Ôìº¯Êı ---
+  std::cout << "[P2P] (Source) å¹¿æ’­å¢é‡æ›´æ–°: " << file_info.path << std::endl;
+
+  nlohmann::json msg;
+  msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
+  msg[Protocol::MSG_PAYLOAD] = file_info;  // åˆ©ç”¨ to_json è‡ªåŠ¨è½¬æ¢
+
+  std::vector<udp::endpoint> endpoints;
+  {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    for (const auto& pair : m_peers) {
+      endpoints.push_back(pair.first);
+    }
+  }
+
+  for (const auto& endpoint : endpoints) {
+    send_over_kcp(msg.dump(), endpoint);
+  }
+}
+
+void P2PManager::broadcast_file_delete(const std::string& relative_path) {
+  if (m_role != SyncRole::Source) return;
+
+  std::cout << "[P2P] (Source) å¹¿æ’­å¢é‡åˆ é™¤: " << relative_path << std::endl;
+
+  nlohmann::json msg;
+  msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE;
+  msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
+
+  std::vector<udp::endpoint> endpoints;
+  {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    for (const auto& pair : m_peers) {
+      endpoints.push_back(pair.first);
+    }
+  }
+
+  for (const auto& endpoint : endpoints) {
+    send_over_kcp(msg.dump(), endpoint);
+  }
+}
+
+
+// --- é™æ€å·¥å‚ä¸æ„é€ å‡½æ•° ---
 std::shared_ptr<P2PManager> P2PManager::create(unsigned short port) {
-  // ... ¸¨Öú½á¹¹Ìå P2PManagerMaker µÄ¶¨Òå²»±ä ...
+  // ... è¾…åŠ©ç»“æ„ä½“ P2PManagerMaker çš„å®šä¹‰ä¸å˜ ...
   struct P2PManagerMaker : public P2PManager {
     P2PManagerMaker(unsigned short p) : P2PManager(p) {}
   };
@@ -94,19 +140,34 @@ std::shared_ptr<P2PManager> P2PManager::create(unsigned short port) {
   return manager;
 }
 
+
 P2PManager::P2PManager(unsigned short port)
     : m_socket(m_io_context, udp::endpoint(udp::v4(), port)),
       m_kcp_update_timer(m_io_context)
-// m_state_manager ÔÚÕâÀï±»Ä¬ÈÏ³õÊ¼»¯Îª nullptr
+// m_state_manager åœ¨è¿™é‡Œè¢«é»˜è®¤åˆå§‹åŒ–ä¸º nullptr
 {}
 
 void P2PManager::set_state_manager(StateManager* sm) { m_state_manager = sm; }
+void P2PManager::set_role(SyncRole role) { m_role = role; }
+
+
+void P2PManager::set_encryption_key(const std::string& sync_key) {
+  try {
+    m_encryption_key = Crypto::derive_key(sync_key);
+    std::cout << "[Crypto] å·²ä» sync_key æˆåŠŸæ´¾ç”ŸåŠ å¯†å¯†é’¥ã€‚" << std::endl;
+  } catch (const std::exception& e) {
+    std::cerr << "[Crypto] è‡´å‘½é”™è¯¯: " << e.what() << std::endl;
+    // åœ¨å®é™…åº”ç”¨ä¸­ï¼Œè¿™é‡Œåº”è¯¥å¯¼è‡´ç¨‹åºé€€å‡º
+    throw;
+  }
+}
+
 
 void P2PManager::init() {
-  // µ÷ÓÃ shared_from_this() Ç°£¬±ØĞëÒÑÓĞÒ»¸ö´æÔÚµÄ shared_ptr ÊµÀı¹ÜÀí this¡£
-  // create º¯ÊıÖĞµÄ make_shared È·±£ÁËÕâÒ»µã¡£
+  // è°ƒç”¨ shared_from_this() å‰ï¼Œå¿…é¡»å·²æœ‰ä¸€ä¸ªå­˜åœ¨çš„ shared_ptr å®ä¾‹ç®¡ç† thisã€‚
+  // create å‡½æ•°ä¸­çš„ make_shared ç¡®ä¿äº†è¿™ä¸€ç‚¹ã€‚
   m_thread = std::jthread([this]() {
-    std::cout << "[P2P] IO context ÔÚºóÌ¨Ïß³ÌÔËĞĞ..." << std::endl;
+    std::cout << "[P2P] IO context åœ¨åå°çº¿ç¨‹è¿è¡Œ..." << std::endl;
     auto work_guard = boost::asio::make_work_guard(m_io_context);
     m_io_context.run();
   });
@@ -121,7 +182,7 @@ P2PManager::~P2PManager() {
   }
 }
 
-// --- KCP ºËĞÄ¼¯³É ---
+// --- KCP æ ¸å¿ƒé›†æˆ ---
 int P2PManager::kcp_output_callback(const char* buf, int len, ikcpcb* kcp,
                                     void* user) {
   PeerContext* context = static_cast<PeerContext*>(user);
@@ -146,34 +207,45 @@ void P2PManager::update_all_kcps() {
       (IUINT32)std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count();
-  // ´´½¨Ò»¸öÁÙÊ±¶ÓÁĞ£¬ÓÃÓÚ´æ·Å´ı´¦ÀíµÄÏûÏ¢£¬±ÜÃâÔÚËøÄÚÖ´ĞĞ¸´ÔÓ»Øµ÷
+
   std::vector<std::pair<std::string, udp::endpoint>> received_messages;
 
-  {  // ÓÃÒ»¸ö´úÂë¿éÀ´ÏŞÖÆËøµÄÉúÃüÖÜÆÚ
+  {
     std::lock_guard<std::mutex> lock(m_peers_mutex);
     for (auto const& [endpoint, context] : m_peers) {
       ikcp_update(context->kcp, current_time_ms);
 
       char buffer[MAX_UDP_PAYLOAD];
       int size;
-      // Ñ­»·½ÓÊÕ£¬È·±£Ò»´ÎĞÔ°ÑKCP»º³åÇøµÄËùÓĞÊı¾İ¶¼¶Á³öÀ´
       while ((size = ikcp_recv(context->kcp, buffer, sizeof(buffer))) > 0) {
-        // --- ½â¾ö·½°¸£º²½Öè2 ---
-        // ²»ÔÚÕâÀïÖ±½Ó´¦Àí£¬¶øÊÇ´æÈë¶ÓÁĞ
-        received_messages.emplace_back(std::string(buffer, size), endpoint);
+        // --- è§£å¯†é€»è¾‘å¼€å§‹ ---
+        std::string ciphertext_package(buffer, size);
+        std::string plaintext_msg;
+
+        try {
+          // å°è¯•è§£å¯†
+          plaintext_msg = decrypt_message(ciphertext_package);
+        } catch (const std::exception& e) {
+          // è§£å¯†å¤±è´¥ (å¯†é’¥é”™è¯¯ã€æ•°æ®ç¯¡æ”¹æˆ–æ•°æ®åŒ…æŸå)
+          std::cerr << "[Crypto] è§£å¯†æ¥è‡ª " << endpoint
+                    << " çš„æ•°æ®åŒ…å¤±è´¥: " << e.what() << std::endl;
+          continue;  // ä¸¢å¼ƒè¿™ä¸ªåŒ…
+        }
+        // --- è§£å¯†é€»è¾‘ç»“æŸ ---
+
+        received_messages.emplace_back(plaintext_msg, endpoint);
       }
     }
-  }  // <--- lock_guard ÔÚÕâÀï±»Îö¹¹£¬m_peers_mutex Ëø±»ÊÍ·Å
+  }
 
-  // ÔÚËøÒÑ¾­ÊÍ·ÅµÄ°²È«ÇøÓò£¬Í³Ò»´¦ÀíËùÓĞÊÕµ½µÄÏûÏ¢
   for (const auto& msg_pair : received_messages) {
     handle_kcp_message(msg_pair.first, msg_pair.second);
   }
 
-  schedule_kcp_update();  // ÖØĞÂµ÷¶ÈÏÂÒ»´Î¸üĞÂ
+  schedule_kcp_update();
 }
 
-// --- Ô­Ê¼ÍøÂç I/O ---
+// --- åŸå§‹ç½‘ç»œ I/O ---
 void P2PManager::raw_udp_send(const char* data, size_t len,
                               const udp::endpoint& endpoint) {
   m_socket.async_send_to(boost::asio::buffer(data, len), endpoint,
@@ -195,11 +267,11 @@ void P2PManager::connect_to_peers(
         resolver.resolve(host, port_str, ec);
     if (!ec && !endpoints.empty()) {
       udp::endpoint target_endpoint = *endpoints.begin();
-      std::cout << "[P2P] ÕıÔÚÏò " << target_endpoint << " ·¢ËÍPINGÒÔ½øĞĞÎÕÊÖ¡£"
+      std::cout << "[P2P] æ­£åœ¨å‘ " << target_endpoint << " å‘é€PINGä»¥è¿›è¡Œæ¡æ‰‹ã€‚"
                 << std::endl;
-      // »ñÈ¡/´´½¨¶ÔµÈµãÉÏÏÂÎÄ£¬´Ë²Ù×÷Ò²»á³õÊ¼»¯KCP
+      // è·å–/åˆ›å»ºå¯¹ç­‰ç‚¹ä¸Šä¸‹æ–‡ï¼Œæ­¤æ“ä½œä¹Ÿä¼šåˆå§‹åŒ–KCP
       get_or_create_peer_context(target_endpoint);
-      // ·¢ËÍÒ»¸ö¼òµ¥µÄPINGÏûÏ¢À´³¢ÊÔUDP¡°´ò¶´¡±
+      // å‘é€ä¸€ä¸ªç®€å•çš„PINGæ¶ˆæ¯æ¥å°è¯•UDPâ€œæ‰“æ´â€
       raw_udp_send("PING", 4, target_endpoint);
     }
   }
@@ -207,10 +279,10 @@ void P2PManager::connect_to_peers(
 
 
 
-// --- ºËĞÄÍøÂç½ÓÊÕÑ­»· ---
+// --- æ ¸å¿ƒç½‘ç»œæ¥æ”¶å¾ªç¯ ---
 
 void P2PManager::start_receive() {
-  // Îª½ÓÊÕ²Ù×÷´´½¨ĞÂµÄ»º³åÇøºÍendpoint¶ÔÏó£¬±ÜÃâ²¢·¢ÎÊÌâ
+  // ä¸ºæ¥æ”¶æ“ä½œåˆ›å»ºæ–°çš„ç¼“å†²åŒºå’Œendpointå¯¹è±¡ï¼Œé¿å…å¹¶å‘é—®é¢˜
   auto remote_endpoint = std::make_shared<udp::endpoint>();
   auto recv_buffer = std::make_shared<std::array<char, MAX_UDP_PAYLOAD>>();
 
@@ -218,42 +290,42 @@ void P2PManager::start_receive() {
       boost::asio::buffer(*recv_buffer), *remote_endpoint,
       [self = shared_from_this(), remote_endpoint, recv_buffer](
           const boost::system::error_code& error, std::size_t bytes) {
-        // Ê¹ÓÃ self (Ò»¸öshared_ptr) À´È·±£ P2PManager ÔÚ»Øµ÷ÆÚ¼äÊÇ´æ»îµÄ
+        // ä½¿ç”¨ self (ä¸€ä¸ªshared_ptr) æ¥ç¡®ä¿ P2PManager åœ¨å›è°ƒæœŸé—´æ˜¯å­˜æ´»çš„
         self->handle_receive(error, bytes, remote_endpoint, recv_buffer);
       });
 }
 
-// `handle_receive` ÏÖÔÚ·Ç³£¼òµ¥£ºÖ»´¦ÀíÔ­Ê¼UDP°ü
+// `handle_receive` ç°åœ¨éå¸¸ç®€å•ï¼šåªå¤„ç†åŸå§‹UDPåŒ…
 void P2PManager::handle_receive(
     const boost::system::error_code& error, std::size_t bytes_transferred,
     std::shared_ptr<udp::endpoint> remote_endpoint,
     std::shared_ptr<std::array<char, MAX_UDP_PAYLOAD>> recv_buffer) {
   if (!error && bytes_transferred > 0) {
-    // ¼ì²éÊÇ·ñÊÇÓÃÓÚ¡°´ò¶´¡±µÄPINGÏûÏ¢
+    // æ£€æŸ¥æ˜¯å¦æ˜¯ç”¨äºâ€œæ‰“æ´â€çš„PINGæ¶ˆæ¯
     if (bytes_transferred == 4 &&
         std::string(recv_buffer->data(), 4) == "PING") {
-      std::cout << "[P2P] ÊÕµ½À´×Ô " << *remote_endpoint
-                << " µÄ PING ÎÕÊÖÇëÇó¡£" << std::endl;
-      // »ñÈ¡»ò´´½¨´Ë¶ÔµÈµãµÄÉÏÏÂÎÄ
+      std::cout << "[P2P] æ”¶åˆ°æ¥è‡ª " << *remote_endpoint
+                << " çš„ PING æ¡æ‰‹è¯·æ±‚ã€‚" << std::endl;
+      // è·å–æˆ–åˆ›å»ºæ­¤å¯¹ç­‰ç‚¹çš„ä¸Šä¸‹æ–‡
       auto peer_context = get_or_create_peer_context(*remote_endpoint);
 
-      // ×÷Îª»ØÓ¦£¬Á¢¼´Í¨¹ıKCP·¢ËÍÎÒÃÇµÄ×´Ì¬
-      std::cout << "[KCP] ¶Ô·½ÒÑ×¼±¸¾ÍĞ÷£¬Í¨¹ıKCP·¢ËÍÎÒÃÇµÄÎÄ¼ş×´Ì¬..."
+      // ä½œä¸ºå›åº”ï¼Œç«‹å³é€šè¿‡KCPå‘é€æˆ‘ä»¬çš„çŠ¶æ€
+      std::cout << "[KCP] å¯¹æ–¹å·²å‡†å¤‡å°±ç»ªï¼Œé€šè¿‡KCPå‘é€æˆ‘ä»¬çš„æ–‡ä»¶çŠ¶æ€..."
                 << std::endl;
       m_state_manager->scan_directory();
       std::string json_state = m_state_manager->get_state_as_json_string();
       send_over_kcp(json_state, *remote_endpoint);
     } else {
-      // ÆäËûËùÓĞÊı¾İ°ü¶¼Ó¦±»ÊÓÎªKCPÊı¾İ
+      // å…¶ä»–æ‰€æœ‰æ•°æ®åŒ…éƒ½åº”è¢«è§†ä¸ºKCPæ•°æ®
       auto peer_context = get_or_create_peer_context(*remote_endpoint);
-      // ½«ÊÕµ½µÄUDPÔ­Ê¼Êı¾İÎ¹¸øKCP½øĞĞ´¦Àí
+      // å°†æ”¶åˆ°çš„UDPåŸå§‹æ•°æ®å–‚ç»™KCPè¿›è¡Œå¤„ç†
       ikcp_input(peer_context->kcp, recv_buffer->data(), bytes_transferred);
     }
   }
-  start_receive();  // ¼ÌĞø¼àÌıÏÂÒ»¸öUDP°ü
+  start_receive();  // ç»§ç»­ç›‘å¬ä¸‹ä¸€ä¸ªUDPåŒ…
 }
 
-// --- ¶ÔµÈµã¹ÜÀí ---
+// --- å¯¹ç­‰ç‚¹ç®¡ç† ---
 std::shared_ptr<PeerContext> P2PManager::get_or_create_peer_context(
     const udp::endpoint& endpoint) {
   std::lock_guard<std::mutex> lock(m_peers_mutex);
@@ -262,158 +334,300 @@ std::shared_ptr<PeerContext> P2PManager::get_or_create_peer_context(
     return it->second;
   }
 
-  std::cout << "[KCP] ¼ì²âµ½ĞÂµÄ¶ÔµÈµã£¬ÎªÆä´´½¨KCPÉÏÏÂÎÄ: " << endpoint
+  std::cout << "[KCP] æ£€æµ‹åˆ°æ–°çš„å¯¹ç­‰ç‚¹ï¼Œä¸ºå…¶åˆ›å»ºKCPä¸Šä¸‹æ–‡: " << endpoint
             << std::endl;
   auto new_context =
       std::make_shared<PeerContext>(endpoint, shared_from_this());
-  // »á»°ID (conv) ±ØĞëÔÚÍ¨ĞÅË«·½¼ä±£³ÖÒ»ÖÂ¡£
-  // ÔÚÊµ¼ÊÓ¦ÓÃÖĞ£¬¿ÉÒÔ»ùÓÚsync_key»òË«·½IP¶Ë¿Ú¼ÆËãÒ»¸öÎ¨Ò»µÄID¡£
-  // ÕâÀïÎªÁË¼ò»¯£¬ÎÒÃÇÊ¹ÓÃÒ»¸ö¹Ì¶¨µÄID¡£
+  // ä¼šè¯ID (conv) å¿…é¡»åœ¨é€šä¿¡åŒæ–¹é—´ä¿æŒä¸€è‡´ã€‚
+  // åœ¨å®é™…åº”ç”¨ä¸­ï¼Œå¯ä»¥åŸºäºsync_keyæˆ–åŒæ–¹IPç«¯å£è®¡ç®—ä¸€ä¸ªå”¯ä¸€çš„IDã€‚
+  // è¿™é‡Œä¸ºäº†ç®€åŒ–ï¼Œæˆ‘ä»¬ä½¿ç”¨ä¸€ä¸ªå›ºå®šçš„IDã€‚
   uint32_t conv = 12345;
   new_context->setup_kcp(conv);
   m_peers[endpoint] = new_context;
   return new_context;
 }
 
-// --- ÉÏ²ãÓ¦ÓÃÏûÏ¢´¦Àí ---
+// --- ä¸Šå±‚åº”ç”¨æ¶ˆæ¯å¤„ç† ---
 
-// ×ÜÈë¿Ú£º½«´ÓKCPÊÕµ½µÄ¿É¿¿ÏûÏ¢·Ö·¢¸ø²»Í¬µÄ´¦ÀíÆ÷
-void P2PManager::handle_kcp_message(const std::string& msg,
-                                    const udp::endpoint& from_endpoint) {
+// æ€»å…¥å£ï¼šå°†ä»KCPæ”¶åˆ°çš„å¯é æ¶ˆæ¯åˆ†å‘ç»™ä¸åŒçš„å¤„ç†å™¨
+void P2PManager::handle_kcp_message(
+    const std::string& plaintext_msg,const udp::endpoint& from_endpoint) {
   try {
-    auto json = nlohmann::json::parse(msg);
+    auto json = nlohmann::json::parse(plaintext_msg);
     const std::string msg_type = json.at(Protocol::MSG_TYPE).get<std::string>();
     auto& payload = json.at(Protocol::MSG_PAYLOAD);
 
-    if (msg_type == Protocol::TYPE_SHARE_STATE) {
+    // --- æ ¸å¿ƒè§’è‰²é€»è¾‘ ---
+    if (msg_type == Protocol::TYPE_SHARE_STATE &&
+        m_role == SyncRole::Destination) {
       handle_share_state(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_REQUEST_FILE) {
+    }
+    // --- æ–°å¢ ---
+    else if (msg_type == Protocol::TYPE_FILE_UPDATE &&
+             m_role == SyncRole::Destination) {
+      handle_file_update(payload, from_endpoint);
+    } else if (msg_type == Protocol::TYPE_FILE_DELETE &&
+               m_role == SyncRole::Destination) {
+      handle_file_delete(payload, from_endpoint);
+    }
+    // -----------
+    else if (msg_type == Protocol::TYPE_REQUEST_FILE &&
+             m_role == SyncRole::Source) {
       handle_file_request(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_FILE_CHUNK) {
+    } else if (msg_type == Protocol::TYPE_FILE_CHUNK &&
+               m_role == SyncRole::Destination) {
       handle_file_chunk(payload);
     }
+
   } catch (const std::exception& e) {
-    std::cerr << "[P2P] ´¦ÀíKCPÏûÏ¢Ê±·¢Éú´íÎó: " << e.what() << std::endl;
-    std::cerr << "       Ô­Ê¼ÏûÏ¢: " << msg << std::endl;
+    std::cerr << "[P2P] å¤„ç†KCPæ¶ˆæ¯æ—¶å‘ç”Ÿé”™è¯¯: " << e.what() << std::endl;
+    std::cerr << "       åŸå§‹æ˜æ–‡: " << plaintext_msg << std::endl;
   }
 }
 
-void P2PManager::send_over_kcp(const std::string& msg,
+std::string P2PManager::encrypt_message(const std::string& plaintext) {
+  if (m_encryption_key.empty()) {
+    throw std::runtime_error("åŠ å¯†å¤±è´¥ï¼šå¯†é’¥æœªè®¾ç½®");
+  }
+  return Crypto::encrypt(plaintext, m_encryption_key);
+}
+
+std::string P2PManager::decrypt_message(const std::string& ciphertext_package) {
+  if (m_encryption_key.empty()) {
+    throw std::runtime_error("è§£å¯†å¤±è´¥ï¼šå¯†é’¥æœªè®¾ç½®");
+  }
+  return Crypto::decrypt(ciphertext_package, m_encryption_key);
+}
+
+void P2PManager::send_over_kcp(const std::string& plaintext_msg,
                                const udp::endpoint& target_endpoint) {
   std::lock_guard<std::mutex> lock(m_peers_mutex);
   auto it = m_peers.find(target_endpoint);
   if (it != m_peers.end()) {
-    // Ê¹ÓÃ ikcp_send ·¢ËÍÊı¾İ£¬KCP»á±£Ö¤Æä¿É¿¿´«Êä
-    ikcp_send(it->second->kcp, msg.c_str(), msg.length());
+    // --- åŠ å¯†é€»è¾‘å¼€å§‹ ---
+    std::string ciphertext_package;
+    try {
+      ciphertext_package = encrypt_message(plaintext_msg);
+    } catch (const std::exception& e) {
+      std::cerr << "[Crypto] åŠ å¯†æ¶ˆæ¯å¤±è´¥: " << e.what() << std::endl;
+      return;  // åŠ å¯†å¤±è´¥åˆ™ä¸å‘é€
+    }
+    // --- åŠ å¯†é€»è¾‘ç»“æŸ ---
+
+    // å‘é€å¯†æ–‡
+    ikcp_send(it->second->kcp, ciphertext_package.c_str(),
+              ciphertext_package.length());
+
   } else {
-    std::cerr << "[KCP] ´íÎó: ³¢ÊÔÏòÒ»¸öÎ´½¨Á¢KCPÉÏÏÂÎÄµÄ¶ÔµÈµã·¢ËÍÏûÏ¢: "
+    std::cerr << "[KCP] é”™è¯¯: å°è¯•å‘ä¸€ä¸ªæœªå»ºç«‹KCPä¸Šä¸‹æ–‡çš„å¯¹ç­‰ç‚¹å‘é€æ¶ˆæ¯: "
               << target_endpoint << std::endl;
   }
 }
 
-// ´¦Àí×´Ì¬¹²ÏíÏûÏ¢
+// å¤„ç†çŠ¶æ€å…±äº«æ¶ˆæ¯
 void P2PManager::handle_share_state(const nlohmann::json& payload,
                                     const udp::endpoint& from_endpoint) {
-  std::cout << "[KCP] ÊÕµ½À´×Ô " << from_endpoint << " µÄ 'share_state' ÏûÏ¢¡£"
-            << std::endl;
+  // ç¡®ä¿æˆ‘ä»¬åªåœ¨ Destination æ¨¡å¼ä¸‹è¿è¡Œ (è™½ç„¶ handle_kcp_message å·²ç»æ£€æŸ¥è¿‡)
+  if (m_role != SyncRole::Destination) return;
 
-  // 1. »ñÈ¡Ô¶³Ì×´Ì¬
+  std::cout << "[KCP] (Destination) æ”¶åˆ°æ¥è‡ª " << from_endpoint
+            << " (Source) çš„ 'share_state' æ¶ˆæ¯ã€‚" << std::endl;
+
+  // 1. è·å–è¿œç¨‹ (Source) çŠ¶æ€
   std::vector<FileInfo> remote_files =
       payload.at("files").get<std::vector<FileInfo>>();
 
-  // 2. »ñÈ¡×Ô¼ºµ±Ç°µÄ±¾µØ×´Ì¬
-  m_state_manager->scan_directory();
+  // 2. è·å–è‡ªå·±å½“å‰çš„æœ¬åœ° (Destination) çŠ¶æ€
+  m_state_manager->scan_directory();  // æ‰«ææœ¬åœ°ä»¥è·å–æœ€æ–°çŠ¶æ€
   nlohmann::json temp_json =
       nlohmann::json::parse(m_state_manager->get_state_as_json_string());
   std::vector<FileInfo> local_files = temp_json.at(Protocol::MSG_PAYLOAD)
                                           .at("files")
                                           .get<std::vector<FileInfo>>();
 
-  // 3. ¡¾ºËĞÄĞŞÕı¡¿Ö»ÕÒ³öÎÒĞèÒª´Ó¶Ô·½»ñÈ¡µÄÎÄ¼ş£¨×ö¼Ó·¨£©
-  std::vector<std::string> files_to_request =
+  // 3. å¯¹æ¯”çŠ¶æ€ï¼Œæ‰¾å‡ºéœ€è¦è¯·æ±‚å’Œåˆ é™¤çš„æ–‡ä»¶
+  SyncActions actions =
       SyncManager::compare_states_and_get_requests(local_files, remote_files);
 
-  // 4. Ö´ĞĞÇëÇó
-  if (!files_to_request.empty()) {
-    std::cout << "[KCP] ¼Æ»®Ïò " << from_endpoint << " ÇëÇó "
-              << files_to_request.size() << " ¸öÈ±Ê§µÄÎÄ¼ş¡£" << std::endl;
-    for (const auto& file_path : files_to_request) {
+  // 4. æ‰§è¡Œæ–‡ä»¶åˆ é™¤ (å¿…é¡»åœ¨è¯·æ±‚ä¹‹å‰ï¼é˜²æ­¢é‡å‘½åæ—¶å…ˆåˆ åä¸‹)
+  if (!actions.files_to_delete.empty()) {
+    std::cout << "[Sync] è®¡åˆ’åˆ é™¤ " << actions.files_to_delete.size()
+              << " ä¸ªæœ¬åœ°å¤šä½™çš„æ–‡ä»¶ã€‚" << std::endl;
+    for (const auto& file_path_str : actions.files_to_delete) {
+      std::filesystem::path relative_path(
+          reinterpret_cast<const char8_t*>(file_path_str.c_str()));
+      std::filesystem::path full_path =
+          m_state_manager->get_root_path() / relative_path;
+
+      std::error_code ec;
+      if (std::filesystem::remove(full_path, ec)) {
+        std::cout << "[Sync] -> å·²åˆ é™¤: " << full_path.string() << std::endl;
+      } else {
+        std::cerr << "[Sync] -> åˆ é™¤å¤±è´¥: " << full_path.string()
+                  << " Error: " << ec.message() << std::endl;
+      }
+    }
+  }
+
+  // 5. æ‰§è¡Œæ–‡ä»¶è¯·æ±‚
+  if (!actions.files_to_request.empty()) {
+    std::cout << "[KCP] è®¡åˆ’å‘ " << from_endpoint << " (Source) è¯·æ±‚ "
+              << actions.files_to_request.size() << " ä¸ªç¼ºå¤±/è¿‡æœŸçš„æ–‡ä»¶ã€‚"
+              << std::endl;
+    for (const auto& file_path : actions.files_to_request) {
       nlohmann::json request_msg;
       request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
       request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
       send_over_kcp(request_msg.dump(), from_endpoint);
     }
-  } else {
-    std::cout << "[KCP] ±¾µØÎÄ¼ş°üº¬ÁËËùÓĞÔ¶³ÌÎÄ¼ş£¬ÎŞĞèÇëÇó¡£" << std::endl;
   }
 
-  // 5. ¡¾ºËĞÄĞŞÕı¡¿¼ì²é¶Ô·½ÊÇ·ñÒ²ĞèÒªÎÒÃÇµÄÎÄ¼ş
-  //    Èç¹û¶Ô·½µÄ×´Ì¬²»°üº¬ÎÒÃÇËùÓĞµÄÎÄ¼ş£¬¾Í»Ø¸´ÎÒÃÇµÄ×´Ì¬£¬ÒÔ±ã¶Ô·½×ö¡°¼Ó·¨¡±
-  std::vector<std::string> remote_needs_our_files =
-      SyncManager::compare_states_and_get_requests(remote_files, local_files);
+  // --- å…³é”®ï¼šåŸæœ‰çš„â€œå›å¤çŠ¶æ€â€é€»è¾‘å·²è¢«å®Œå…¨ç§»é™¤ ---
+  // Destination èŠ‚ç‚¹æ°¸è¿œä¸ä¼šå›å¤è‡ªå·±çš„çŠ¶æ€ã€‚
+}
 
-  if (!remote_needs_our_files.empty()) {
-    std::cout << "[KCP] ¶Ô·½×´Ì¬²»ÍêÕû£¬»Ø¸´ÎÒÃÇµÄ×´Ì¬ÒÔ¹©ÆäºÏ²¢¡£"
+
+void P2PManager::handle_file_update(const nlohmann::json& payload,
+                                    const udp::endpoint& from_endpoint) {
+  if (m_role != SyncRole::Destination) return;
+
+  FileInfo remote_info;
+  try {
+    remote_info = payload.get<FileInfo>();  // åˆ©ç”¨ from_json è‡ªåŠ¨è½¬æ¢
+  } catch (const std::exception& e) {
+    std::cerr << "[KCP] (Destination) è§£æ file_update å¤±è´¥: " << e.what()
               << std::endl;
-    send_over_kcp(temp_json.dump(), from_endpoint);
+    return;
+  }
+
+  std::cout << "[KCP] (Destination) æ”¶åˆ°å¢é‡æ›´æ–°: " << remote_info.path
+            << std::endl;
+
+  std::filesystem::path relative_path(
+      reinterpret_cast<const char8_t*>(remote_info.path.c_str()));
+  std::filesystem::path full_path =
+      m_state_manager->get_root_path() / relative_path;
+
+  std::error_code ec;
+  bool should_request = false;
+
+  if (!std::filesystem::exists(full_path, ec) || ec) {
+    // æƒ…å†µ 1: æœ¬åœ°ä¸å­˜åœ¨æ­¤æ–‡ä»¶
+    std::cout << "[Sync] -> æœ¬åœ°ä¸å­˜åœ¨, éœ€è¦è¯·æ±‚ã€‚" << std::endl;
+    should_request = true;
   } else {
-    std::cout << "[KCP] ÍêÃÀ£¡Ë«·½×´Ì¬ÒÑÍêÈ«ºÏ²¢Ò»ÖÂ¡£" << std::endl;
+    // æƒ…å†µ 2: æœ¬åœ°å­˜åœ¨, æ£€æŸ¥å“ˆå¸Œ
+    std::string local_hash = Hashing::CalculateSHA256(full_path);
+    if (local_hash != remote_info.hash) {
+      std::cout << "[Sync] -> å“ˆå¸Œä¸åŒ¹é… (æœ¬åœ°: " << local_hash.substr(0, 7)
+                << " vs è¿œç¨‹: " << remote_info.hash.substr(0, 7)
+                << "), éœ€è¦è¯·æ±‚ã€‚" << std::endl;
+      should_request = true;
+    } else {
+      std::cout << "[Sync] -> å“ˆå¸ŒåŒ¹é…, å·²æ˜¯æœ€æ–°ã€‚" << std::endl;
+    }
+  }
+
+  if (should_request) {
+    nlohmann::json request_msg;
+    request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
+    request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
+    send_over_kcp(request_msg.dump(), from_endpoint);
   }
 }
 
-// ´¦ÀíÎÄ¼şÇëÇó
+
+void P2PManager::handle_file_delete(const nlohmann::json& payload,
+                                    const udp::endpoint& from_endpoint) {
+  if (m_role != SyncRole::Destination) return;
+
+  std::string relative_path_str;
+  try {
+    relative_path_str = payload.at("path").get<std::string>();
+  } catch (const std::exception& e) {
+    std::cerr << "[KCP] (Destination) è§£æ file_delete å¤±è´¥: " << e.what()
+              << std::endl;
+    return;
+  }
+
+  std::cout << "[KCP] (Destination) æ”¶åˆ°å¢é‡åˆ é™¤: " << relative_path_str
+            << std::endl;
+
+  std::filesystem::path relative_path(
+      reinterpret_cast<const char8_t*>(relative_path_str.c_str()));
+  std::filesystem::path full_path =
+      m_state_manager->get_root_path() / relative_path;
+
+  std::error_code ec;
+  if (std::filesystem::remove(full_path, ec)) {
+    std::cout << "[Sync] -> å·²åˆ é™¤æœ¬åœ°æ–‡ä»¶: " << full_path.string()
+              << std::endl;
+    // (å¯é€‰) ä» StateManager çš„ map ä¸­ä¹Ÿç§»é™¤ï¼Œä»¥ä¿æŒåŒæ­¥
+    m_state_manager->remove_path_from_map(relative_path_str);
+  } else {
+    if (ec != std::errc::no_such_file_or_directory) {
+      // å¦‚æœåˆ é™¤å¤±è´¥ï¼ˆä¸”ä¸æ˜¯å› ä¸ºæ–‡ä»¶æœ¬å°±ä¸å­˜åœ¨ï¼‰ï¼Œåˆ™æ‰“å°é”™è¯¯
+      std::cerr << "[Sync] -> åˆ é™¤æœ¬åœ°æ–‡ä»¶å¤±è´¥: " << full_path.string()
+                << " Error: " << ec.message() << std::endl;
+    } else {
+      std::cout << "[Sync] -> æœ¬åœ°æ–‡ä»¶å·²ä¸å­˜åœ¨, æ— éœ€æ“ä½œã€‚" << std::endl;
+    }
+  }
+}
+
+// å¤„ç†æ–‡ä»¶è¯·æ±‚
 void P2PManager::handle_file_request(const nlohmann::json& payload,
                                      const udp::endpoint& from_endpoint) {
   const std::string requested_path_str = payload.at("path").get<std::string>();
-  std::cout << "[KCP] ÊÕµ½À´×Ô " << from_endpoint << " ¶ÔÎÄ¼ş '"
-            << requested_path_str << "' µÄÇëÇó¡£" << std::endl;
+  std::cout << "[KCP] æ”¶åˆ°æ¥è‡ª " << from_endpoint << " å¯¹æ–‡ä»¶ '"
+            << requested_path_str << "' çš„è¯·æ±‚ã€‚" << std::endl;
 
-    // 1. ½«ÊÕµ½µÄUTF-8×Ö·û´®Â·¾¶£¬Í¨¹ı u8string ¹¹Ôìº¯Êı°²È«µØ×ª»»ÎªÒ»¸ö
-  // std::filesystem::path ¶ÔÏó
-  //    Õâ¸ö¹¹Ôìº¯Êı»áÕıÈ·µØ½«UTF-8×Ö½ÚĞòÁĞ½âÎöÎªÓĞĞ§µÄÂ·¾¶¡£
+    // 1. å°†æ”¶åˆ°çš„UTF-8å­—ç¬¦ä¸²è·¯å¾„ï¼Œé€šè¿‡ u8string æ„é€ å‡½æ•°å®‰å…¨åœ°è½¬æ¢ä¸ºä¸€ä¸ª
+  // std::filesystem::path å¯¹è±¡
+  //    è¿™ä¸ªæ„é€ å‡½æ•°ä¼šæ­£ç¡®åœ°å°†UTF-8å­—èŠ‚åºåˆ—è§£æä¸ºæœ‰æ•ˆçš„è·¯å¾„ã€‚
   std::filesystem::path relative_path(
       reinterpret_cast<const char8_t*>(requested_path_str.c_str()));
 
-  // 2. ¹¹½¨ÎÄ¼şµÄÍêÕûÂ·¾¶
+  // 2. æ„å»ºæ–‡ä»¶çš„å®Œæ•´è·¯å¾„
   std::filesystem::path full_path =
       m_state_manager->get_root_path() / relative_path;
 
   if (!std::filesystem::exists(full_path)) {
-    std::cerr << "[P2P] ±»ÇëÇóµÄÎÄ¼ş²»´æÔÚ: " << full_path << std::endl;
+    std::cerr << "[P2P] è¢«è¯·æ±‚çš„æ–‡ä»¶ä¸å­˜åœ¨: " << full_path << std::endl;
     return;
   }
 
   std::ifstream file(full_path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
-    std::cerr << "[P2P] ÎŞ·¨´ò¿ªÎÄ¼ş: " << full_path << std::endl;
+    std::cerr << "[P2P] æ— æ³•æ‰“å¼€æ–‡ä»¶: " << full_path << std::endl;
     return;
   }
 
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
 
-      // --- Áã×Ö½ÚÎÄ¼ş´¦ÀíºËĞÄĞŞ¸Ä ---
+      // --- é›¶å­—èŠ‚æ–‡ä»¶å¤„ç†æ ¸å¿ƒä¿®æ”¹ ---
   if (size == 0) {
-    std::cout << "[KCP] ÕıÔÚ·¢ËÍÁã×Ö½ÚÎÄ¼ş '" << requested_path_str
-              << "' µÄÔªĞÅÏ¢..." << std::endl;
+    std::cout << "[KCP] æ­£åœ¨å‘é€é›¶å­—èŠ‚æ–‡ä»¶ '" << requested_path_str
+              << "' çš„å…ƒä¿¡æ¯..." << std::endl;
     nlohmann::json chunk_msg;
     chunk_msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_CHUNK;
     chunk_msg[Protocol::MSG_PAYLOAD] = {
         {"path", requested_path_str},
-        {"chunk_index", 0},   // Î¨Ò»µÄ¿é£¬Ë÷ÒıÎª0
-        {"total_chunks", 1},  // ×Ü¹²ÓĞ1¸ö¿é
-        {"data", ""}          // Êı¾İÎª¿Õ
+        {"chunk_index", 0},   // å”¯ä¸€çš„å—ï¼Œç´¢å¼•ä¸º0
+        {"total_chunks", 1},  // æ€»å…±æœ‰1ä¸ªå—
+        {"data", ""}          // æ•°æ®ä¸ºç©º
     };
     send_over_kcp(chunk_msg.dump(), from_endpoint);
-    return;  // ´¦ÀíÍê±Ï£¬Ö±½Ó·µ»Ø
+    return;  // å¤„ç†å®Œæ¯•ï¼Œç›´æ¥è¿”å›
   }
 
   int total_chunks =
       static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE);
   std::vector<char> buffer(CHUNK_DATA_SIZE);
 
-  std::cout << "[KCP] ÕıÔÚ½«ÎÄ¼ş '" << requested_path_str << "' (" << size
-            << " ×Ö½Ú) ·Ö³É " << total_chunks << " ¿é·¢ËÍ¸ø " << from_endpoint
+  std::cout << "[KCP] æ­£åœ¨å°†æ–‡ä»¶ '" << requested_path_str << "' (" << size
+            << " å­—èŠ‚) åˆ†æˆ " << total_chunks << " å—å‘é€ç»™ " << from_endpoint
             << std::endl;
 
   for (int i = 0; i < total_chunks; ++i) {
@@ -432,11 +646,11 @@ void P2PManager::handle_file_request(const nlohmann::json& payload,
                                         {"chunk_index", i},
                                         {"total_chunks", total_chunks},
                                         {"data", encoded_stream.str()}};
-    send_over_kcp(chunk_msg.dump(), from_endpoint);  // Í¨¹ıKCP·¢ËÍ
+    send_over_kcp(chunk_msg.dump(), from_endpoint);  // é€šè¿‡KCPå‘é€
   }
 }
 
-// ´¦ÀíÎÄ¼ş¿é 
+// å¤„ç†æ–‡ä»¶å— 
 void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
   std::string file_path_str = payload.at("path").get<std::string>();
   int chunk_index = payload.at("chunk_index").get<int>();
@@ -452,14 +666,14 @@ void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
   assembly_info.first = total_chunks;
   assembly_info.second[chunk_index] = decoded_stream.str();
 
-  std::cout << "[KCP] ÊÕµ½ÎÄ¼ş '" << file_path_str << "' µÄ¿é "
+  std::cout << "[KCP] æ”¶åˆ°æ–‡ä»¶ '" << file_path_str << "' çš„å— "
             << chunk_index + 1 << "/" << total_chunks << " ("
-            << assembly_info.second[chunk_index].size() << " ×Ö½Ú)."
+            << assembly_info.second[chunk_index].size() << " å­—èŠ‚)."
             << std::endl;
 
   if (assembly_info.second.size() == total_chunks) {
-    std::cout << "[KCP] ÎÄ¼ş '" << file_path_str
-              << "' µÄËùÓĞ¿éÒÑÊÕÆë£¬ÕıÔÚÖØ×é..." << std::endl;
+    std::cout << "[KCP] æ–‡ä»¶ '" << file_path_str
+              << "' çš„æ‰€æœ‰å—å·²æ”¶é½ï¼Œæ­£åœ¨é‡ç»„..." << std::endl;
 
     std::filesystem::path relative_path(
         reinterpret_cast<const char8_t*>(file_path_str.c_str()));
@@ -472,7 +686,7 @@ void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
 
     std::ofstream output_file(full_path, std::ios::binary);
     if (!output_file.is_open()) {
-      std::cerr << "[P2P] ´´½¨ÎÄ¼şÊ§°Ü: " << full_path.string() << std::endl;
+      std::cerr << "[P2P] åˆ›å»ºæ–‡ä»¶å¤±è´¥: " << full_path.string() << std::endl;
       m_file_assembly_buffer.erase(file_path_str);
       return;
     }
@@ -483,7 +697,7 @@ void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
     }
     output_file.close();
 
-    std::cout << "[P2P] ³É¹¦: ÎÄ¼ş '" << file_path_str << "' ÒÑ±£´æ¡£"
+    std::cout << "[P2P] æˆåŠŸ: æ–‡ä»¶ '" << file_path_str << "' å·²ä¿å­˜ã€‚"
               << std::endl;
     m_file_assembly_buffer.erase(file_path_str);
   }

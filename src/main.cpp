@@ -1,91 +1,153 @@
-#include <filesystem>
+﻿#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
+
+
 #include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
 
-// ---����������ͻ���ļ��� ---
-void create_dummy_files(const std::string& dir) {
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN  // 避免不必要的 Windows API
+#include <windows.h>
+#endif
+
+// ---：创建不冲突的文件集 ---
+// 仅当是 Source 模式时才创建，避免污染 Destination
+void create_dummy_files(const std::string& dir, const std::string& node_id) {
   std::filesystem::path root(dir);
   std::filesystem::create_directories(root);
 
-  if (dir.find("SyncNode1") != std::string::npos) {
-    std::cout << "[TestSetup] Creating files for Node 1..." << std::endl;
-    std::ofstream(root / "file_from_node1.txt") << "This file originated on Node 1.";
+  if (node_id == "node1") {
+    std::cout << "[TestSetup] (Source) Creating files for Node 1..."
+              << std::endl;
+    std::ofstream(root / "file_from_node1.txt")
+        << "This file originated on Node 1.";
     std::filesystem::create_directory(root / "common_dir");
     std::ofstream(root / "common_dir" / "doc_A.txt") << "Document A";
-  }
-  else if (dir.find("SyncNode2") != std::string::npos) {
-    std::cout << "[TestSetup] Creating files for Node 2..." << std::endl;
-    std::ofstream(root / "log_from_node2.log") << "This log file originated on Node 2.";
+  } else if (node_id == "node2") {
+    std::cout << "[TestSetup] (Source) Creating files for Node 2..."
+              << std::endl;
+    std::ofstream(root / "log_from_node2.log")
+        << "This log file originated on Node 2.";
     std::filesystem::create_directory(root / "common_dir");
     std::ofstream(root / "common_dir" / "doc_B.txt") << "Document B";
   }
 }
 
 int main(int argc, char* argv[]) {
-  if (argc != 4) {
-    std::cerr << "Usage: " << argv[0] << " <sync_key> <p2p_port> <sync_folder>"
-              << std::endl;
-    std::cerr << "Example: " << argv[0] << " my-secret-key 10001 ./SyncNode1"
-              << std::endl;
+  // --- 新增：在 main 函数开头设置控制台编码 ---
+#if defined(_WIN32)
+  // 将 Windows 控制台的输出代码页设置为 UTF-8 (65001)
+  SetConsoleOutputCP(CP_UTF8);
+  std::cout << "[System] Windows console output set to UTF-8." << std::endl;
+#endif
+  // --- 修改参数检查和用法 ---
+  if (argc != 5) {  // 需要 5 个参数
+    std::cerr << "Usage: " << argv[0]
+              << " <mode> <sync_key> <p2p_port> <sync_folder>" << std::endl;
+    std::cerr << "Mode: 'source' 或 'destination'" << std::endl;
+    std::cerr << "Example (Source): " << argv[0]
+              << " source my-key 10001 ./SyncNode_A" << std::endl;
+    std::cerr << "Example (Dest):   " << argv[0]
+              << " destination my-key 10002 ./SyncNode_B" << std::endl;
     std::cerr << "\nNOTE: The Tracker server must be running on localhost:9988."
               << std::endl;
     return 1;
   }
 
-  // --- ���쳣�����Ĳ������� ---
-  std::string sync_key = argv[1];
+  // --- 解析新参数 ---
+  std::string mode_str = argv[1];
+  std::string sync_key = argv[2];
   unsigned short p2p_port = 0;
-  std::string sync_folder = argv[3];
+  std::string sync_folder = argv[4];
 
+  // 验证模式
+  VeritasSync::SyncRole role;
+  bool is_source;
+  if (mode_str == "source") {
+    role = VeritasSync::SyncRole::Source;
+    is_source = true;
+  } else if (mode_str == "destination") {
+    role = VeritasSync::SyncRole::Destination;
+    is_source = false;
+  } else {
+    std::cerr << "[Error] Invalid mode: '" << mode_str
+              << "'. Must be 'source' or 'destination'." << std::endl;
+    return 1;
+  }
+
+  // 解析端口 (argv[3] 现在是端口)
   try {
-    p2p_port = static_cast<unsigned short>(std::stoi(argv[2]));
+    p2p_port = static_cast<unsigned short>(std::stoi(argv[3]));
     if (p2p_port == 0) {
       throw std::invalid_argument("Port number cannot be 0.");
     }
   } catch (const std::invalid_argument& e) {
-    std::cerr << "[Error] Invalid P2P port provided. '" << argv[2]
-              << "' is not a valid number. Details: " << e.what() << std::endl;
+    std::cerr << "[Error] Invalid P2P port provided. '" << argv[3] << "'. "
+              << e.what() << std::endl;
     return 1;
   } catch (const std::out_of_range& e) {
-    std::cerr << "[Error] P2P port provided '" << argv[2]
+    std::cerr << "[Error] P2P port provided '" << argv[3]
               << "' is out of range for a port number. Details: " << e.what()
               << std::endl;
     return 1;
   }
 
   std::cout << "--- Veritas Sync Node ---" << std::endl;
+  std::cout << "[Config] Mode: " << mode_str << std::endl;
   std::cout << "[Config] Sync Key: " << sync_key << std::endl;
   std::cout << "[Config] P2P Port: " << p2p_port << std::endl;
   std::cout << "[Config] Sync Folder: " << sync_folder << std::endl;
 
-  if (std::filesystem::exists(sync_folder)) {
-    std::filesystem::remove_all(sync_folder);
+  // --- 修改测试文件的创建 ---
+  if (is_source) {
+    // 假设文件夹名包含 "Node1" 或 "Node2" 来决定创建哪些文件
+    // 这是一个临时的测试方案
+    if (std::filesystem::exists(sync_folder)) {
+      std::filesystem::remove_all(sync_folder);
+    }
+    if (sync_folder.find("Node1") != std::string::npos) {
+      create_dummy_files(sync_folder, "node1");
+    } else if (sync_folder.find("Node2") != std::string::npos) {
+      create_dummy_files(sync_folder, "node2");
+    } else {
+      std::filesystem::create_directories(sync_folder);
+      std::cout << "[TestSetup] (Source) 正在使用空目录。" << std::endl;
+    }
+  } else {
+    // Destination 模式下，如果文件夹不存在，只创建它，不填充文件
+    if (!std::filesystem::exists(sync_folder)) {
+      std::filesystem::create_directories(sync_folder);
+      std::cout << "[TestSetup] (Destination) 文件夹已创建。" << std::endl;
+    }
   }
-  create_dummy_files(sync_folder);
-  std::cout << "[TestSetup] Dummy files created in " << sync_folder
-            << std::endl;
-  // 1. ���� P2PManager
+
+  // 1. 创建 P2PManager
   auto p2p_manager = VeritasSync::P2PManager::create(p2p_port);
 
-  // 2. ���� StateManager������p2p_manager�����ô��ݸ���
-  VeritasSync::StateManager state_manager(sync_folder, *p2p_manager);
+  // --- 注入角色 ---
+  p2p_manager->set_role(role);
 
-  // 3. �� StateManager �ĵ�ַ��ע�롱�� P2PManager ��
+  p2p_manager->set_encryption_key(sync_key);
+
+  // 2. 创建 StateManager，传入 enable_watcher 标志
+  VeritasSync::StateManager state_manager(sync_folder, *p2p_manager, is_source);
+
+  // 3. 将 StateManager 的地址“注入”到 P2PManager 中
   p2p_manager->set_state_manager(&state_manager);
 
-  // ��ʼ���ļ�������һ�γ�ʼɨ��͹㲥
-  create_dummy_files(sync_folder);
-  std::cout << "[TestSetup] Dummy files created in " << sync_folder
-            << std::endl;
+  // 初始化扫描
   state_manager.scan_directory();
-  p2p_manager->broadcast_current_state();  // ��ѡ������ʱ�㲥һ��״̬
+
+  // --- 仅 Source 在启动时广播 ---
+  if (is_source) {
+    p2p_manager->broadcast_current_state();
+  }
 
   std::cout << "\n--- Phase 1: Contacting Tracker ---" << std::endl;
   VeritasSync::TrackerClient tracker_client("127.0.0.1", 9988);
@@ -108,8 +170,9 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n--- Node is running. Press Ctrl+C to exit. ---" << std::endl;
-  std::this_thread::sleep_for(std::chrono::seconds(100));
-  std::cout << "--- Test finished. Shutting down. ---" << std::endl;
+  // 保持运行，这里用一个较长的时间模拟
+  std::this_thread::sleep_for(std::chrono::hours(24));
+  std::cout << "--- Shutting down. ---" << std::endl;
 
   return 0;
 }

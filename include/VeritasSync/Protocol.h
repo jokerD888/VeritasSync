@@ -1,30 +1,30 @@
-#pragma once
+ï»¿#pragma once
 
 #include <string>
 #include <vector>
-#include <cstdint> // ÓÃÓÚ uint64_t
+#include <cstdint> // ç”¨äº uint64_t
 
 #include <nlohmann/json.hpp>
 
 namespace VeritasSync {
 
-  // ÓÃÓÚÃèÊöµ¥¸öÎÄ¼ş×´Ì¬µÄ½á¹¹Ìå
+  // ç”¨äºæè¿°å•ä¸ªæ–‡ä»¶çŠ¶æ€çš„ç»“æ„ä½“
   struct FileInfo {
-    std::string path;              // ÎÄ¼şµÄÏà¶ÔÂ·¾¶
-    std::string hash;              // ÎÄ¼şµÄSHA-256¹şÏ£Öµ
-    std::uint64_t modified_time;   // ÎÄ¼şµÄ×îºóĞŞ¸ÄÊ±¼ä (ÀıÈç£¬×Ô¼ÍÔªÒÔÀ´µÄÃëÊı)
+    std::string path;              // æ–‡ä»¶çš„ç›¸å¯¹è·¯å¾„
+    std::string hash;              // æ–‡ä»¶çš„SHA-256å“ˆå¸Œå€¼
+    std::uint64_t modified_time;   // æ–‡ä»¶çš„æœ€åä¿®æ”¹æ—¶é—´ (ä¾‹å¦‚ï¼Œè‡ªçºªå…ƒä»¥æ¥çš„ç§’æ•°)
 
-    // ÎªÁË·½±ã£¬ÖØÔØÒ»ÏÂ±È½Ï²Ù×÷·û
+    // ä¸ºäº†æ–¹ä¾¿ï¼Œé‡è½½ä¸€ä¸‹æ¯”è¾ƒæ“ä½œç¬¦
     bool operator==(const FileInfo& other) const {
       return path == other.path && hash == other.hash && modified_time == other.modified_time;
     }
   };
 
-  // --- nlohmann/json ¼¯³ÉÄ§·¨ ---
-  // Í¨¹ıÔÚÎÒÃÇµÄÃüÃû¿Õ¼äÖĞ¶¨ÒåÕâÁ½¸öº¯Êı£¬nlohmann/json¿â¾ÍÄÜ×Ô¶¯ÖªµÀ
-  // ÈçºÎ½«ÎÒÃÇµÄ FileInfo ½á¹¹ÌåÓëJSON¶ÔÏóÏà»¥×ª»»¡£
+  // --- nlohmann/json é›†æˆé­”æ³• ---
+  // é€šè¿‡åœ¨æˆ‘ä»¬çš„å‘½åç©ºé—´ä¸­å®šä¹‰è¿™ä¸¤ä¸ªå‡½æ•°ï¼Œnlohmann/jsonåº“å°±èƒ½è‡ªåŠ¨çŸ¥é“
+  // å¦‚ä½•å°†æˆ‘ä»¬çš„ FileInfo ç»“æ„ä½“ä¸JSONå¯¹è±¡ç›¸äº’è½¬æ¢ã€‚
 
-  // ½« FileInfo ¶ÔÏó×ª»»Îª JSON ¶ÔÏó
+  // å°† FileInfo å¯¹è±¡è½¬æ¢ä¸º JSON å¯¹è±¡
   inline void to_json(nlohmann::json& j, const FileInfo& info) {
     j = nlohmann::json{
         {"path", info.path},
@@ -33,7 +33,7 @@ namespace VeritasSync {
     };
   }
 
-  // ½« JSON ¶ÔÏó×ª»»Îª FileInfo ¶ÔÏó
+  // å°† JSON å¯¹è±¡è½¬æ¢ä¸º FileInfo å¯¹è±¡
   inline void from_json(const nlohmann::json& j, FileInfo& info) {
     j.at("path").get_to(info.path);
     j.at("hash").get_to(info.hash);
@@ -41,18 +41,20 @@ namespace VeritasSync {
   }
 
 
-  // --- Ğ­ÒéÏûÏ¢ÀàĞÍ¶¨Òå ---
-  // Ê¹ÓÃÒ»¸ö½á¹¹ÌåÀ´´æ·ÅËùÓĞĞ­ÒéÖĞÓÃµ½µÄ×Ö·û´®³£Á¿£¬±ãÓÚ¹ÜÀí
+  // --- åè®®æ¶ˆæ¯ç±»å‹å®šä¹‰ ---
+  // ä½¿ç”¨ä¸€ä¸ªç»“æ„ä½“æ¥å­˜æ”¾æ‰€æœ‰åè®®ä¸­ç”¨åˆ°çš„å­—ç¬¦ä¸²å¸¸é‡ï¼Œä¾¿äºç®¡ç†
   struct Protocol {
-    // ÏûÏ¢ÀàĞÍ
+    // æ¶ˆæ¯ç±»å‹
     static constexpr const char* MSG_TYPE = "type";
     static constexpr const char* MSG_PAYLOAD = "payload";
 
-    // `type` ×Ö¶ÎµÄ¸÷ÖÖÖµ
+    // `type` å­—æ®µçš„å„ç§å€¼
     static constexpr const char* TYPE_SHARE_STATE = "share_state";
     static constexpr const char* TYPE_REQUEST_FILE = "request_file";
     static constexpr const char* TYPE_FILE_CHUNK = "file_chunk";
-    // ... Î´À´ÎÒÃÇ¿ÉÒÔÔÚÕâÀïÌí¼Ó¸ü¶àÏûÏ¢ÀàĞÍ, Èç MSG_FILE_CHUNK ...
+
+    static constexpr const char* TYPE_FILE_UPDATE = "file_update";  // æ–‡ä»¶æ–°å¢æˆ–ä¿®æ”¹
+    static constexpr const char* TYPE_FILE_DELETE = "file_delete";  // æ–‡ä»¶åˆ é™¤
   };
 
 

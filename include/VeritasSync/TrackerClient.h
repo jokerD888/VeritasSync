@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <string>
 #include <vector>
@@ -7,12 +7,12 @@ namespace VeritasSync {
 
 class TrackerClient {
  public:
-  // ¹¹Ôìº¯Êı£¬Ö¸¶¨tracker·şÎñÆ÷µÄµØÖ·ºÍ¶Ë¿Ú
+  // æ„é€ å‡½æ•°ï¼ŒæŒ‡å®štrackeræœåŠ¡å™¨çš„åœ°å€å’Œç«¯å£
   TrackerClient(std::string host, unsigned short port);
 
-  // ºËĞÄ¹¦ÄÜ£ºÏòTracker×¢²á×Ô¼º£¬²¢²éÑ¯Í¬Ò»Í¬²½×éµÄÆäËû½Úµã
-  // ·µ»ØÖµÊÇ "IP:Port" ¸ñÊ½µÄ×Ö·û´®ÁĞ±í
-  // ÎªÁË¼ò»¯£¬ÎÒÃÇÔÚÕâÀïÊ¹ÓÃÍ¬²½(×èÈû)µÄ·½Ê½Ö´ĞĞ
+  // æ ¸å¿ƒåŠŸèƒ½ï¼šå‘Trackeræ³¨å†Œè‡ªå·±ï¼Œå¹¶æŸ¥è¯¢åŒä¸€åŒæ­¥ç»„çš„å…¶ä»–èŠ‚ç‚¹
+  // è¿”å›å€¼æ˜¯ "IP:Port" æ ¼å¼çš„å­—ç¬¦ä¸²åˆ—è¡¨
+  // ä¸ºäº†ç®€åŒ–ï¼Œæˆ‘ä»¬åœ¨è¿™é‡Œä½¿ç”¨åŒæ­¥(é˜»å¡)çš„æ–¹å¼æ‰§è¡Œ
   std::vector<std::string> register_and_query(const std::string& sync_key,
                                               unsigned short p2p_port);
 

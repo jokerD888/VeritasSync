@@ -1,0 +1,17 @@
+# .editorconfig
+# 告诉所有编辑器这是顶级配置
+root = true
+
+[*]
+# 适用于所有文件
+indent_style = space
+indent_size = 2
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cpp,h}]
+# --- 这是解决你问题的关键 ---
+# 告诉编辑器将所有 C++ 源文件和头文件
+# 默认保存为 "UTF-8 带签名 (BOM)" 格式
+charset = utf-8-bom

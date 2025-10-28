@@ -1,4 +1,4 @@
-#include "VeritasSync/TrackerClient.h"
+﻿#include "VeritasSync/TrackerClient.h"
 
 #include <boost/asio.hpp>
 #include <iostream>

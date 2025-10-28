@@ -1,4 +1,4 @@
-#pragma once  
+ï»¿#pragma once  
 
 #include <filesystem>  
 #include <string>  
@@ -7,9 +7,9 @@ namespace VeritasSync {
 
 class Hashing {  
  public:  
-  // ¼ÆËãÎÄ¼şµÄSHA-256¹şÏ£Öµ  
-  // ÊäÈë: ÎÄ¼şÂ·¾¶  
-  // Êä³ö: 64¸ö×Ö·ûµÄÊ®Áù½øÖÆ¹şÏ£×Ö·û´®£¬Èç¹ûÊ§°ÜÔò·µ»Ø¿Õ×Ö·û´®  
+  // è®¡ç®—æ–‡ä»¶çš„SHA-256å“ˆå¸Œå€¼  
+  // è¾“å…¥: æ–‡ä»¶è·¯å¾„  
+  // è¾“å‡º: 64ä¸ªå­—ç¬¦çš„åå…­è¿›åˆ¶å“ˆå¸Œå­—ç¬¦ä¸²ï¼Œå¦‚æœå¤±è´¥åˆ™è¿”å›ç©ºå­—ç¬¦ä¸²  
   static std::string CalculateSHA256(const std::filesystem::path& filePath);  
 };  
 
