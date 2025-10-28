@@ -1,6 +1,4 @@
 ﻿#pragma once
-#include "VeritasSync/Protocol.h"  // 需要包含 Protocol.h
-
 
 #include <ikcp.h>
 
@@ -14,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "VeritasSync/Protocol.h"  // 需要包含 Protocol.h
 
 namespace VeritasSync {
 
@@ -46,8 +45,6 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
   void set_state_manager(StateManager* sm);
   void set_role(SyncRole role);
 
-  void set_encryption_key(const std::string& sync_key);
-
   static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp,
                                  void* user);
 
@@ -58,7 +55,6 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
                     const udp::endpoint& endpoint);
 
   // --- 广播方法 (由 StateManager 调用) ---
-  // (Source 模式)
   void broadcast_current_state();  // 用于启动时的全量同步
   void broadcast_file_update(const FileInfo& file_info);
   void broadcast_file_delete(const std::string& relative_path);
@@ -84,31 +80,23 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
       const udp::endpoint& endpoint);
 
   // --- 上层应用逻辑 (由KCP调用) ---
-  void send_over_kcp(const std::string& plaintext_msg,
+  void send_over_kcp(const std::string& msg,
                      const udp::endpoint& target_endpoint);
-  void handle_kcp_message(
-      const std::string& plaintext_msg,  // --- msg 重命名为 plaintext_msg
-      const udp::endpoint& from_endpoint);
+  void handle_kcp_message(const std::string& msg,
+                          const udp::endpoint& from_endpoint);
 
   // --- 具体的消息处理器 ---
-  // (Destination 模式)
   void handle_share_state(const nlohmann::json& payload,
                           const udp::endpoint& from_endpoint);
   void handle_file_update(const nlohmann::json& payload,
                           const udp::endpoint& from_endpoint);
   void handle_file_delete(const nlohmann::json& payload,
                           const udp::endpoint& from_endpoint);
-  // (Source 模式)
   void handle_file_request(const nlohmann::json& payload,
                            const udp::endpoint& from_endpoint);
-  // (Destination 模式)
   void handle_file_chunk(const nlohmann::json& payload);
 
-  std::string encrypt_message(const std::string& plaintext);
-  std::string decrypt_message(const std::string& ciphertext_package);
-
   // --- 成员变量 ---
-  std::vector<unsigned char> m_encryption_key;
   boost::asio::io_context m_io_context;
   udp::socket m_socket;
   std::jthread m_thread;

@@ -2,27 +2,31 @@
 
 #include <openssl/sha.h>
 
+#include <chrono>  // 用于 sleep
 #include <fstream>
 #include <iomanip>
+#include <iostream>  // 用于日志
 #include <sstream>
+#include <thread>  // 用于 sleep
 #include <vector>
-#include <iostream>
-#include <thread>
 
 namespace VeritasSync {
 
 std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
-  // --- 修改：使用 non-throwing (ec) 重载 ---
+  // --- 修复：使用 non-throwing (ec) 重载 ---
   std::error_code ec;
 
   // 1. 检查文件是否存在且为常规文件
   if (!std::filesystem::exists(filePath, ec) || ec ||
       !std::filesystem::is_regular_file(filePath, ec) || ec) {
-    return "";  // 返回空表示失败 (包括目录、不存在或出错)
+    // 这是预期的行为，例如当检查一个目录时
+    return "";
   }
 
   // 2. 以二进制模式打开文件
   std::ifstream file(filePath, std::ios::binary);
+
+  // --- 修复：处理文件锁定的重试逻辑 ---
   if (!file.is_open()) {
     std::cerr << "[Hashing] 无法立即打开文件 (可能被锁定): "
               << filePath.string() << ". 250ms 后重试..." << std::endl;
@@ -37,6 +41,7 @@ std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
       return "";  // 放弃
     }
   }
+  // ------------------------------------
 
   // 3. 初始化SHA256上下文
   SHA256_CTX sha256Context;

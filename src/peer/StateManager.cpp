@@ -1,15 +1,16 @@
 ﻿#include "VeritasSync/StateManager.h"
-#include "VeritasSync/Hashing.h"
-#include "VeritasSync/P2PManager.h"
 
 #include <boost/asio.hpp>
 #include <efsw/efsw.hpp>
 #include <iostream>
 
+#include "VeritasSync/Hashing.h"
+#include "VeritasSync/P2PManager.h"
 
 namespace VeritasSync {
 
-// 这个类继承自 efsw::FileWatchListener，用于接收文件变化通知
+// UpdateListener 现在更简单了
+// 它只负责通知 StateManager 发生了变化，并处理防抖
 class UpdateListener : public efsw::FileWatchListener {
  public:
   // --- 修改：构造函数现在接收 StateManager* ---
@@ -25,10 +26,14 @@ class UpdateListener : public efsw::FileWatchListener {
       return;
     }
 
-    // 1. 通知 StateManager 将变化暂存
+    // --- 修复：使用 std::filesystem::path 来安全拼接路径 ---
     std::filesystem::path dir_path(dir);
     std::filesystem::path file_path = dir_path / filename;
+
+    // 1. 通知 StateManager 将变化暂存
+    //    使用 generic_string() 来获取一个可移植的、使用 / 分隔符的 UTF-8 路径
     m_owner->notify_change_detected(file_path.generic_string());
+    // ---------------------------------------------------
 
     // 2. 重置防抖计时器
     m_debounce_timer.cancel();
@@ -49,16 +54,20 @@ class UpdateListener : public efsw::FileWatchListener {
   boost::asio::steady_timer m_debounce_timer;
 };
 
+// --- StateManager 实现 ---
+
 StateManager::StateManager(const std::string& root_path,
                            P2PManager& p2p_manager, bool enable_watcher)
-    : m_root_path(root_path), m_p2p_manager(&p2p_manager) {
+    : m_root_path(root_path),
+      m_p2p_manager(&p2p_manager)  // --- 新增：保存 P2PManager 指针 ---
+{
   if (!std::filesystem::exists(m_root_path)) {
     std::cout << "[StateManager] 根目录 " << m_root_path
               << " 不存在，正在创建。" << std::endl;
     std::filesystem::create_directory(m_root_path);
   }
 
-if (enable_watcher) {
+  if (enable_watcher) {
     m_file_watcher = std::make_unique<efsw::FileWatcher>();
     // --- 修改：将 'this' 传递给 UpdateListener ---
     m_listener = std::make_unique<UpdateListener>(this);
@@ -76,9 +85,9 @@ StateManager::~StateManager() {
   if (m_file_watcher) {
     std::cout << "[StateManager] 正在停止文件监控..." << std::endl;
   }
-  // unique_ptr 会自动处理销毁，无需代码
 }
 
+// --- 新增：实现 get_io_context ---
 boost::asio::io_context& StateManager::get_io_context() {
   return m_p2p_manager->get_io_context();
 }
@@ -107,23 +116,19 @@ void StateManager::process_debounced_changes() {
     std::filesystem::path full_path(full_path_str);
     std::filesystem::path relative_path;
 
-    // efsw 可能会在根目录创建/删除时给出根目录本身的路径
     if (full_path == m_root_path) continue;
 
     std::error_code ec;
     relative_path = std::filesystem::relative(full_path, m_root_path, ec);
     if (ec) continue;
 
-    // 将 std::filesystem::path 安全地转为 UTF-8 字符串
     const std::u8string u8_path_str = relative_path.u8string();
     std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()),
                              u8_path_str.length());
 
     // --- 判断是“更新”还是“删除” ---
     if (std::filesystem::exists(full_path, ec) && !ec) {
-      // 文件存在 (Add 或 Modified)
       if (!std::filesystem::is_regular_file(full_path, ec) || ec) {
-        // 如果是目录或其他，则跳过
         continue;
       }
 
@@ -136,7 +141,12 @@ void StateManager::process_debounced_changes() {
       info.modified_time = sctp.time_since_epoch().count();
 
       info.hash = Hashing::CalculateSHA256(full_path);
-      if (info.hash.empty()) continue;
+      if (info.hash.empty()) {
+        // 哈希为空 (可能是被锁定了)，跳过
+        std::cerr << "[StateManager] 哈希计算失败 (文件可能被锁定): "
+                  << rel_path_str << std::endl;
+        continue;
+      }
 
       // 更新 m_file_map 并广播
       m_file_map[info.path] = info;
@@ -146,7 +156,6 @@ void StateManager::process_debounced_changes() {
     } else {
       // 文件不存在 (Delete)
       if (m_file_map.erase(rel_path_str) > 0) {
-        // 仅当文件之前在 map 中时才广播
         std::cout << "[StateManager] 广播删除: " << rel_path_str << std::endl;
         m_p2p_manager->broadcast_file_delete(rel_path_str);
       }
@@ -160,14 +169,14 @@ void StateManager::remove_path_from_map(const std::string& relative_path) {
   m_file_map.erase(relative_path);
 }
 
+// --- 修改：为 scan_directory 添加锁 ---
 void StateManager::scan_directory() {
   std::cout << "[StateManager] Scanning directory: " << m_root_path
             << std::endl;
+
   std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
   m_file_map.clear();
 
-  // --- 关键修改 ---
-  // 为迭代器构造函数提供一个error_code对象，以避免在路径出错时抛出异常
   std::error_code ec;
   auto iterator =
       std::filesystem::recursive_directory_iterator(m_root_path, ec);
@@ -175,47 +184,39 @@ void StateManager::scan_directory() {
   if (ec) {
     std::cerr << "[StateManager] Error creating directory iterator for path "
               << m_root_path << ": " << ec.message() << std::endl;
-    return;  // 如果创建迭代器失败，则直接返回
+    return;
   }
 
   for (const auto& entry : iterator) {
-    // 在循环内部也进行检查，确保entry本身是有效的
     if (!entry.is_regular_file(ec) || ec) {
-      // 如果不是常规文件或检查时出错，跳过这个条目
       continue;
     }
 
     FileInfo info;
 
-    // 1. 获取相对路径
     std::filesystem::path relative_path =
         std::filesystem::relative(entry.path(), m_root_path);
 
-    // 2. 使用 u8string() 方法将路径安全地转换为UTF-8编码的字符串
-    //    这可以正确处理包括中文在内的所有Unicode字符。
     const std::u8string u8_path_str = relative_path.u8string();
     info.path = std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
                             u8_path_str.length());
 
-    // 2. 获取最后修改时间 (这部分逻辑不变)
     auto ftime = std::filesystem::last_write_time(entry, ec);
     if (ec) continue;
     auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
     info.modified_time = sctp.time_since_epoch().count();
 
-    // 3. 计算哈希值 (这部分逻辑不变)
     info.hash = Hashing::CalculateSHA256(entry.path());
     if (info.hash.empty()) continue;
 
-    // 4. 存入map
     m_file_map[info.path] = info;
   }
   std::cout << "[StateManager] Scan complete. Found " << m_file_map.size()
             << " files." << std::endl;
 }
 
+// --- 修改：为 get_state_as_json_string 添加锁 ---
 std::string StateManager::get_state_as_json_string() {
-  // 1. 将map中的FileInfo对象转换成一个vector
   std::vector<FileInfo> files;
   {
     std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
@@ -223,21 +224,17 @@ std::string StateManager::get_state_as_json_string() {
       files.push_back(pair.second);
     }
   }
-
-  // 2. 使用nlohmann/json库构建JSON对象
   nlohmann::json payload;
-  payload["files"] = files;  // 这里利用了我们之前定义的 to_json 函数
-
+  payload["files"] = files;
   nlohmann::json message;
   message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
   message[Protocol::MSG_PAYLOAD] = payload;
-
-  // 3. 将JSON对象序列化为字符串
-  return message.dump(2);  // dump(2) 表示使用2个空格进行格式化，便于阅读
+  return message.dump(2);
 }
 
+// --- 修改：为 print_current_state 添加锁 ---
 void StateManager::print_current_state() const {
-  std::lock_guard<std::mutex> lock(m_file_map_mutex);
+  std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
   std::cout << "\n--- Current Directory State ---" << std::endl;
   for (const auto& pair : m_file_map) {
     std::cout << "  - Path: " << pair.second.path << std::endl;

@@ -34,7 +34,7 @@ add_executable(veritas_sync
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
-    src/peer/Crypto.cpp
+    
     src/peer/StateManager.cpp
     src/peer/SyncManager.cpp
 )

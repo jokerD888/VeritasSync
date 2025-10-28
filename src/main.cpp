@@ -5,19 +5,18 @@
 #include <string>
 #include <thread>
 
-
-
+// --- 正确的头文件顺序，用于修复编译和乱码 ---
 #include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
 
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN  // 避免不必要的 Windows API
+#define WIN32_LEAN_AND_MEAN  // 避免 winsock 冲突
 #include <windows.h>
 #endif
+// ------------------------------------------
 
 // ---：创建不冲突的文件集 ---
-// 仅当是 Source 模式时才创建，避免污染 Destination
 void create_dummy_files(const std::string& dir, const std::string& node_id) {
   std::filesystem::path root(dir);
   std::filesystem::create_directories(root);
@@ -40,13 +39,13 @@ void create_dummy_files(const std::string& dir, const std::string& node_id) {
 }
 
 int main(int argc, char* argv[]) {
-  // --- 新增：在 main 函数开头设置控制台编码 ---
+  // --- 设置控制台编码 ---
 #if defined(_WIN32)
-  // 将 Windows 控制台的输出代码页设置为 UTF-8 (65001)
   SetConsoleOutputCP(CP_UTF8);
   std::cout << "[System] Windows console output set to UTF-8." << std::endl;
 #endif
-  // --- 修改参数检查和用法 ---
+
+  // --- 参数检查 ---
   if (argc != 5) {  // 需要 5 个参数
     std::cerr << "Usage: " << argv[0]
               << " <mode> <sync_key> <p2p_port> <sync_folder>" << std::endl;
@@ -60,13 +59,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // --- 解析新参数 ---
+  // --- 解析参数 ---
   std::string mode_str = argv[1];
   std::string sync_key = argv[2];
   unsigned short p2p_port = 0;
   std::string sync_folder = argv[4];
 
-  // 验证模式
   VeritasSync::SyncRole role;
   bool is_source;
   if (mode_str == "source") {
@@ -81,20 +79,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // 解析端口 (argv[3] 现在是端口)
   try {
     p2p_port = static_cast<unsigned short>(std::stoi(argv[3]));
     if (p2p_port == 0) {
       throw std::invalid_argument("Port number cannot be 0.");
     }
-  } catch (const std::invalid_argument& e) {
+  } catch (const std::exception& e) {
     std::cerr << "[Error] Invalid P2P port provided. '" << argv[3] << "'. "
               << e.what() << std::endl;
-    return 1;
-  } catch (const std::out_of_range& e) {
-    std::cerr << "[Error] P2P port provided '" << argv[3]
-              << "' is out of range for a port number. Details: " << e.what()
-              << std::endl;
     return 1;
   }
 
@@ -104,10 +96,7 @@ int main(int argc, char* argv[]) {
   std::cout << "[Config] P2P Port: " << p2p_port << std::endl;
   std::cout << "[Config] Sync Folder: " << sync_folder << std::endl;
 
-  // --- 修改测试文件的创建 ---
   if (is_source) {
-    // 假设文件夹名包含 "Node1" 或 "Node2" 来决定创建哪些文件
-    // 这是一个临时的测试方案
     if (std::filesystem::exists(sync_folder)) {
       std::filesystem::remove_all(sync_folder);
     }
@@ -120,7 +109,6 @@ int main(int argc, char* argv[]) {
       std::cout << "[TestSetup] (Source) 正在使用空目录。" << std::endl;
     }
   } else {
-    // Destination 模式下，如果文件夹不存在，只创建它，不填充文件
     if (!std::filesystem::exists(sync_folder)) {
       std::filesystem::create_directories(sync_folder);
       std::cout << "[TestSetup] (Destination) 文件夹已创建。" << std::endl;
@@ -130,21 +118,21 @@ int main(int argc, char* argv[]) {
   // 1. 创建 P2PManager
   auto p2p_manager = VeritasSync::P2PManager::create(p2p_port);
 
-  // --- 注入角色 ---
+  // 2. 注入角色
   p2p_manager->set_role(role);
 
-  p2p_manager->set_encryption_key(sync_key);
+  // (移除 set_encryption_key)
 
-  // 2. 创建 StateManager，传入 enable_watcher 标志
+  // 3. 创建 StateManager
   VeritasSync::StateManager state_manager(sync_folder, *p2p_manager, is_source);
 
-  // 3. 将 StateManager 的地址“注入”到 P2PManager 中
+  // 4. 注入 StateManager
   p2p_manager->set_state_manager(&state_manager);
 
-  // 初始化扫描
+  // 5. 初始扫描
   state_manager.scan_directory();
 
-  // --- 仅 Source 在启动时广播 ---
+  // 6. Source 启动时广播
   if (is_source) {
     p2p_manager->broadcast_current_state();
   }
@@ -170,7 +158,6 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n--- Node is running. Press Ctrl+C to exit. ---" << std::endl;
-  // 保持运行，这里用一个较长的时间模拟
   std::this_thread::sleep_for(std::chrono::hours(24));
   std::cout << "--- Shutting down. ---" << std::endl;
 
