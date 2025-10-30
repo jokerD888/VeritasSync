@@ -26,18 +26,31 @@ class UpdateListener : public efsw::FileWatchListener {
       return;
     }
 
-    // --- 修复：使用 std::filesystem::path 来安全拼接路径 ---
-    std::filesystem::path dir_path(dir);
-    std::filesystem::path file_path = dir_path / filename;
+    // 1. 使用 std::u8string_view 构造函数，从 efsw 的 UTF-8 字符串正确构造路径
+    std::filesystem::path file_path =
+        std::filesystem::path(std::u8string_view(
+            reinterpret_cast<const char8_t*>(dir.c_str()), dir.length())) /
+        std::u8string_view(reinterpret_cast<const char8_t*>(filename.c_str()),
+                           filename.length());
+
+    // 2. 将此正确的路径对象转换为可移植的 UTF-8 字符串 (使用
+    // .generic_u8string())
+    std::u8string u8_generic_path = file_path.generic_u8string();
+
+    // 3. 将 u8string 转换回 std::string (字节保持不变) 以便存储在
+    // m_pending_changes 中
+    std::string path_to_store(
+        reinterpret_cast<const char*>(u8_generic_path.c_str()),
+        u8_generic_path.length());
 
     // 1. 通知 StateManager 将变化暂存
     //    使用 generic_string() 来获取一个可移植的、使用 / 分隔符的 UTF-8 路径
-    m_owner->notify_change_detected(file_path.generic_string());
+    m_owner->notify_change_detected(path_to_store);
     // ---------------------------------------------------
 
     // 2. 重置防抖计时器
     m_debounce_timer.cancel();
-    m_debounce_timer.expires_after(std::chrono::milliseconds(200));
+    m_debounce_timer.expires_after(std::chrono::milliseconds(1500));
 
     // 3. 计时器触发后，调用 StateManager 的处理函数
     m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
@@ -58,7 +71,7 @@ class UpdateListener : public efsw::FileWatchListener {
 
 StateManager::StateManager(const std::string& root_path,
                            P2PManager& p2p_manager, bool enable_watcher)
-    : m_root_path(root_path),
+    : m_root_path(std::filesystem::absolute(root_path)),
       m_p2p_manager(&p2p_manager)  // --- 新增：保存 P2PManager 指针 ---
 {
   if (!std::filesystem::exists(m_root_path)) {
@@ -113,7 +126,12 @@ void StateManager::process_debounced_changes() {
   std::lock_guard<std::mutex> map_lock(m_file_map_mutex);  // 锁定 m_file_map
 
   for (const auto& full_path_str : changes_to_process) {
-    std::filesystem::path full_path(full_path_str);
+    // full_path_str 现在是包含 UTF-8 字节的 std::string
+    // 必须使用 u8string_view 构造函数来创建有效的 path 对象
+    std::filesystem::path full_path(std::u8string_view(
+        reinterpret_cast<const char8_t*>(full_path_str.c_str()),
+        full_path_str.length()));
+
     std::filesystem::path relative_path;
 
     if (full_path == m_root_path) continue;

@@ -365,8 +365,9 @@ void P2PManager::handle_share_state(const nlohmann::json& payload,
     std::cout << "[Sync] 计划删除 " << actions.files_to_delete.size()
               << " 个本地多余的文件。" << std::endl;
     for (const auto& file_path_str : actions.files_to_delete) {
-      std::filesystem::path relative_path(
-          reinterpret_cast<const char8_t*>(file_path_str.c_str()));
+      std::filesystem::path relative_path(std::u8string_view(
+          reinterpret_cast<const char8_t*>(file_path_str.c_str()),
+          file_path_str.length()));
       std::filesystem::path full_path =
           m_state_manager->get_root_path() / relative_path;
 
@@ -410,8 +411,9 @@ void P2PManager::handle_file_update(const nlohmann::json& payload,
   std::cout << "[KCP] (Destination) 收到增量更新: " << remote_info.path
             << std::endl;
 
-  std::filesystem::path relative_path(
-      reinterpret_cast<const char8_t*>(remote_info.path.c_str()));
+  std::filesystem::path relative_path(std::u8string_view(
+      reinterpret_cast<const char8_t*>(remote_info.path.c_str()),
+      remote_info.path.length()));
   std::filesystem::path full_path =
       m_state_manager->get_root_path() / relative_path;
 
@@ -458,8 +460,10 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload,
   std::cout << "[KCP] (Destination) 收到增量删除: " << relative_path_str
             << std::endl;
 
-  std::filesystem::path relative_path(
-      reinterpret_cast<const char8_t*>(relative_path_str.c_str()));
+  std::filesystem::path relative_path(std::u8string_view(
+      reinterpret_cast<const char8_t*>(relative_path_str.c_str()),
+      relative_path_str.length()));
+ 
   std::filesystem::path full_path =
       m_state_manager->get_root_path() / relative_path;
 
@@ -487,8 +491,9 @@ void P2PManager::handle_file_request(const nlohmann::json& payload,
   std::cout << "[KCP] 收到来自 " << from_endpoint << " 对文件 '"
             << requested_path_str << "' 的请求。" << std::endl;
 
-  std::filesystem::path relative_path(
-      reinterpret_cast<const char8_t*>(requested_path_str.c_str()));
+  std::filesystem::path relative_path(std::u8string_view(
+      reinterpret_cast<const char8_t*>(requested_path_str.c_str()),
+      requested_path_str.length()));
   std::filesystem::path full_path =
       m_state_manager->get_root_path() / relative_path;
 
@@ -572,8 +577,10 @@ void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
     std::cout << "[KCP] 文件 '" << file_path_str
               << "' 的所有块已收齐，正在重组..." << std::endl;
 
-    std::filesystem::path relative_path(
-        reinterpret_cast<const char8_t*>(file_path_str.c_str()));
+    std::filesystem::path relative_path(std::u8string_view(
+        reinterpret_cast<const char8_t*>(file_path_str.c_str()),
+        file_path_str.length()));
+        
     std::filesystem::path full_path =
         m_state_manager->get_root_path() / relative_path;
 

@@ -34,7 +34,6 @@ add_executable(veritas_sync
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
-    
     src/peer/StateManager.cpp
     src/peer/SyncManager.cpp
 )
@@ -58,6 +57,12 @@ target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-sta
 # 目标 2: veritas_tracker (服务器程序)
 # ===========================================================
 add_executable(veritas_tracker src/tracker/main.cpp)
+
+add_executable(efsw_test
+    src/efsw_test.cpp
+)
+
+target_link_libraries(efsw_test PRIVATE efsw::efsw)
 
 
 # --- 为 veritas_tracker 链接库 ---
