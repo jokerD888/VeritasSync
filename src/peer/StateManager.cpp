@@ -19,11 +19,31 @@ class UpdateListener : public efsw::FileWatchListener {
         m_debounce_timer(owner->get_io_context()) {
   }  // 从 owner 获取 io_context
 
-  void handleFileAction(efsw::WatchID, const std::string& dir,
-                        const std::string& filename, efsw::Action action,
-                        std::string) override {
+void handleFileAction(
+      efsw::WatchID, const std::string& dir, const std::string& filename,
+      efsw::Action action,
+      std::string oldFilename) override {  // <-- 启用 oldFilename
     if (filename == "." || filename == "..") {
       return;
+    }
+
+    if (action == efsw::Actions::Moved && !oldFilename.empty()) {
+      // 这是一个重命名，我们必须把 "oldFilename" 也作为一个变更来通知
+      // StateManager 稍后会检查它，发现它 "不存在"，并将其作为 "Delete" 处理
+      std::filesystem::path old_file_path =
+          std::filesystem::path(std::u8string_view(
+              reinterpret_cast<const char8_t*>(dir.c_str()), dir.length())) /
+          std::u8string_view(
+              reinterpret_cast<const char8_t*>(oldFilename.c_str()),
+              oldFilename.length());
+
+      std::u8string u8_generic_old_path = old_file_path.generic_u8string();
+      std::string old_path_to_store(
+          reinterpret_cast<const char*>(u8_generic_old_path.c_str()),
+          u8_generic_old_path.length());
+
+      m_owner->notify_change_detected(old_path_to_store);
+      // 注意：我们没有 'return'，因为我们紧接着要处理 'filename' (新文件)
     }
 
     // 1. 使用 std::u8string_view 构造函数，从 efsw 的 UTF-8 字符串正确构造路径
@@ -50,7 +70,7 @@ class UpdateListener : public efsw::FileWatchListener {
 
     // 2. 重置防抖计时器
     m_debounce_timer.cancel();
-    m_debounce_timer.expires_after(std::chrono::milliseconds(1500));
+    m_debounce_timer.expires_after(std::chrono::milliseconds(5000));
 
     // 3. 计时器触发后，调用 StateManager 的处理函数
     m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {

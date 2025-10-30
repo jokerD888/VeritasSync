@@ -469,14 +469,14 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload,
 
   std::error_code ec;
   if (std::filesystem::remove(full_path, ec)) {
-    std::cout << "[Sync] -> 已删除本地文件: " << full_path.string()
+    std::cout << "[Sync] -> 已删除本地文件 (相对路径): " << relative_path_str
               << std::endl;
     m_state_manager->remove_path_from_map(relative_path_str);
   } else {
     // 修复：使用 ec != ... 来正确比较
     if (ec != std::errc::no_such_file_or_directory) {
-      std::cerr << "[Sync] -> 删除本地文件失败: " << full_path.string()
-                << " Error: " << ec.message() << std::endl;
+      std::cerr << "[Sync] -> 删除本地文件失败 (相对路径): "
+                << relative_path_str << " Error: " << ec.message() << std::endl;
     } else {
       std::cout << "[Sync] -> 本地文件已不存在, 无需操作。" << std::endl;
     }
