@@ -14,6 +14,7 @@
 
 #include "VeritasSync/Protocol.h"  // 需要包含 Protocol.h
 
+
 namespace VeritasSync {
 
 // --- 定义同步角色 ---
@@ -40,6 +41,8 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
  public:
   boost::asio::io_context& get_io_context();
   static std::shared_ptr<P2PManager> create(unsigned short port);
+
+  void set_encryption_key(const std::string& key_string);
 
   // --- 依赖注入 ---
   void set_state_manager(StateManager* sm);
@@ -94,7 +97,10 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
                           const udp::endpoint& from_endpoint);
   void handle_file_request(const nlohmann::json& payload,
                            const udp::endpoint& from_endpoint);
-  void handle_file_chunk(const nlohmann::json& payload);
+  void handle_file_chunk(const std::string& payload);
+
+  std::string encrypt_gcm(const std::string& plaintext);
+  std::string decrypt_gcm(const std::string& ciphertext);
 
   // --- 成员变量 ---
   boost::asio::io_context m_io_context;
@@ -110,6 +116,7 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
 
   std::map<std::string, std::pair<int, std::map<int, std::string>>>
       m_file_assembly_buffer;
+  std::string m_encryption_key;  // 存储 32 字节的 SHA-256 派生密钥
 };
 
 }  // namespace VeritasSync

@@ -121,7 +121,7 @@ int main(int argc, char* argv[]) {
   // 2. 注入角色
   p2p_manager->set_role(role);
 
-  // (移除 set_encryption_key)
+  p2p_manager->set_encryption_key(sync_key);
 
   // 3. 创建 StateManager
   VeritasSync::StateManager state_manager(sync_folder, *p2p_manager, is_source);

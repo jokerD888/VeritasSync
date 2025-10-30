@@ -1,5 +1,7 @@
 ﻿#include "VeritasSync/P2PManager.h"
 
+#include <snappy.h>
+
 #include <algorithm>
 #include <fstream>
 #include <functional>
@@ -16,8 +18,48 @@
 
 #include <b64/decode.h>
 #include <b64/encode.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+
+#include <boost/asio/detail/socket_ops.hpp>
 
 namespace VeritasSync {
+
+static const uint8_t MSG_TYPE_JSON = 0x01;
+static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
+
+void append_uint16(std::string& s, uint16_t val) {
+  uint16_t net_val =
+      boost::asio::detail::socket_ops::host_to_network_short(val);
+  s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
+}
+
+// 写入 4 字节的网络序 uint32_t
+void append_uint32(std::string& s, uint32_t val) {
+  uint32_t net_val = boost::asio::detail::socket_ops::host_to_network_long(val);
+  s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
+}
+
+// 读取 2 字节的网络序 uint16_t
+uint16_t read_uint16(const char*& data, size_t& len) {
+  if (len < sizeof(uint16_t)) return 0;
+  uint16_t net_val;
+  std::memcpy(&net_val, data, sizeof(net_val));
+  data += sizeof(net_val);
+  len -= sizeof(net_val);
+  return boost::asio::detail::socket_ops::network_to_host_short(net_val);
+}
+
+// 读取 4 字节的网络序 uint32_t
+uint32_t read_uint32(const char*& data, size_t& len) {
+  if (len < sizeof(uint32_t)) return 0;
+  uint32_t net_val;
+  std::memcpy(&net_val, data, sizeof(net_val));
+  data += sizeof(net_val);
+  len -= sizeof(net_val);
+  return boost::asio::detail::socket_ops::network_to_host_long(net_val);
+}
 
 //================================================================================
 // PeerContext 实现
@@ -43,6 +85,143 @@ void PeerContext::setup_kcp(uint32_t conv) {
 //================================================================================
 // P2PManager 实现
 //================================================================================
+
+void P2PManager::set_encryption_key(const std::string& key_string) {
+  unsigned char hash[SHA256_DIGEST_LENGTH];
+
+  SHA256_CTX sha256;
+  SHA256_Init(&sha256);
+  SHA256_Update(&sha256, key_string.c_str(), key_string.length());
+  SHA256_Final(hash, &sha256);
+
+  // m_encryption_key 现在存储的是 32 字节的原始 SHA-256 哈希值
+  m_encryption_key.assign(reinterpret_cast<const char*>(hash),
+                          SHA256_DIGEST_LENGTH);
+
+  std::cout << "[P2P] 加密密钥已从 'sync_key' 派生。" << std::endl;
+}
+
+// 定义 GCM 所需的常量
+static const int GCM_IV_LEN = 12;   // 推荐的 12 字节 (96 位) IV
+static const int GCM_TAG_LEN = 16;  // 16 字节 (128 位) 认证标签
+
+// 辅助函数：加密
+std::string P2PManager::encrypt_gcm(const std::string& plaintext) {
+  if (m_encryption_key.empty()) {
+    std::cerr << "[KCP] 加密失败：密钥未设置。" << std::endl;
+    return "";
+  }
+
+  // 1. 生成 12 字节的随机 IV (Initialization Vector)
+  unsigned char iv[GCM_IV_LEN];
+  if (RAND_bytes(iv, sizeof(iv)) != 1) {
+    std::cerr << "[KCP] 加密失败：无法生成 IV。" << std::endl;
+    return "";
+  }
+
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) return "";
+
+  // 2. 初始化加密操作 (AES-256-GCM)
+  EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
+  // 3. 设置 IV 长度 (GCM 默认为 12)
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
+  // 4. 设置密钥和 IV
+  EVP_EncryptInit_ex(
+      ctx, NULL, NULL,
+      reinterpret_cast<const unsigned char*>(m_encryption_key.c_str()), iv);
+
+  int out_len;
+  std::vector<unsigned char> ciphertext(plaintext.length() +
+                                        EVP_MAX_BLOCK_LENGTH);
+  // 5. 加密数据
+  EVP_EncryptUpdate(ctx, ciphertext.data(), &out_len,
+                    reinterpret_cast<const unsigned char*>(plaintext.c_str()),
+                    plaintext.length());
+  int ciphertext_len = out_len;
+
+  // 6. 结束加密 (获取最后的密文块)
+  EVP_EncryptFinal_ex(ctx, ciphertext.data() + out_len, &out_len);
+  ciphertext_len += out_len;
+
+  // 7. 获取 16 字节的认证标签
+  unsigned char tag[GCM_TAG_LEN];
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag);
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  // 8. 构造我们的数据包：[IV] + [Ciphertext] + [Tag]
+  std::string final_payload;
+  final_payload.append(reinterpret_cast<const char*>(iv), GCM_IV_LEN);
+  final_payload.append(reinterpret_cast<const char*>(ciphertext.data()),
+                       ciphertext_len);
+  final_payload.append(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
+
+  return final_payload;
+}
+
+// 辅助函数：解密
+std::string P2PManager::decrypt_gcm(const std::string& ciphertext) {
+  if (m_encryption_key.empty()) {
+    std::cerr << "[KCP] 解密失败：密钥未设置。" << std::endl;
+    return "";
+  }
+
+  if (ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) {
+    std::cerr << "[KCP] 解密失败：数据包过短。" << std::endl;
+    return "";
+  }
+
+  // 1. 解析数据包：[IV] + [Ciphertext] + [Tag]
+  const unsigned char* iv =
+      reinterpret_cast<const unsigned char*>(ciphertext.c_str());
+  const unsigned char* tag = reinterpret_cast<const unsigned char*>(
+      ciphertext.c_str() + ciphertext.length() - GCM_TAG_LEN);
+  const unsigned char* encrypted_data =
+      reinterpret_cast<const unsigned char*>(ciphertext.c_str() + GCM_IV_LEN);
+  int encrypted_data_len = ciphertext.length() - GCM_IV_LEN - GCM_TAG_LEN;
+
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) return "";
+
+  // 2. 初始化解密
+  EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
+  // 3. 设置 IV 长度
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
+  // 4. 设置密钥和 IV
+  EVP_DecryptInit_ex(
+      ctx, NULL, NULL,
+      reinterpret_cast<const unsigned char*>(m_encryption_key.c_str()), iv);
+
+  int out_len;
+  std::vector<unsigned char> plaintext(encrypted_data_len);
+  // 5. 解密数据
+  EVP_DecryptUpdate(ctx, plaintext.data(), &out_len, encrypted_data,
+                    encrypted_data_len);
+  int plaintext_len = out_len;
+
+  // 6. *关键*：在解密完成前，设置期望的认证标签
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN,
+                      const_cast<unsigned char*>(tag));
+
+  // 7. 结束解密。
+  // *如果标签不匹配* (数据被篡改或密钥错误)，这一步会失败 (返回 0)
+  int ret = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &out_len);
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  if (ret > 0) {
+    // 成功
+    plaintext_len += out_len;
+    return std::string(reinterpret_cast<const char*>(plaintext.data()),
+                       plaintext_len);
+  } else {
+    // 失败！(标签不匹配)
+    std::cerr << "[KCP] 解密失败：认证标签不匹配 (数据可能被篡改或密钥错误)。"
+              << std::endl;
+    return "";
+  }
+}
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
@@ -298,45 +477,80 @@ std::shared_ptr<PeerContext> P2PManager::get_or_create_peer_context(
 // --- 回退：移除加密 ---
 void P2PManager::send_over_kcp(const std::string& msg,
                                const udp::endpoint& target_endpoint) {
+  std::string json_packet;
+  json_packet.push_back(MSG_TYPE_JSON);
+  json_packet.append(msg);
+
+  std::string encrypted_msg = encrypt_gcm(json_packet);
+  if (encrypted_msg.empty()) {
+    std::cerr << "[KCP] 错误：加密失败，JSON 消息未发送至 " << target_endpoint
+              << std::endl;
+    return;
+  }
   std::lock_guard<std::mutex> lock(m_peers_mutex);
   auto it = m_peers.find(target_endpoint);
   if (it != m_peers.end()) {
-    // 发送明文
-    ikcp_send(it->second->kcp, msg.c_str(), msg.length());
+    // 发送密文
+    ikcp_send(it->second->kcp, encrypted_msg.c_str(), encrypted_msg.length());
   } else {
     std::cerr << "[KCP] 错误: 尝试向一个未建立KCP上下文的对等点发送消息: "
               << target_endpoint << std::endl;
   }
 }
-
-// --- 增量更新：处理所有消息类型 ---
 void P2PManager::handle_kcp_message(const std::string& msg,
                                     const udp::endpoint& from_endpoint) {
-  try {
-    auto json = nlohmann::json::parse(msg);
-    const std::string msg_type = json.at(Protocol::MSG_TYPE).get<std::string>();
-    auto& payload = json.at(Protocol::MSG_PAYLOAD);
+  std::string decrypted_msg = decrypt_gcm(msg);
+  if (decrypted_msg.empty()) {
+    return;  // 认证失败或密钥错误，错误已在 decrypt_gcm 中打印
+  }
 
-    if (msg_type == Protocol::TYPE_SHARE_STATE &&
-        m_role == SyncRole::Destination) {
-      handle_share_state(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_FILE_UPDATE &&
-               m_role == SyncRole::Destination) {
-      handle_file_update(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_FILE_DELETE &&
-               m_role == SyncRole::Destination) {
-      handle_file_delete(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_REQUEST_FILE &&
-               m_role == SyncRole::Source) {
-      handle_file_request(payload, from_endpoint);
-    } else if (msg_type == Protocol::TYPE_FILE_CHUNK &&
-               m_role == SyncRole::Destination) {
-      handle_file_chunk(payload);
+  if (decrypted_msg.empty()) {
+    std::cerr << "[KCP] 收到空解密包。" << std::endl;
+    return;
+  }
+
+  // --- 修改：解析包类型 ---
+  uint8_t msg_type = decrypted_msg[0];
+  // 消息的剩余部分是 payload
+  std::string payload(decrypted_msg.begin() + 1, decrypted_msg.end());
+
+  if (msg_type == MSG_TYPE_JSON) {
+    // --- 这是原有的 JSON 处理逻辑 ---
+    try {
+      auto json = nlohmann::json::parse(payload);  // 解析 payload
+      const std::string json_msg_type =
+          json.at(Protocol::MSG_TYPE).get<std::string>();
+      auto& json_payload = json.at(Protocol::MSG_PAYLOAD);
+
+      if (json_msg_type == Protocol::TYPE_SHARE_STATE &&
+          m_role == SyncRole::Destination) {
+        handle_share_state(json_payload, from_endpoint);
+      } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE &&
+                 m_role == SyncRole::Destination) {
+        handle_file_update(json_payload, from_endpoint);
+      } else if (json_msg_type == Protocol::TYPE_FILE_DELETE &&
+                 m_role == SyncRole::Destination) {
+        handle_file_delete(json_payload, from_endpoint);
+      } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE &&
+                 m_role == SyncRole::Source) {
+        handle_file_request(json_payload, from_endpoint);
+      }
+      // *** 注意：TYPE_FILE_CHUNK 的 case 已被移除 ***
+
+    } catch (const std::exception& e) {
+      std::cerr << "[P2P] 处理KCP JSON消息时发生错误: " << e.what()
+                << std::endl;
+      std::cerr << "       原始JSON: " << payload << std::endl;
     }
+    // --- JSON 逻辑结束 ---
 
-  } catch (const std::exception& e) {
-    std::cerr << "[P2P] 处理KCP消息时发生错误: " << e.what() << std::endl;
-    std::cerr << "       原始消息: " << msg << std::endl;
+  } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
+    // --- 新增：调用二进制块处理器 ---
+    if (m_role == SyncRole::Destination) {
+      handle_file_chunk(payload);  // 传递原始二进制 payload
+    }
+  } else {
+    std::cerr << "[KCP] 收到未知消息类型: " << (int)msg_type << std::endl;
   }
 }
 
@@ -373,9 +587,12 @@ void P2PManager::handle_share_state(const nlohmann::json& payload,
 
       std::error_code ec;
       if (std::filesystem::remove(full_path, ec)) {
-        std::cout << "[Sync] -> 已删除: " << full_path.string() << std::endl;
+        // --- 修复：使用 UTF-8 的相对路径 ---
+        std::cout << "[Sync] -> 已删除 (相对路径): " << file_path_str
+                  << std::endl;
       } else if (ec != std::errc::no_such_file_or_directory) {
-        std::cerr << "[Sync] -> 删除失败: " << full_path.string()
+        // --- 修复：同样修改错误日志 ---
+        std::cerr << "[Sync] -> 删除失败 (相对路径): " << file_path_str
                   << " Error: " << ec.message() << std::endl;
       }
     }
@@ -463,7 +680,7 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload,
   std::filesystem::path relative_path(std::u8string_view(
       reinterpret_cast<const char8_t*>(relative_path_str.c_str()),
       relative_path_str.length()));
- 
+
   std::filesystem::path full_path =
       m_state_manager->get_root_path() / relative_path;
 
@@ -482,11 +699,8 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload,
     }
   }
 }
-
-// --- handle_file_request 和 handle_file_chunk 不变 ---
 void P2PManager::handle_file_request(const nlohmann::json& payload,
                                      const udp::endpoint& from_endpoint) {
-  // ... (此函数不变) ...
   const std::string requested_path_str = payload.at("path").get<std::string>();
   std::cout << "[KCP] 收到来自 " << from_endpoint << " 对文件 '"
             << requested_path_str << "' 的请求。" << std::endl;
@@ -511,16 +725,35 @@ void P2PManager::handle_file_request(const nlohmann::json& payload,
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
 
+  // (辅助 lambda send_binary_packet 保持不变)
+  auto send_binary_packet = [&](std::string packet_payload) {
+    std::string binary_packet;
+    binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
+    binary_packet.append(std::move(packet_payload));
+    std::string encrypted_msg = encrypt_gcm(binary_packet);
+    if (encrypted_msg.empty()) {
+      std::cerr << "[KCP] 错误：加密失败，文件块未发送至 " << from_endpoint
+                << std::endl;
+      return;
+    }
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    auto it = m_peers.find(from_endpoint);
+    if (it != m_peers.end()) {
+      ikcp_send(it->second->kcp, encrypted_msg.c_str(), encrypted_msg.length());
+    }
+  };
+
   if (size == 0) {
     std::cout << "[KCP] 正在发送零字节文件 '" << requested_path_str
               << "' 的元信息..." << std::endl;
-    nlohmann::json chunk_msg;
-    chunk_msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_CHUNK;
-    chunk_msg[Protocol::MSG_PAYLOAD] = {{"path", requested_path_str},
-                                        {"chunk_index", 0},
-                                        {"total_chunks", 1},
-                                        {"data", ""}};
-    send_over_kcp(chunk_msg.dump(), from_endpoint);
+    std::string packet_payload;
+    append_uint16(packet_payload,
+                  static_cast<uint16_t>(requested_path_str.length()));
+    packet_payload.append(requested_path_str);
+    append_uint32(packet_payload, 0);  // chunk_index
+    append_uint32(packet_payload, 1);  // total_chunks
+    // (数据部分为空)
+    send_binary_packet(std::move(packet_payload));
     return;
   }
 
@@ -529,50 +762,78 @@ void P2PManager::handle_file_request(const nlohmann::json& payload,
   std::vector<char> buffer(CHUNK_DATA_SIZE);
 
   std::cout << "[KCP] 正在将文件 '" << requested_path_str << "' (" << size
-            << " 字节) 分成 " << total_chunks << " 块发送给 " << from_endpoint
-            << std::endl;
+            << " 字节) 分成 " << total_chunks << " 块 (压缩并) 发送给 "
+            << from_endpoint << std::endl;
 
   for (int i = 0; i < total_chunks; ++i) {
     file.read(buffer.data(), CHUNK_DATA_SIZE);
     std::streamsize bytes_read = file.gcount();
 
-    std::stringstream raw_data_stream;
-    raw_data_stream.write(buffer.data(), bytes_read);
-    std::stringstream encoded_stream;
-    base64::encoder E;
-    E.encode(raw_data_stream, encoded_stream);
+    // --- 核心修改：压缩 ---
+    std::string compressed_data;
+    snappy::Compress(buffer.data(), bytes_read, &compressed_data);
+    // ---
 
-    nlohmann::json chunk_msg;
-    chunk_msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_CHUNK;
-    chunk_msg[Protocol::MSG_PAYLOAD] = {{"path", requested_path_str},
-                                        {"chunk_index", i},
-                                        {"total_chunks", total_chunks},
-                                        {"data", encoded_stream.str()}};
-    send_over_kcp(chunk_msg.dump(), from_endpoint);
+    std::string packet_payload;
+    append_uint16(packet_payload,
+                  static_cast<uint16_t>(requested_path_str.length()));
+    packet_payload.append(requested_path_str);
+    append_uint32(packet_payload, i);
+    append_uint32(packet_payload, total_chunks);
+    // --- 核心修改：附加压缩后的数据 ---
+    packet_payload.append(compressed_data);
+
+    send_binary_packet(std::move(packet_payload));
   }
 }
+void P2PManager::handle_file_chunk(const std::string& payload) {
+  const char* data_ptr = payload.c_str();
+  size_t data_len = payload.length();
 
-void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
-  // ... (此函数不变) ...
-  std::string file_path_str = payload.at("path").get<std::string>();
-  int chunk_index = payload.at("chunk_index").get<int>();
-  int total_chunks = payload.at("total_chunks").get<int>();
-  std::string encoded_data = payload.at("data").get<std::string>();
+  // 1. 读取路径
+  uint16_t path_len = read_uint16(data_ptr, data_len);
+  if (path_len == 0 || data_len < path_len) {
+    std::cerr << "[KCP] 二进制块解析失败：路径长度无效。" << std::endl;
+    return;
+  }
+  std::string file_path_str(data_ptr, path_len);
+  data_ptr += path_len;
+  data_len -= path_len;
 
-  std::stringstream encoded_stream(encoded_data);
-  std::stringstream decoded_stream;
-  base64::decoder D;
-  D.decode(encoded_stream, decoded_stream);
+  // 2. 读取索引和总数
+  uint32_t chunk_index = read_uint32(data_ptr, data_len);
+  uint32_t total_chunks = read_uint32(data_ptr, data_len);
+
+  // 3. 剩余的是 *压缩* 数据
+  std::string compressed_chunk_data(data_ptr, data_len);
+
+  // --- 核心修改：解压缩 ---
+  std::string uncompressed_data;
+  if (data_len == 0) {
+    // 数据为空，解压后的数据自然也为空。
+    // (uncompressed_data 已经是空字符串，我们什么都不用做)
+  } else if (!snappy::Uncompress(compressed_chunk_data.data(),
+                                 compressed_chunk_data.size(),
+                                 &uncompressed_data)) {
+    std::cerr << "[KCP] Snappy 解压失败 (包可能已损坏): " << file_path_str
+              << std::endl;
+    return;
+  }
+  // ---
 
   auto& assembly_info = m_file_assembly_buffer[file_path_str];
   assembly_info.first = total_chunks;
-  assembly_info.second[chunk_index] = decoded_stream.str();
+  assembly_info.second[chunk_index] =
+      std::move(uncompressed_data);  // 存储解压后的数据
 
+  // (美化日志输出)
   std::cout << "[KCP] 收到文件 '" << file_path_str << "' 的块 "
-            << chunk_index + 1 << "/" << total_chunks << " ("
-            << assembly_info.second[chunk_index].size() << " 字节)."
-            << std::endl;
+            << chunk_index + 1 << "/" << total_chunks
+            << " (压缩后: " << compressed_chunk_data.size()
+            << " 字节, 解压后: " << assembly_info.second[chunk_index].size()
+            << " 字节)." << std::endl;
 
+  // (文件重组逻辑保持不变)
   if (assembly_info.second.size() == total_chunks) {
     std::cout << "[KCP] 文件 '" << file_path_str
               << "' 的所有块已收齐，正在重组..." << std::endl;
@@ -580,7 +841,7 @@ void P2PManager::handle_file_chunk(const nlohmann::json& payload) {
     std::filesystem::path relative_path(std::u8string_view(
         reinterpret_cast<const char8_t*>(file_path_str.c_str()),
         file_path_str.length()));
-        
+
     std::filesystem::path full_path =
         m_state_manager->get_root_path() / relative_path;
 

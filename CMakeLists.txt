@@ -20,6 +20,8 @@ find_package(efsw CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(kcp CONFIG REQUIRED)
+find_package(Snappy CONFIG REQUIRED)
+
 
 # --- 包含目录 ---
 include_directories(${PROJECT_SOURCE_DIR}/include)
@@ -48,6 +50,7 @@ target_link_libraries(veritas_sync PRIVATE
     nlohmann_json::nlohmann_json
     b64
     kcp::kcp
+    Snappy::snappy
 )
 
 target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-static/lib")
