@@ -295,6 +295,47 @@ void P2PManager::broadcast_file_delete(const std::string& relative_path) {
   }
 }
 
+void P2PManager::broadcast_dir_create(const std::string& relative_path) {
+  if (m_role != SyncRole::Source) return;
+  std::cout << "[P2P] (Source) 广播增量目录创建: " << relative_path
+            << std::endl;
+  nlohmann::json msg;
+  msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_CREATE;
+  msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
+  // (广播到所有节点的逻辑，与 file_delete 相同)
+  std::vector<udp::endpoint> endpoints;
+  {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    for (const auto& pair : m_peers) {
+      endpoints.push_back(pair.first);
+    }
+  }
+  for (const auto& endpoint : endpoints) {
+    send_over_kcp(msg.dump(), endpoint);
+  }
+}
+
+void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
+  if (m_role != SyncRole::Source) return;
+  std::cout << "[P2P] (Source) 广播增量目录删除: " << relative_path
+            << std::endl;
+  nlohmann::json msg;
+  msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_DELETE;
+  msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
+  // (广播到所有节点的逻辑，与 file_delete 相同)
+  std::vector<udp::endpoint> endpoints;
+  {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    for (const auto& pair : m_peers) {
+      endpoints.push_back(pair.first);
+    }
+  }
+  for (const auto& endpoint : endpoints) {
+    send_over_kcp(msg.dump(), endpoint);
+  }
+}
+
+
 // --- 静态工厂与构造函数 ---
 std::shared_ptr<P2PManager> P2PManager::create(unsigned short port) {
   struct P2PManagerMaker : public P2PManager {
@@ -534,6 +575,12 @@ void P2PManager::handle_kcp_message(const std::string& msg,
       } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE &&
                  m_role == SyncRole::Source) {
         handle_file_request(json_payload, from_endpoint);
+      } else if (json_msg_type == Protocol::TYPE_DIR_CREATE &&
+                 m_role == SyncRole::Destination) {
+        handle_dir_create(json_payload);
+      } else if (json_msg_type == Protocol::TYPE_DIR_DELETE &&
+                 m_role == SyncRole::Destination) {
+        handle_dir_delete(json_payload, from_endpoint);
       }
       // *** 注意：TYPE_FILE_CHUNK 的 case 已被移除 ***
 
@@ -564,6 +611,8 @@ void P2PManager::handle_share_state(const nlohmann::json& payload,
 
   std::vector<FileInfo> remote_files =
       payload.at("files").get<std::vector<FileInfo>>();
+  std::set<std::string> remote_dirs =
+      payload.at("directories").get<std::set<std::string>>();
 
   m_state_manager->scan_directory();
   nlohmann::json temp_json =
@@ -572,13 +621,21 @@ void P2PManager::handle_share_state(const nlohmann::json& payload,
                                           .at("files")
                                           .get<std::vector<FileInfo>>();
 
-  SyncActions actions =
-      SyncManager::compare_states_and_get_requests(local_files, remote_files);
+  std::set<std::string> local_dirs = m_state_manager->get_local_directories();
+  std::cout << "[SyncManager] 正在比较本地目录 (" << local_dirs.size()
+            << " 个) 与远程目录 (" << remote_dirs.size() << " 个)."
+            << std::endl;
 
-  if (!actions.files_to_delete.empty()) {
-    std::cout << "[Sync] 计划删除 " << actions.files_to_delete.size()
+  SyncActions file_actions =
+      SyncManager::compare_states_and_get_requests(local_files, remote_files);
+  // --- 新增：比较目录 ---
+  DirSyncActions dir_actions =
+      SyncManager::compare_dir_states(local_dirs, remote_dirs);
+
+  if (!file_actions.files_to_delete.empty()) {
+    std::cout << "[Sync] 计划删除 " << file_actions.files_to_delete.size()
               << " 个本地多余的文件。" << std::endl;
-    for (const auto& file_path_str : actions.files_to_delete) {
+    for (const auto& file_path_str : file_actions.files_to_delete) {
       std::filesystem::path relative_path(std::u8string_view(
           reinterpret_cast<const char8_t*>(file_path_str.c_str()),
           file_path_str.length()));
@@ -597,12 +654,56 @@ void P2PManager::handle_share_state(const nlohmann::json& payload,
       }
     }
   }
+  if (!dir_actions.dirs_to_delete.empty()) {
+    std::cout << "[Sync] 计划删除 " << dir_actions.dirs_to_delete.size()
+              << " 个本地多余的目录。" << std::endl;
+    for (const auto& dir_path_str : dir_actions.dirs_to_delete) {
+      std::filesystem::path relative_path(std::u8string_view(
+          reinterpret_cast<const char8_t*>(dir_path_str.c_str()),
+          dir_path_str.length()));
+      std::filesystem::path full_path =
+          m_state_manager->get_root_path() / relative_path;
 
-  if (!actions.files_to_request.empty()) {
+      std::error_code ec;
+      // --- 关键：使用 remove_all ---
+      std::filesystem::remove_all(full_path, ec);
+      if (!ec) {
+        std::cout << "[Sync] -> 已删除目录 (相对路径): " << dir_path_str
+                  << std::endl;
+      } else if (ec != std::errc::no_such_file_or_directory) {
+        std::cerr << "[Sync] -> 删除目录失败 (相对路径): " << dir_path_str
+                  << " Error: " << ec.message() << std::endl;
+      }
+    }
+  }
+
+  if (!dir_actions.dirs_to_create.empty()) {
+    std::cout << "[Sync] 计划创建 " << dir_actions.dirs_to_create.size()
+              << " 个缺失的目录。" << std::endl;
+    for (const auto& dir_path_str : dir_actions.dirs_to_create) {
+      std::filesystem::path relative_path(std::u8string_view(
+          reinterpret_cast<const char8_t*>(dir_path_str.c_str()),
+          dir_path_str.length()));
+      std::filesystem::path full_path =
+          m_state_manager->get_root_path() / relative_path;
+
+      std::error_code ec;
+      std::filesystem::create_directories(full_path, ec);
+      if (!ec) {
+        std::cout << "[Sync] -> 已创建目录 (相对路径): " << dir_path_str
+                  << std::endl;
+      } else {
+        std::cerr << "[Sync] -> 创建目录失败 (相对路径): " << dir_path_str
+                  << " Error: " << ec.message() << std::endl;
+      }
+    }
+  }
+
+  if (!file_actions.files_to_request.empty()) {
     std::cout << "[KCP] 计划向 " << from_endpoint << " (Source) 请求 "
-              << actions.files_to_request.size() << " 个缺失/过期的文件。"
+              << file_actions.files_to_request.size() << " 个缺失/过期的文件。"
               << std::endl;
-    for (const auto& file_path : actions.files_to_request) {
+    for (const auto& file_path : file_actions.files_to_request) {
       nlohmann::json request_msg;
       request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
       request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
@@ -699,6 +800,79 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload,
     }
   }
 }
+
+void P2PManager::handle_dir_create(const nlohmann::json& payload) {
+  if (m_role != SyncRole::Destination) return;
+
+  std::string relative_path_str;
+  try {
+    relative_path_str = payload.at("path").get<std::string>();
+  } catch (const std::exception& e) {
+    std::cerr << "[KCP] (Destination) 解析 dir_create 失败: " << e.what()
+              << std::endl;
+    return;
+  }
+
+  std::cout << "[KCP] (Destination) 收到增量目录创建: " << relative_path_str
+            << std::endl;
+
+  std::filesystem::path relative_path(std::u8string_view(
+      reinterpret_cast<const char8_t*>(relative_path_str.c_str()),
+      relative_path_str.length()));
+  std::filesystem::path full_path =
+      m_state_manager->get_root_path() / relative_path;
+
+  std::error_code ec;
+  if (std::filesystem::create_directories(full_path, ec)) {
+    std::cout << "[Sync] -> 已创建目录: " << relative_path_str << std::endl;
+    m_state_manager->add_dir_to_map(relative_path_str);
+  } else if (ec) {
+    std::cerr << "[Sync] -> 创建目录失败: " << relative_path_str
+              << " Error: " << ec.message() << std::endl;
+  }
+}
+
+void P2PManager::handle_dir_delete(const nlohmann::json& payload,
+                                   const udp::endpoint& from_endpoint) {
+  if (m_role != SyncRole::Destination) return;
+
+  std::string relative_path_str;
+  try {
+    relative_path_str = payload.at("path").get<std::string>();
+  } catch (const std::exception& e) {
+    std::cerr << "[KCP] (Destination) 解析 dir_delete 失败: " << e.what()
+              << std::endl;
+    return;
+  }
+
+  std::cout << "[KCP] (Destination) 收到增量目录删除: " << relative_path_str
+            << std::endl;
+
+  std::filesystem::path relative_path(std::u8string_view(
+      reinterpret_cast<const char8_t*>(relative_path_str.c_str()),
+      relative_path_str.length()));
+  std::filesystem::path full_path =
+      m_state_manager->get_root_path() / relative_path;
+
+  std::error_code ec;
+  // 关键：使用 remove_all 来删除非空目录
+  std::filesystem::remove_all(full_path, ec);
+
+  if (!ec) {
+    std::cout << "[Sync] -> 已删除目录 (相对路径): " << relative_path_str
+              << std::endl;
+    m_state_manager->remove_dir_from_map(relative_path_str);
+  } else {
+    if (ec != std::errc::no_such_file_or_directory) {
+      std::cerr << "[Sync] -> 删除目录失败 (相对路径): " << relative_path_str
+                << " Error: " << ec.message() << std::endl;
+    } else {
+      std::cout << "[Sync] -> 本地目录已不存在, 无需操作。" << std::endl;
+    }
+  }
+}
+
+
 void P2PManager::handle_file_request(const nlohmann::json& payload,
                                      const udp::endpoint& from_endpoint) {
   const std::string requested_path_str = payload.at("path").get<std::string>();

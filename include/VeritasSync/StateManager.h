@@ -36,9 +36,13 @@ class StateManager {
   void print_current_state() const;
 
   const std::filesystem::path& get_root_path() const { return m_root_path; }
+  std::set<std::string> get_local_directories() const;
 
   // --- 新增：P2PManager 需要的辅助函数 ---
   boost::asio::io_context& get_io_context();
+  void add_dir_to_map(const std::string& relative_path);
+  void remove_dir_from_map(const std::string& relative_path);
+
   // (供 P2PManager::handle_file_delete 调用)
   void remove_path_from_map(const std::string& relative_path);
 
@@ -55,6 +59,9 @@ class StateManager {
   // 文件状态的核心存储结构
   std::map<std::string, FileInfo> m_file_map;
   mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
+
+  std::set<std::string> m_dir_map;
+  mutable std::mutex m_dir_map_mutex;
 
   // 文件监控器
   std::unique_ptr<efsw::FileWatcher> m_file_watcher;

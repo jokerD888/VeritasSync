@@ -61,6 +61,8 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
   void broadcast_current_state();  // 用于启动时的全量同步
   void broadcast_file_update(const FileInfo& file_info);
   void broadcast_file_delete(const std::string& relative_path);
+  void broadcast_dir_create(const std::string& relative_path);
+  void broadcast_dir_delete(const std::string& relative_path);
 
  private:
   static constexpr size_t MAX_UDP_PAYLOAD = 16384;
@@ -98,6 +100,9 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
   void handle_file_request(const nlohmann::json& payload,
                            const udp::endpoint& from_endpoint);
   void handle_file_chunk(const std::string& payload);
+  void handle_dir_create(const nlohmann::json& payload);
+  void handle_dir_delete(const nlohmann::json& payload,
+                         const udp::endpoint& from_endpoint);  // <-- 修复行
 
   std::string encrypt_gcm(const std::string& plaintext);
   std::string decrypt_gcm(const std::string& ciphertext);

@@ -19,7 +19,7 @@ class UpdateListener : public efsw::FileWatchListener {
         m_debounce_timer(owner->get_io_context()) {
   }  // 从 owner 获取 io_context
 
-void handleFileAction(
+  void handleFileAction(
       efsw::WatchID, const std::string& dir, const std::string& filename,
       efsw::Action action,
       std::string oldFilename) override {  // <-- 启用 oldFilename
@@ -120,6 +120,21 @@ StateManager::~StateManager() {
   }
 }
 
+std::set<std::string> StateManager::get_local_directories() const {
+  std::lock_guard<std::mutex> lock(m_dir_map_mutex);
+  return m_dir_map;
+}
+
+void StateManager::add_dir_to_map(const std::string& relative_path) {
+  std::lock_guard<std::mutex> lock(m_dir_map_mutex);
+  m_dir_map.insert(relative_path);
+}
+
+void StateManager::remove_dir_from_map(const std::string& relative_path) {
+  std::lock_guard<std::mutex> lock(m_dir_map_mutex);
+  m_dir_map.erase(relative_path);
+}
+
 // --- 新增：实现 get_io_context ---
 boost::asio::io_context& StateManager::get_io_context() {
   return m_p2p_manager->get_io_context();
@@ -143,11 +158,10 @@ void StateManager::process_debounced_changes() {
     m_pending_changes.swap(changes_to_process);
   }
 
-  std::lock_guard<std::mutex> map_lock(m_file_map_mutex);  // 锁定 m_file_map
+  std::lock_guard<std::mutex> file_lock(m_file_map_mutex);  // <-- 重命名
+  std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);    // <-- 新增
 
   for (const auto& full_path_str : changes_to_process) {
-    // full_path_str 现在是包含 UTF-8 字节的 std::string
-    // 必须使用 u8string_view 构造函数来创建有效的 path 对象
     std::filesystem::path full_path(std::u8string_view(
         reinterpret_cast<const char8_t*>(full_path_str.c_str()),
         full_path_str.length()));
@@ -166,36 +180,47 @@ void StateManager::process_debounced_changes() {
 
     // --- 判断是“更新”还是“删除” ---
     if (std::filesystem::exists(full_path, ec) && !ec) {
-      if (!std::filesystem::is_regular_file(full_path, ec) || ec) {
-        continue;
+      if (std::filesystem::is_regular_file(full_path, ec) || ec) {
+        FileInfo info;
+        info.path = rel_path_str;
+
+        auto ftime = std::filesystem::last_write_time(full_path, ec);
+        if (ec) continue;
+        auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+        info.modified_time = sctp.time_since_epoch().count();
+
+        info.hash = Hashing::CalculateSHA256(full_path);
+        if (info.hash.empty()) {
+          // 哈希为空 (可能是被锁定了)，跳过
+          std::cerr << "[StateManager] 哈希计算失败 (文件可能被锁定): "
+                    << rel_path_str << std::endl;
+          continue;
+        }
+
+        // 更新 m_file_map 并广播
+        m_file_map[info.path] = info;
+        std::cout << "[StateManager] 广播更新: " << info.path << std::endl;
+        m_p2p_manager->broadcast_file_update(info);
+      } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
+        // --- 新增：目录创建逻辑 ---
+        if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
+          m_dir_map.insert(rel_path_str);
+          std::cout << "[StateManager] 广播目录创建: " << rel_path_str
+                    << std::endl;
+          m_p2p_manager->broadcast_dir_create(rel_path_str);
+        }
       }
-
-      FileInfo info;
-      info.path = rel_path_str;
-
-      auto ftime = std::filesystem::last_write_time(full_path, ec);
-      if (ec) continue;
-      auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-      info.modified_time = sctp.time_since_epoch().count();
-
-      info.hash = Hashing::CalculateSHA256(full_path);
-      if (info.hash.empty()) {
-        // 哈希为空 (可能是被锁定了)，跳过
-        std::cerr << "[StateManager] 哈希计算失败 (文件可能被锁定): "
-                  << rel_path_str << std::endl;
-        continue;
-      }
-
-      // 更新 m_file_map 并广播
-      m_file_map[info.path] = info;
-      std::cout << "[StateManager] 广播更新: " << info.path << std::endl;
-      m_p2p_manager->broadcast_file_update(info);
 
     } else {
-      // 文件不存在 (Delete)
+      // 文件或目录不存在 (Delete)
       if (m_file_map.erase(rel_path_str) > 0) {
         std::cout << "[StateManager] 广播删除: " << rel_path_str << std::endl;
         m_p2p_manager->broadcast_file_delete(rel_path_str);
+      } else if (m_dir_map.erase(rel_path_str) > 0) {
+        // --- 新增：目录删除逻辑 ---
+        std::cout << "[StateManager] 广播目录删除: " << rel_path_str
+                  << std::endl;
+        m_p2p_manager->broadcast_dir_delete(rel_path_str);
       }
     }
   }
@@ -212,8 +237,10 @@ void StateManager::scan_directory() {
   std::cout << "[StateManager] Scanning directory: " << m_root_path
             << std::endl;
 
-  std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
+  std::lock_guard<std::mutex> file_lock(m_file_map_mutex);  // <-- 重命名
+  std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);    // <-- 新增
   m_file_map.clear();
+  m_dir_map.clear();  // <-- 新增
 
   std::error_code ec;
   auto iterator =
@@ -226,34 +253,40 @@ void StateManager::scan_directory() {
   }
 
   for (const auto& entry : iterator) {
-    if (!entry.is_regular_file(ec) || ec) {
-      continue;
-    }
-
-    FileInfo info;
-
     std::filesystem::path relative_path =
         std::filesystem::relative(entry.path(), m_root_path);
-
     const std::u8string u8_path_str = relative_path.u8string();
-    info.path = std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
-                            u8_path_str.length());
+    std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                             u8_path_str.length());
 
-    auto ftime = std::filesystem::last_write_time(entry, ec);
-    if (ec) continue;
-    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-    info.modified_time = sctp.time_since_epoch().count();
+    if (rel_path_str.empty()) continue;  // 忽略根目录本身
 
-    info.hash = Hashing::CalculateSHA256(entry.path());
-    if (info.hash.empty()) continue;
+    if (entry.is_regular_file(ec) && !ec) {
+      FileInfo info;
 
-    m_file_map[info.path] = info;
+      info.path =
+          std::string(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                      u8_path_str.length());
+
+      auto ftime = std::filesystem::last_write_time(entry, ec);
+      if (ec) continue;
+      auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+      info.modified_time = sctp.time_since_epoch().count();
+
+      info.hash = Hashing::CalculateSHA256(entry.path());
+      if (info.hash.empty()) continue;
+
+      m_file_map[info.path] = info;
+    } else if (entry.is_directory(ec) && !ec) {
+      // ---跟踪目录 ---
+      m_dir_map.insert(rel_path_str);
+    }
   }
   std::cout << "[StateManager] Scan complete. Found " << m_file_map.size()
-            << " files." << std::endl;
+            << " files and " << m_dir_map.size() << " directories."
+            << std::endl;
 }
 
-// --- 修改：为 get_state_as_json_string 添加锁 ---
 std::string StateManager::get_state_as_json_string() {
   std::vector<FileInfo> files;
   {
@@ -264,6 +297,12 @@ std::string StateManager::get_state_as_json_string() {
   }
   nlohmann::json payload;
   payload["files"] = files;
+
+  {
+    std::lock_guard<std::mutex> lock(m_dir_map_mutex);
+    payload["directories"] = m_dir_map;
+  }
+
   nlohmann::json message;
   message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
   message[Protocol::MSG_PAYLOAD] = payload;

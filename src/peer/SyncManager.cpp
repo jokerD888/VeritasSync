@@ -64,4 +64,26 @@ SyncActions SyncManager::compare_states_and_get_requests(
   return actions;
 }
 
+DirSyncActions SyncManager::compare_dir_states(
+    const std::set<std::string>& local_dirs,
+    const std::set<std::string>& remote_dirs) {
+  DirSyncActions actions;
+
+  // 查找需要创建的目录 (存在于远程，但本地没有)
+  for (const auto& remote_dir : remote_dirs) {
+    if (local_dirs.find(remote_dir) == local_dirs.end()) {
+      actions.dirs_to_create.push_back(remote_dir);
+    }
+  }
+
+  // 查找需要删除的目录 (存在于本地，但远程没有)
+  for (const auto& local_dir : local_dirs) {
+    if (remote_dirs.find(local_dir) == remote_dirs.end()) {
+      actions.dirs_to_delete.push_back(local_dir);
+    }
+  }
+
+  return actions;
+}
+
 }  // namespace VeritasSync
