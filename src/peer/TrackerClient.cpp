@@ -4,6 +4,8 @@
 #include <iostream>
 #include <sstream>
 
+#include "VeritasSync/Logger.h" // <-- 新增
+
 using boost::asio::ip::tcp;
 
 namespace VeritasSync {
@@ -45,10 +47,15 @@ namespace VeritasSync {
             }
         }
         catch (const std::exception& e) {
-            std::cerr << "TrackerClient Error: " << e.what() << std::endl;
+            // 优先使用全局 logger，回退到 std::cerr
+            if (VeritasSync::g_logger) {
+                VeritasSync::g_logger->error("TrackerClient Error: {}", e.what());
+            } else {
+                std::cerr << "TrackerClient Error: " << e.what() << std::endl;
+            }
         }
 
         return peers;
-    }
+    }           
 
 }  // namespace VeritasSync

@@ -1,4 +1,4 @@
-﻿#include "VeritasSync/Hashing.h"
+﻿    #include "VeritasSync/Hashing.h"
 
 #include <openssl/sha.h>
 
@@ -9,6 +9,8 @@
 #include <sstream>
 #include <thread>  // 用于 sleep
 #include <vector>
+
+#include "VeritasSync/Logger.h" // <-- 新增
 
 namespace VeritasSync {
 
@@ -28,15 +30,25 @@ namespace VeritasSync {
 
         // --- 修复：处理文件锁定的重试逻辑 ---
         if (!file.is_open()) {
-            std::cerr << "[Hashing] 无法立即打开文件 (可能被锁定): "
-                << filePath.string() << ". 250ms 后重试..." << std::endl;
+            // 使用 logger 替换 std::cerr
+            if (g_logger) {
+                g_logger->warn("[Hashing] 无法立即打开文件 (可能被锁定): {}. 250ms 后重试...", filePath.string());
+            } else {
+                std::cerr << "[Hashing] 无法立即打开文件 (可能被锁定): "
+                    << filePath.string() << ". 250ms 后重试..." << std::endl;
+            }
+
             // 等待 250 毫秒
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             // 再次尝试打开
             file.open(filePath, std::ios::binary);
 
             if (!file.is_open()) {
-                std::cerr << "[Hashing] 无法打开文件 (重试后): " << filePath.string() << std::endl;
+                if (g_logger) {
+                    g_logger->error("[Hashing] 无法打开文件 (重试后): {}", filePath.string());
+                } else {
+                    std::cerr << "[Hashing] 无法打开文件 (重试后): " << filePath.string() << std::endl;
+                }
                 return "";  // 放弃
             }
         }

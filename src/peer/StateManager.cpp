@@ -6,6 +6,7 @@
 
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/P2PManager.h"
+#include "VeritasSync/Logger.h" // <-- 新增
 
 namespace VeritasSync {
 
@@ -95,8 +96,7 @@ namespace VeritasSync {
         m_p2p_manager(&p2p_manager)  // --- 新增：保存 P2PManager 指针 ---
     {
         if (!std::filesystem::exists(m_root_path)) {
-            std::cout << "[StateManager] 根目录 " << m_root_path
-                << " 不存在，正在创建。" << std::endl;
+            g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", m_root_path.string());
             std::filesystem::create_directory(m_root_path);
         }
 
@@ -106,17 +106,15 @@ namespace VeritasSync {
             m_listener = std::make_unique<UpdateListener>(this);
             m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
             m_file_watcher->watch();
-            std::cout << "[StateManager] 已启动对目录 '" << m_root_path.string()
-                << "' 的实时监控 (Source 模式)。" << std::endl;
+            g_logger->info("[StateManager] 已启动对目录 '{}' 的实时监控 (Source 模式)。", m_root_path.string());
         } else {
-            std::cout << "[StateManager] 以 'Destination' 模式启动，文件监控已禁用。"
-                << std::endl;
+            g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用。");
         }
     }
 
     StateManager::~StateManager() {
         if (m_file_watcher) {
-            std::cout << "[StateManager] 正在停止文件监控..." << std::endl;
+            g_logger->info("[StateManager] 正在停止文件监控...");
         }
     }
 
@@ -144,12 +142,13 @@ namespace VeritasSync {
     void StateManager::notify_change_detected(const std::string& full_path) {
         std::lock_guard<std::mutex> lock(m_changes_mutex);
         m_pending_changes.insert(full_path);
-        std::cout << "[Watcher] 检测到变化: " << full_path << std::endl;
+        // 使用 Debug 级别，因为这个日志非常频繁
+        g_logger->debug("[Watcher] 检测到变化: {}", full_path);
     }
 
     // --- 新增：实现 process_debounced_changes (由 UpdateListener 定时器调用) ---
     void StateManager::process_debounced_changes() {
-        std::cout << "[Watcher] 文件系统稳定，正在处理增量变化..." << std::endl;
+        g_logger->info("[Watcher] 文件系统稳定，正在处理增量变化...");
 
         std::set<std::string> changes_to_process;
         {
@@ -187,26 +186,24 @@ namespace VeritasSync {
                     auto ftime = std::filesystem::last_write_time(full_path, ec);
                     if (ec) continue;
                     auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-                    info.modified_time = sctp.time_since_epoch().count();
+                    info.modified_time = sctp.time_since_epoch().count();                       
 
                     info.hash = Hashing::CalculateSHA256(full_path);
                     if (info.hash.empty()) {
                         // 哈希为空 (可能是被锁定了)，跳过
-                        std::cerr << "[StateManager] 哈希计算失败 (文件可能被锁定): "
-                            << rel_path_str << std::endl;
+                        g_logger->warn("[StateManager] 哈希计算失败 (文件可能被锁定): {}", rel_path_str);
                         continue;
                     }
 
                     // 更新 m_file_map 并广播
                     m_file_map[info.path] = info;
-                    std::cout << "[StateManager] 广播更新: " << info.path << std::endl;
+                    g_logger->info("[StateManager] 广播更新: {}", info.path);
                     m_p2p_manager->broadcast_file_update(info);
                 } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
                     // --- 新增：目录创建逻辑 ---
                     if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
                         m_dir_map.insert(rel_path_str);
-                        std::cout << "[StateManager] 广播目录创建: " << rel_path_str
-                            << std::endl;
+                        g_logger->info("[StateManager] 广播目录创建: {}", rel_path_str);
                         m_p2p_manager->broadcast_dir_create(rel_path_str);
                     }
                 }
@@ -214,12 +211,11 @@ namespace VeritasSync {
             } else {
                 // 文件或目录不存在 (Delete)
                 if (m_file_map.erase(rel_path_str) > 0) {
-                    std::cout << "[StateManager] 广播删除: " << rel_path_str << std::endl;
+                    g_logger->info("[StateManager] 广播删除: {}", rel_path_str);
                     m_p2p_manager->broadcast_file_delete(rel_path_str);
                 } else if (m_dir_map.erase(rel_path_str) > 0) {
                     // --- 新增：目录删除逻辑 ---
-                    std::cout << "[StateManager] 广播目录删除: " << rel_path_str
-                        << std::endl;
+                    g_logger->info("[StateManager] 广播目录删除: {}", rel_path_str);
                     m_p2p_manager->broadcast_dir_delete(rel_path_str);
                 }
             }
@@ -234,8 +230,7 @@ namespace VeritasSync {
 
     // --- 修改：为 scan_directory 添加锁 ---
     void StateManager::scan_directory() {
-        std::cout << "[StateManager] Scanning directory: " << m_root_path
-            << std::endl;
+        g_logger->info("[StateManager] Scanning directory: {}", m_root_path.string());
 
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);  // <-- 重命名
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);    // <-- 新增
@@ -247,8 +242,7 @@ namespace VeritasSync {
             std::filesystem::recursive_directory_iterator(m_root_path, ec);
 
         if (ec) {
-            std::cerr << "[StateManager] Error creating directory iterator for path "
-                << m_root_path << ": " << ec.message() << std::endl;
+            g_logger->error("[StateManager] Error creating directory iterator for path {}: {}", m_root_path.string(), ec.message());
             return;
         }
 
@@ -282,9 +276,7 @@ namespace VeritasSync {
                 m_dir_map.insert(rel_path_str);
             }
         }
-        std::cout << "[StateManager] Scan complete. Found " << m_file_map.size()
-            << " files and " << m_dir_map.size() << " directories."
-            << std::endl;
+        g_logger->info("[StateManager] Scan complete. Found {} files and {} directories.", m_file_map.size(), m_dir_map.size());
     }
 
     std::string StateManager::get_state_as_json_string() {
@@ -312,13 +304,12 @@ namespace VeritasSync {
     // --- 修改：为 print_current_state 添加锁 ---
     void StateManager::print_current_state() const {
         std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
-        std::cout << "\n--- Current Directory State ---" << std::endl;
+        g_logger->info("--- Current Directory State ---");
         for (const auto& pair : m_file_map) {
-            std::cout << "  - Path: " << pair.second.path << std::endl;
-            std::cout << "    MTime: " << pair.second.modified_time << std::endl;
-            std::cout << "    Hash: " << pair.second.hash.substr(0, 12) << "..."
-                << std::endl;
+            g_logger->info("  - Path: {}", pair.second.path);
+            g_logger->info("    MTime: {}", pair.second.modified_time);
+            g_logger->info("    Hash: {}...", pair.second.hash.substr(0, 12));
         }
-        std::cout << "-----------------------------" << std::endl;
+        g_logger->info("-----------------------------");
     }
 }  // namespace VeritasSync

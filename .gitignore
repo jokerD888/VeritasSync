@@ -23,4 +23,4 @@ Release/
 # OS generated files
 ####################
 .DS_Store
-Thumbs.db
+Thumbs.db echo "# Runtime files"; echo "config.json"; echo "*.log"

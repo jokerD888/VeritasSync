@@ -1,0 +1,11 @@
+﻿# .clang-format
+BasedOnStyle: Google
+
+# --- 核心设置 ---
+IndentWidth: 4
+ColumnLimit: 120
+
+# --- 其他设置 ---
+UseTab: Never
+IndentCaseLabels: false
+ContinuationIndentWidth: 4

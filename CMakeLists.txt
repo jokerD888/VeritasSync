@@ -21,6 +21,7 @@ find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(kcp CONFIG REQUIRED)
 find_package(Snappy CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 
 
 # --- 包含目录 ---
@@ -51,6 +52,7 @@ target_link_libraries(veritas_sync PRIVATE
     b64
     kcp::kcp
     Snappy::snappy
+    spdlog::spdlog
 )
 
 target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-static/lib")

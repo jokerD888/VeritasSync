@@ -16,6 +16,7 @@ trim_trailing_whitespace = true
 # 告诉编辑器将所有 C++ 源文件和头文件
 # 默认保存为 "UTF-8 带签名 (BOM)" 格式
 charset = utf-8-bom
+max_line_length = 120
 
 
 
