@@ -1,24 +1,73 @@
 ﻿#pragma once
 
+#include <boost/asio.hpp>
+#include <boost/asio/ip/tcp.hpp>  // <-- 1. 关键修复：包含此头文件
+#include <functional>
+#include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace VeritasSync {
 
-    class TrackerClient {
-    public:
-        // 构造函数，指定tracker服务器的地址和端口
-        TrackerClient(std::string host, unsigned short port);
+class P2PManager;
 
-        // 核心功能：向Tracker注册自己，并查询同一同步组的其他节点
-        // 返回值是 "IP:Port" 格式的字符串列表
-        // 为了简化，我们在这里使用同步(阻塞)的方式执行
-        std::vector<std::string> register_and_query(const std::string& sync_key,
-            unsigned short p2p_port);
+namespace SignalProto {
+constexpr const char* MSG_TYPE = "type";
+constexpr const char* MSG_PAYLOAD = "payload";
+constexpr const char* TYPE_REGISTER = "REGISTER";
+constexpr const char* TYPE_REG_ACK = "REG_ACK";
+constexpr const char* TYPE_PEER_JOIN = "PEER_JOIN";
+constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
+constexpr const char* TYPE_SIGNAL = "SIGNAL";
+}  // namespace SignalProto
 
-    private:
-        std::string m_host;
-        unsigned short m_port;
-    };
+// --- 2. 关键修复：添加 using ---
+using boost::asio::ip::tcp;
 
-}
+class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
+   public:
+    TrackerClient(std::string host, unsigned short port);
+    ~TrackerClient();
+
+    void set_p2p_manager(P2PManager* p2p);
+
+    void connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready);
+
+    void send_signaling_message(const std::string& to_peer_id, const std::string& type, const std::string& sdp);
+    std::string get_self_id() const { return m_self_id; }
+
+   private:
+    void do_connect();
+    void do_register();
+    void do_read_header();
+    void handle_read_header(const boost::system::error_code& ec, std::size_t bytes);
+    void do_read_body(unsigned int msg_len);
+    void handle_read_body(const boost::system::error_code& ec, std::size_t bytes);
+
+    void handle_message(const nlohmann::json& msg);
+
+    void do_write(const std::string& msg);
+    void close_socket();
+
+    boost::asio::io_context m_io_context;
+    std::jthread m_thread;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+
+    // --- 3. 修复：现在 tcp::socket 是已知的 ---
+    tcp::socket m_socket;
+
+    std::string m_host;
+    unsigned short m_port;
+    std::string m_sync_key;
+    std::string m_self_id;
+
+    std::function<void(std::vector<std::string>)> m_on_ready_callback;
+
+    P2PManager* m_p2p_manager = nullptr;
+    boost::asio::streambuf m_read_buffer;
+    std::vector<char> m_write_buffer;
+};
+
+}  // namespace VeritasSync

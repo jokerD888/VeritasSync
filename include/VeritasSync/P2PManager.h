@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <ikcp.h>
+#include <juice/juice.h>
 
 #include <array>
 #include <boost/asio.hpp>
@@ -12,110 +13,124 @@
 #include <thread>
 #include <vector>
 
-#include "VeritasSync/Protocol.h"  // 需要包含 Protocol.h
+#include "VeritasSync/Protocol.h"
 
 namespace VeritasSync {
 
-    // --- 定义同步角色 ---
-    enum class SyncRole { Source, Destination };
+enum class SyncRole { Source, Destination };
 
-    class StateManager;
-    class P2PManager;
+class StateManager;
+class P2PManager;
+class TrackerClient;  // 前向声明
 
-    using boost::asio::ip::udp;
+struct PeerContext {
+    std::string peer_id;
+    juice_agent_t* agent = nullptr;
+    ikcpcb* kcp = nullptr;
+    std::shared_ptr<P2PManager> p2p_manager_ptr;
 
-    // (PeerContext 结构体不变)
-    struct PeerContext {
-        udp::endpoint endpoint;
-        ikcpcb* kcp = nullptr;
-        std::shared_ptr<P2PManager> p2p_manager_ptr;
-        PeerContext(udp::endpoint ep, std::shared_ptr<P2PManager> manager_ptr);
-        ~PeerContext();
-        void setup_kcp(uint32_t conv);
-    };
+    PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
+    ~PeerContext();
+    void setup_kcp(uint32_t conv);
+};
 
-    class StateManager;
+class StateManager;
 
-    class P2PManager : public std::enable_shared_from_this<P2PManager> {
-    public:
-        boost::asio::io_context& get_io_context();
-        static std::shared_ptr<P2PManager> create(unsigned short port);
+class P2PManager : public std::enable_shared_from_this<P2PManager> {
+   public:
+    boost::asio::io_context& get_io_context();
+    // --- 修复：create 不再需要参数 ---
+    static std::shared_ptr<P2PManager> create();
 
-        void set_encryption_key(const std::string& key_string);
+    void set_encryption_key(const std::string& key_string);
 
-        // --- 依赖注入 ---
-        void set_state_manager(StateManager* sm);
-        void set_role(SyncRole role);
+    // --- 依赖注入 ---
+    void set_state_manager(StateManager* sm);
+    void set_tracker_client(TrackerClient* tc);  // <-- 新增
+    void set_role(SyncRole role);
+    void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
-        static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp,
-            void* user);
+    static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
 
-        ~P2PManager();
-        void connect_to_peers(const std::vector<std::string>& peer_addresses);
+    ~P2PManager();
 
-        void raw_udp_send(const char* data, size_t len,
-            const udp::endpoint& endpoint);
+    void connect_to_peers(const std::vector<std::string>& peer_addresses);
 
-        // --- 广播方法 (由 StateManager 调用) ---
-        void broadcast_current_state();  // 用于启动时的全量同步
-        void broadcast_file_update(const FileInfo& file_info);
-        void broadcast_file_delete(const std::string& relative_path);
-        void broadcast_dir_create(const std::string& relative_path);
-        void broadcast_dir_delete(const std::string& relative_path);
+    // --- 广播方法 ---
+    void broadcast_current_state();
+    void broadcast_file_update(const FileInfo& file_info);
+    void broadcast_file_delete(const std::string& relative_path);
+    void broadcast_dir_create(const std::string& relative_path);
+    void broadcast_dir_delete(const std::string& relative_path);
 
-    private:
-        static constexpr size_t MAX_UDP_PAYLOAD = 16384;
-        static constexpr size_t CHUNK_DATA_SIZE = 8192;
+    // --- 由 TrackerClient 调用 ---
+    void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
+                                  const std::string& payload);
+    void handle_peer_leave(const std::string& peer_id);  // <-- (来自上次修复)
 
-        P2PManager(unsigned short port);
-        void init();
+   private:
+    static constexpr size_t CHUNK_DATA_SIZE = 8192;
 
-        // --- 核心网络循环 ---
-        void start_receive();
-        void handle_receive(
-            const boost::system::error_code& error, std::size_t bytes_transferred,
-            std::shared_ptr<udp::endpoint> remote_endpoint,
-            std::shared_ptr<std::array<char, MAX_UDP_PAYLOAD>> recv_buffer);
+    // --- 修复：构造函数不再需要参数 ---
+    P2PManager();
+    void init();
 
-        // --- KCP 集成 ---
-        void schedule_kcp_update();
-        void update_all_kcps();
-        std::shared_ptr<PeerContext> get_or_create_peer_context(
-            const udp::endpoint& endpoint);
+    // --- KCP 集成 ---
+    void schedule_kcp_update();
+    void update_all_kcps();
 
-        // --- 上层应用逻辑 (由KCP调用) ---
-        void send_over_kcp(const std::string& msg,
-            const udp::endpoint& target_endpoint);
-        void handle_kcp_message(const std::string& msg,
-            const udp::endpoint& from_endpoint);
+    // --- 上层应用逻辑 ---
+    void send_over_kcp(const std::string& msg);
+    void send_over_kcp_peer(const std::string& msg, PeerContext* peer);
+    void handle_kcp_message(const std::string& msg, PeerContext* from_peer);
 
-        // --- 具体的消息处理器 ---
-        void handle_share_state(const nlohmann::json& payload, const udp::endpoint& from_endpoint);
-        void handle_file_update(const nlohmann::json& payload, const udp::endpoint& from_endpoint);
-        void handle_file_delete(const nlohmann::json& payload, const udp::endpoint& from_endpoint);
-        void handle_file_request(const nlohmann::json& payload, const udp::endpoint& from_endpoint);
-        void handle_file_chunk(const std::string& payload);
-        void handle_dir_create(const nlohmann::json& payload);
-        void handle_dir_delete(const nlohmann::json& payload, const udp::endpoint& from_endpoint);
+    // --- 消息处理器 ---
+    void handle_share_state(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_file_update(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_file_request(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_file_chunk(const std::string& payload);
+    void handle_dir_create(const nlohmann::json& payload);
+    void handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer);
 
-        std::string encrypt_gcm(const std::string& plaintext);
-        std::string decrypt_gcm(const std::string& ciphertext);
+    std::string encrypt_gcm(const std::string& plaintext);
+    std::string decrypt_gcm(const std::string& ciphertext);
 
-        // --- 成员变量 ---
-        boost::asio::io_context m_io_context;
-        udp::socket m_socket;
-        std::jthread m_thread;
-        boost::asio::steady_timer m_kcp_update_timer;
+    // --- libjuice 回调 (C 风格) ---
+    static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
+    static void on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr);
+    static void on_juice_gathering_done(juice_agent_t* agent, void* user_ptr);
+    static void on_juice_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr);
 
-        StateManager* m_state_manager = nullptr;
-        SyncRole m_role = SyncRole::Source;
+    // --- libjuice 回调的 C++ 处理器 ---
+    void handle_juice_state_changed(juice_agent_t* agent, juice_state_t state);
+    void handle_juice_candidate(juice_agent_t* agent, const char* sdp);
+    void handle_juice_gathering_done(juice_agent_t* agent);
+    void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
 
-        std::map<udp::endpoint, std::shared_ptr<PeerContext>> m_peers;
-        std::mutex m_peers_mutex;
+    // --- 成员变量 ---
+    boost::asio::io_context m_io_context;
+    std::jthread m_thread;
+    boost::asio::steady_timer m_kcp_update_timer;
 
-        std::map<std::string, std::pair<int, std::map<int, std::string>>>
-            m_file_assembly_buffer;
-        std::string m_encryption_key;  // 存储 32 字节的 SHA-256 派生密钥
-    };
+    TrackerClient* m_tracker_client = nullptr;  // <-- 修复：初始化为 nullptr
+    StateManager* m_state_manager = nullptr;
+    SyncRole m_role = SyncRole::Source;
+
+    // --- 关键：双向映射 ---
+    std::map<juice_agent_t*, std::shared_ptr<PeerContext>> m_peers_by_agent;
+    std::map<std::string, std::shared_ptr<PeerContext>> m_peers_by_id;
+    std::mutex m_peers_mutex;
+    // -----------------------
+
+    std::map<std::string, std::pair<int, std::map<int, std::string>>> m_file_assembly_buffer;
+    std::string m_encryption_key;
+
+    std::string m_turn_host;
+    uint16_t m_turn_port = 3478;
+    std::string m_turn_username;
+    std::string m_turn_password;
+    juice_turn_server_t m_turn_server_config;
+};
 
 }  // namespace VeritasSync

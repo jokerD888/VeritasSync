@@ -24,3 +24,9 @@ Release/
 ####################
 .DS_Store
 Thumbs.db echo "# Runtime files"; echo "config.json"; echo "*.log"
+ 
+# VS Code local settings 
+CMakeUserPresets.json 
+ 
+# Backup files 
+tmpCMakeSettings.json 

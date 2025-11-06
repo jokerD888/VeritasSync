@@ -15,18 +15,17 @@ if(WIN32)
 endif()
 
 # --- 查找依赖包 ---
-find_package(OpenSSL REQUIRED)
-find_package(efsw CONFIG REQUIRED)
-find_package(Boost 1.88.0 REQUIRED COMPONENTS system asio)
+find_package(openssl CONFIG REQUIRED)
+find_package(efsw CONFIG CONFIG REQUIRED)
+find_package(Boost 1.88.0 REQUIRED CONFIG COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(kcp CONFIG REQUIRED)
 find_package(Snappy CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(LibJuice CONFIG REQUIRED)
+find_package(unofficial-b64 CONFIG REQUIRED)
 
 
-# --- 包含目录 ---
-include_directories(${PROJECT_SOURCE_DIR}/include)
-include_directories("d:/vcpkg/installed/x64-windows-static/include")
 
 
 # ===========================================================
@@ -41,6 +40,7 @@ add_executable(veritas_sync
     src/peer/SyncManager.cpp
 )
 
+target_include_directories(veritas_sync PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # --- 为 veritas_sync 链接库 ---
 target_link_libraries(veritas_sync PRIVATE
@@ -49,23 +49,25 @@ target_link_libraries(veritas_sync PRIVATE
     Boost::system
     Boost::asio
     nlohmann_json::nlohmann_json
-    b64
+    unofficial::b64::b64
     kcp::kcp
     Snappy::snappy
     spdlog::spdlog
+    LibJuice::LibJuice
 )
 
-target_link_directories(veritas_sync PRIVATE "d:/vcpkg/installed/x64-windows-static/lib")
 
 
 # ===========================================================
 # 目标 2: veritas_tracker (服务器程序)
 # ===========================================================
 add_executable(veritas_tracker src/tracker/main.cpp)
+target_include_directories(veritas_tracker PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 add_executable(efsw_test
     src/efsw_test.cpp
 )
+
 
 target_link_libraries(efsw_test PRIVATE efsw::efsw)
 
