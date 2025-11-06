@@ -306,12 +306,29 @@ void P2PManager::update_all_kcps() {
 }
 
 // (connect_to_peers, C 回调, C++ 处理器 ... 保持不变 ...)
+// src/peer/P2PManager.cpp
+
 void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses) {
     std::lock_guard<std::mutex> lock(m_peers_mutex);
+
+    // --- 1. 获取 self_id 用于 tie-breaking ---
+    if (!m_tracker_client) {
+        g_logger->error("[ICE] TrackerClient is null, 无法获取 self_id 进行 tie-breaking。");
+        return;
+    }
+    std::string self_id = m_tracker_client->get_self_id();
+    if (self_id.empty()) {
+        g_logger->warn("[ICE] Self ID 尚未设置，推迟连接逻辑。");
+        // 这种情况是正常的，如果 Tracker 尚未 ACK
+        return;
+    }
+    // ------------------------------------
+
     for (const auto& peer_id : peer_addresses) {
         if (m_peers_by_id.count(peer_id)) {
             continue;
         }
+
         g_logger->info("[ICE] 正在为对等点 {} 创建 ICE Agent...", peer_id);
         juice_config_t config = {};
         if (!m_turn_host.empty()) {
@@ -331,7 +348,20 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
         auto context = std::make_shared<PeerContext>(peer_id, agent, shared_from_this());
         m_peers_by_agent[agent] = context;
         m_peers_by_id[peer_id] = context;
-        juice_gather_candidates(agent);
+
+        // --- 2. 关键修复：TIE-BREAKER 逻辑 ---
+        if (self_id < peer_id) {
+            // 我们的 ID 较小, 我们是 "Controlling" (控制方)
+            g_logger->info("[ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 {})", peer_id);
+            // 作为 'Controlling', 我们调用 gather_candidates 来生成一个 Offer
+            juice_gather_candidates(agent);
+        } else {
+            // 我们的 ID 较大, 我们是 "Controlled" (受控方)
+            g_logger->info("[ICE] Tie-breaking: 我们是 'Controlled' (Answer) 方 (对于 {})。等待 Offer...", peer_id);
+            // 作为 'Controlled', 我们什么也不做，
+            // 等待 handle_signaling_message 收到 'sdp_offer' 消息。
+        }
+        // ------------------------------------
     }
 }
 void P2PManager::on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr) {
@@ -385,10 +415,56 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
         peer_id = it->second->peer_id;
     }
     if (!m_tracker_client) return;
-    g_logger->info("[ICE] 为 {} (发送给 {}) 生成本地候选地址: {}", m_tracker_client->get_self_id(), peer_id,
-                   sdp ? sdp : "");
-    // --- 修复：取消注释 ---
-    m_tracker_client->send_signaling_message(peer_id, "ice_candidate", sdp ? sdp : "");
+
+    std::string sdp_str = sdp ? sdp : "";
+    if (sdp_str.empty()) {
+        g_logger->warn("[ICE] handle_juice_candidate 收到空 sdp。");
+        return;
+    }
+
+    std::string signal_type;
+
+    // --- 关键修复：必须先检查完整的 SDP (Offer/Answer)，再检查 Candidate ---
+
+    // 1. 检查这是否是一个完整的 SDP (Offer/Answer)
+    // (特征：包含 "m=" 媒体行 和 "o=" 源行)
+    if (sdp_str.find("m=") != std::string::npos && sdp_str.find("o=") != std::string::npos) {
+        // 这是一个完整的 SDP。现在判断是 Offer 还是 Answer。
+        // "a=setup:actpass" 表示这是一个 Offer
+        if (sdp_str.find("a=setup:actpass") != std::string::npos) {
+            signal_type = "sdp_offer";
+        }
+        // "a=setup:active" 或 "a=setup:passive" 表示这是一个 Answer
+        else if (sdp_str.find("a=setup:active") != std::string::npos ||
+                 sdp_str.find("a=setup:passive") != std::string::npos) {
+            signal_type = "sdp_answer";
+        } else {
+            // 回退：如果找不到 "a=setup" (理论上不应该)，我们根据角色猜测
+            std::string self_id = m_tracker_client->get_self_id();
+            if (self_id < peer_id) {
+                g_logger->warn("[ICE] 找不到 'a=setup' 属性，根据 Tie-Break 猜测为 'sdp_offer'。");
+                signal_type = "sdp_offer";  // 我们是 Controlling，所以这是 Offer
+            } else {
+                g_logger->warn("[ICE] 找不到 'a=setup' 属性，根据 Tie-Break 猜测为 'sdp_answer'。");
+                signal_type = "sdp_answer";  // 我们是 Controlled，所以这是 Answer
+            }
+        }
+    }
+    // 2. 否则，检查这是否只是一个 ICE Candidate
+    else if (sdp_str.find("a=candidate") != std::string::npos) {
+        signal_type = "ice_candidate";
+    }
+    // 3. 否则，我们不知道这是什么
+    else {
+        g_logger->warn("[ICE] 收到来自 libjuice 的未知信令 (非 candidate 且非 SDP): {}", sdp_str);
+        return;
+    }
+
+    g_logger->info("[ICE] 为 {} (发送给 {}) 生成本地信令 ({}): {}...", m_tracker_client->get_self_id(), peer_id,
+                   signal_type, sdp_str.substr(0, 40));
+
+    // 使用检测到的正确类型发送信令
+    m_tracker_client->send_signaling_message(peer_id, signal_type, sdp_str);
 }
 void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
     std::string peer_id;

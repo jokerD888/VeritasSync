@@ -76,4 +76,6 @@ target_link_libraries(efsw_test PRIVATE efsw::efsw)
 target_link_libraries(veritas_tracker PRIVATE
     Boost::system
     Boost::asio
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
 )

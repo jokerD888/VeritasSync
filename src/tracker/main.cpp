@@ -1,4 +1,7 @@
-﻿#include <boost/asio.hpp>
+﻿#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+
+#include <boost/asio.hpp>
 #include <boost/asio/detail/socket_ops.hpp>  // 用于网络字节序转换
 #include <iostream>
 #include <map>
@@ -9,8 +12,14 @@
 #include <sstream>
 #include <string>
 
+#if defined(_WIN32)
+#include <windows.h>  // <-- 1. 包含头文件
+#endif
+
 using boost::asio::ip::tcp;
 using nlohmann::json;
+
+std::shared_ptr<spdlog::logger> g_logger;
 
 // (协议类型定义 - 必须与 TrackerClient 中的 SignalProto 匹配)
 namespace SignalProto {
@@ -36,10 +45,10 @@ class Session : public std::enable_shared_from_this<Session> {
         std::stringstream ss;
         ss << m_socket.remote_endpoint().address().to_string() << ":" << m_socket.remote_endpoint().port();
         m_id = ss.str();
-        std::cout << "[Session] " << m_id << " 已连接。" << std::endl;
+        g_logger->info("[Session] {} 已连接。", m_id);
     }
 
-    ~Session() { std::cout << "[Session] " << m_id << " 已断开连接。" << std::endl; }
+    ~Session() { g_logger->info("[Session] {} 已断开连接。", m_id); }
 
     void start() { do_read_header(); }
 
@@ -61,7 +70,7 @@ class Session : public std::enable_shared_from_this<Session> {
     // --- 新增：消息处理器 ---
     void handle_message(const json& msg);
     void handle_register(const json& payload);
-    void handle_signal(const json& payload);
+    void handle_signal(const json& msg);
 
     void do_write();
 
@@ -148,7 +157,7 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
     peer_set.insert(session);
     m_peers_by_id[new_peer_id] = session;
 
-    std::cout << "[Tracker] " << new_peer_id << " 已加入组 '" << sync_key << "'" << std::endl;
+    g_logger->info("[Tracker] {} 已加入组 '{}'", new_peer_id, sync_key);
 }
 
 void TrackerServer::leave(std::shared_ptr<Session> session) {
@@ -178,11 +187,11 @@ void TrackerServer::leave(std::shared_ptr<Session> session) {
         for (const auto& peer : peer_set) {
             peer->send(peer_leave_msg);
         }
-        std::cout << "[Tracker] " << peer_id << " 已离开组 '" << sync_key << "'" << std::endl;
+        g_logger->info("[Tracker] {} 已离开组 '{}'", peer_id, sync_key);
 
         if (peer_set.empty()) {
             m_peer_groups.erase(it);
-            std::cout << "[Tracker] 组 '" << sync_key << "' 已清空。" << std::endl;
+            g_logger->info("[Tracker] 组 '{}' 已清空。", sync_key);
         }
     }
 }
@@ -195,7 +204,7 @@ void TrackerServer::forward(const std::string& to_peer_id, const json& msg) {
         // 找到目标，转发
         it->second->send(msg);
     } else {
-        std::cout << "[Tracker] 无法转发：未找到 peer " << to_peer_id << std::endl;
+        g_logger->warn("[Tracker] 无法转发：未找到 peer {}", to_peer_id);
     }
 }
 
@@ -220,7 +229,7 @@ void Session::send(const json& msg) {
         m_socket, boost::asio::buffer(*write_buf),
         [self = shared_from_this(), write_buf](const boost::system::error_code& ec, std::size_t bytes) {
             if (ec) {
-                std::cerr << "[Session] " << self->m_id << " 写入失败: " << ec.message() << std::endl;
+                g_logger->error("[Session] {} 写入失败: {}", self->m_id, ec.message());
                 // 写入失败时，读取循环会自动检测到 EOF 并触发 leave
             }
         });
@@ -238,7 +247,9 @@ void Session::do_read_header() {
 void Session::handle_read_header(const boost::system::error_code& ec, std::size_t bytes) {
     if (ec) {
         if (ec != boost::asio::error::eof) {
-            std::cerr << "[Session] " << m_id << " 读取头部失败: " << ec.message() << std::endl;
+            g_logger->error("[Session] {} 读取头部失败: {}", m_id, ec.message());
+        } else {
+            g_logger->warn("[Session] {} 触发 EOF。", m_id);
         }
         m_server.leave(shared_from_this());  // <-- 关键：断开连接时通知 server
         return;
@@ -250,7 +261,7 @@ void Session::handle_read_header(const boost::system::error_code& ec, std::size_
     unsigned int msg_len = boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
 
     if (msg_len > 65536) {
-        std::cerr << "[Session] " << m_id << " 消息体过长 ( " << msg_len << " bytes)。断开连接。" << std::endl;
+        g_logger->error("[Session] {} 消息体过长 ( {} bytes)。断开连接。", m_id, msg_len);
         m_server.leave(shared_from_this());
         return;
     }
@@ -267,7 +278,7 @@ void Session::do_read_body(unsigned int msg_len) {
 
 void Session::handle_read_body(const boost::system::error_code& ec, std::size_t bytes) {
     if (ec) {
-        std::cerr << "[Session] " << m_id << " 读取消息体失败: " << ec.message() << std::endl;
+        g_logger->error("[Session] {} 读取消息体失败: {}", m_id, ec.message());
         m_server.leave(shared_from_this());
         return;
     }
@@ -280,7 +291,7 @@ void Session::handle_read_body(const boost::system::error_code& ec, std::size_t 
         json msg = json::parse(body);
         handle_message(msg);
     } catch (const std::exception& e) {
-        std::cerr << "[Session] " << m_id << " 解析 JSON 失败: " << e.what() << std::endl;
+        g_logger->error("[Session] {} 解析 JSON 失败: {}", m_id, e.what());
     }
 
     // 循环读取下一条消息
@@ -299,14 +310,14 @@ void Session::handle_message(const json& msg) {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[Session] " << m_id << " 处理消息失败: " << e.what() << std::endl;
+        g_logger->error("[Session] {} 处理消息失败: {}", m_id, e.what());
     }
 }
 
 void Session::handle_register(const json& payload) {
     m_sync_key = payload.at("sync_key").get<std::string>();
     if (m_sync_key.empty()) {
-        std::cerr << "[Session] " << m_id << " 注册失败：sync_key 为空。" << std::endl;
+        g_logger->error("[Session] {} 注册失败：sync_key 为空。", m_id);
         return;
     }
 
@@ -320,7 +331,7 @@ void Session::handle_signal(const json& msg) {  // <-- 修改：接收完整的 
     std::string to_peer_id = payload.at("to").get<std::string>();
 
     if (to_peer_id.empty()) {
-        std::cerr << "[Session] " << m_id << " 转发失败：'to' 字段为空。" << std::endl;
+        g_logger->error("[Session] {} 转发失败：'to' 字段为空。", m_id);
         return;
     }
 
@@ -328,15 +339,39 @@ void Session::handle_signal(const json& msg) {  // <-- 修改：接收完整的 
     m_server.forward(to_peer_id, msg);
 }
 
+void init_tracker_logger() {
+    try {
+        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        console_sink->set_level(spdlog::level::debug);
+
+        // Tracker 比较简单，只输出到控制台
+        g_logger = std::make_shared<spdlog::logger>("veritas_tracker", spdlog::sinks_init_list{console_sink});
+
+        g_logger->set_level(spdlog::level::info);  // 默认级别设为 info
+        g_logger->flush_on(spdlog::level::info);
+
+        spdlog::register_logger(g_logger);
+        spdlog::set_default_logger(g_logger);
+    } catch (const spdlog::spdlog_ex& ex) {
+        std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+        exit(1);
+    }
+}
+
 // --- main ---
 int main() {
+#if defined(_WIN32)
+    SetConsoleOutputCP(CP_UTF8);  // <-- 2. 在 main 函数开头添加此行
+#endif
+
+    init_tracker_logger();
     try {
         boost::asio::io_context io_context;
         TrackerServer server(io_context, 9988);
-        std::cout << "Tracker server (JSON aync) started on port 9988..." << std::endl;
+        g_logger->info("Tracker server (JSON async) started on port 9988...");
         io_context.run();
     } catch (const std::exception& e) {
-        std::cerr << "Exception: " << e.what() << std::endl;
+        g_logger->critical("Exception: {}", e.what());
     }
     return 0;
 }
