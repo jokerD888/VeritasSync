@@ -8,6 +8,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>  // 优化：使用 unordered_set
 
 #include "VeritasSync/Protocol.h"
 
@@ -66,8 +67,8 @@ namespace VeritasSync {
         std::unique_ptr<efsw::FileWatcher> m_file_watcher;
         std::unique_ptr<efsw::FileWatchListener> m_listener;
 
-        // 待处理变更的集合
-        std::set<std::string> m_pending_changes;
+        // 待处理变更的集合 (优化：使用 unordered_set 提升查找性能)
+        std::unordered_set<std::string> m_pending_changes;
         std::mutex m_changes_mutex;
     };
 

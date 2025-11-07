@@ -150,74 +150,82 @@ namespace VeritasSync {
     void StateManager::process_debounced_changes() {
         g_logger->info("[Watcher] 文件系统稳定，正在处理增量变化...");
 
-        std::set<std::string> changes_to_process;
+        std::unordered_set<std::string> changes_to_process;  // 优化：使用 unordered_set
         {
             std::lock_guard<std::mutex> lock(m_changes_mutex);
             // 交换数据，快速释放锁
             m_pending_changes.swap(changes_to_process);
         }
 
-        std::lock_guard<std::mutex> file_lock(m_file_map_mutex);  // <-- 重命名
-        std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);    // <-- 新增
+        std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
+        std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
 
         for (const auto& full_path_str : changes_to_process) {
-            std::filesystem::path full_path(std::u8string_view(
-                reinterpret_cast<const char8_t*>(full_path_str.c_str()),
-                full_path_str.length()));
+            try {
+                std::filesystem::path full_path(std::u8string_view(
+                    reinterpret_cast<const char8_t*>(full_path_str.c_str()),
+                    full_path_str.length()));
 
-            std::filesystem::path relative_path;
+                std::filesystem::path relative_path;
 
-            if (full_path == m_root_path) continue;
+                if (full_path == m_root_path) continue;
 
-            std::error_code ec;
-            relative_path = std::filesystem::relative(full_path, m_root_path, ec);
-            if (ec) continue;
-
-            const std::u8string u8_path_str = relative_path.u8string();
-            std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()),
-                u8_path_str.length());
-
-            // --- 判断是“更新”还是“删除” ---
-            if (std::filesystem::exists(full_path, ec) && !ec) {
-                if (std::filesystem::is_regular_file(full_path, ec) || ec) {
-                    FileInfo info;
-                    info.path = rel_path_str;
-
-                    auto ftime = std::filesystem::last_write_time(full_path, ec);
-                    if (ec) continue;
-                    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-                    info.modified_time = sctp.time_since_epoch().count();                       
-
-                    info.hash = Hashing::CalculateSHA256(full_path);
-                    if (info.hash.empty()) {
-                        // 哈希为空 (可能是被锁定了)，跳过
-                        g_logger->warn("[StateManager] 哈希计算失败 (文件可能被锁定): {}", rel_path_str);
-                        continue;
-                    }
-
-                    // 更新 m_file_map 并广播
-                    m_file_map[info.path] = info;
-                    g_logger->info("[StateManager] 广播更新: {}", info.path);
-                    m_p2p_manager->broadcast_file_update(info);
-                } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
-                    // --- 新增：目录创建逻辑 ---
-                    if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
-                        m_dir_map.insert(rel_path_str);
-                        g_logger->info("[StateManager] 广播目录创建: {}", rel_path_str);
-                        m_p2p_manager->broadcast_dir_create(rel_path_str);
-                    }
+                std::error_code ec;
+                relative_path = std::filesystem::relative(full_path, m_root_path, ec);
+                if (ec) {
+                    g_logger->warn("[StateManager] 无法获取相对路径: {} ({})", full_path_str, ec.message());
+                    continue;
                 }
 
-            } else {
-                // 文件或目录不存在 (Delete)
-                if (m_file_map.erase(rel_path_str) > 0) {
-                    g_logger->info("[StateManager] 广播删除: {}", rel_path_str);
-                    m_p2p_manager->broadcast_file_delete(rel_path_str);
-                } else if (m_dir_map.erase(rel_path_str) > 0) {
-                    // --- 新增：目录删除逻辑 ---
-                    g_logger->info("[StateManager] 广播目录删除: {}", rel_path_str);
-                    m_p2p_manager->broadcast_dir_delete(rel_path_str);
+                const std::u8string u8_path_str = relative_path.u8string();
+                std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()),
+                    u8_path_str.length());
+
+                // --- 判断是“更新”还是“删除” ---
+                if (std::filesystem::exists(full_path, ec) && !ec) {
+                    if (std::filesystem::is_regular_file(full_path, ec) && !ec) {
+                        FileInfo info;
+                        info.path = rel_path_str;
+
+                        auto ftime = std::filesystem::last_write_time(full_path, ec);
+                        if (ec) {
+                            g_logger->warn("[StateManager] 无法获取文件修改时间: {} ({})", rel_path_str, ec.message());
+                            continue;
+                        }
+                        auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+                        info.modified_time = sctp.time_since_epoch().count();
+
+                        info.hash = Hashing::CalculateSHA256(full_path);
+                        if (info.hash.empty()) {
+                            g_logger->warn("[StateManager] 哈希计算失败 (文件可能被锁定): {}", rel_path_str);
+                            continue;
+                        }
+
+                        // 更新 m_file_map 并广播
+                        m_file_map[info.path] = info;
+                        g_logger->info("[StateManager] 广播更新: {}", info.path);
+                        m_p2p_manager->broadcast_file_update(info);
+                    } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
+                        // --- 新增：目录创建逻辑 ---
+                        if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
+                            m_dir_map.insert(rel_path_str);
+                            g_logger->info("[StateManager] 广播目录创建: {}", rel_path_str);
+                            m_p2p_manager->broadcast_dir_create(rel_path_str);
+                        }
+                    }
+                } else {
+                    // 文件或目录不存在 (Delete)
+                    if (m_file_map.erase(rel_path_str) > 0) {
+                        g_logger->info("[StateManager] 广播删除: {}", rel_path_str);
+                        m_p2p_manager->broadcast_file_delete(rel_path_str);
+                    } else if (m_dir_map.erase(rel_path_str) > 0) {
+                        // --- 新增：目录删除逻辑 ---
+                        g_logger->info("[StateManager] 广播目录删除: {}", rel_path_str);
+                        m_p2p_manager->broadcast_dir_delete(rel_path_str);
+                    }
                 }
+            } catch (const std::exception& e) {
+                g_logger->error("[StateManager] 处理文件变化时发生异常: {} ({})", full_path_str, e.what());
             }
         }
     }

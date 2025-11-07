@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -28,6 +28,18 @@ struct Config {
     std::string turn_username;
     std::string turn_password;
     // ----------------------------
+    
+    // --- 优化：日志级别配置 (8,9) ---
+    std::string log_level = "info";  // debug, info, warn, error
+    std::string libjuice_log_level = "info";
+    // ----------------------------
+    
+    // --- 优化：性能参数配置 (8) ---
+    uint32_t kcp_update_interval_ms = 20;  // KCP更新间隔 (10-100ms)
+    size_t chunk_size = 16384;  // 文件分块大小 (bytes)
+    uint32_t kcp_window_size = 256;  // KCP窗口大小
+    uint32_t file_hash_retry_delay_ms = 250;  // 文件哈希重试延迟
+    // ----------------------------
 
     std::vector<SyncTask> tasks;
 };
@@ -51,10 +63,16 @@ inline void from_json(const nlohmann::json& j, SyncTask& task) {
 inline void to_json(nlohmann::json& j, const Config& config) {
     j = nlohmann::json{{"tracker_host", config.tracker_host},
                        {"tracker_port", config.tracker_port},
-                       {"turn_host", config.turn_host},          // 新增
-                       {"turn_port", config.turn_port},          // 新增
-                       {"turn_username", config.turn_username},  // 新增
-                       {"turn_password", config.turn_password},  // 新增
+                       {"turn_host", config.turn_host},
+                       {"turn_port", config.turn_port},
+                       {"turn_username", config.turn_username},
+                       {"turn_password", config.turn_password},
+                       {"log_level", config.log_level},
+                       {"libjuice_log_level", config.libjuice_log_level},
+                       {"kcp_update_interval_ms", config.kcp_update_interval_ms},
+                       {"chunk_size", config.chunk_size},
+                       {"kcp_window_size", config.kcp_window_size},
+                       {"file_hash_retry_delay_ms", config.file_hash_retry_delay_ms},
                        {"tasks", config.tasks}};
 }
 
@@ -67,6 +85,15 @@ inline void from_json(const nlohmann::json& j, Config& config) {
     if (j.contains("turn_port")) j.at("turn_port").get_to(config.turn_port);
     if (j.contains("turn_username")) j.at("turn_username").get_to(config.turn_username);
     if (j.contains("turn_password")) j.at("turn_password").get_to(config.turn_password);
+    // ---------------------------------
+    
+    // --- 优化：加载日志和性能配置 (如果存在) ---
+    if (j.contains("log_level")) j.at("log_level").get_to(config.log_level);
+    if (j.contains("libjuice_log_level")) j.at("libjuice_log_level").get_to(config.libjuice_log_level);
+    if (j.contains("kcp_update_interval_ms")) j.at("kcp_update_interval_ms").get_to(config.kcp_update_interval_ms);
+    if (j.contains("chunk_size")) j.at("chunk_size").get_to(config.chunk_size);
+    if (j.contains("kcp_window_size")) j.at("kcp_window_size").get_to(config.kcp_window_size);
+    if (j.contains("file_hash_retry_delay_ms")) j.at("file_hash_retry_delay_ms").get_to(config.file_hash_retry_delay_ms);
     // ---------------------------------
 
     j.at("tasks").get_to(config.tasks);

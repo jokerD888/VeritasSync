@@ -14,6 +14,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>  // <-- 1. 包含头文件
+#include <locale.h>   // <-- 新增：包含区域设置头文件
 #endif
 
 using boost::asio::ip::tcp;
@@ -247,7 +248,26 @@ void Session::do_read_header() {
 void Session::handle_read_header(const boost::system::error_code& ec, std::size_t bytes) {
     if (ec) {
         if (ec != boost::asio::error::eof) {
+#if defined(_WIN32)
+            // 在Windows上，将系统错误消息转换为UTF-8
+            LPWSTR messageBuffer = nullptr;
+            size_t size = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                         NULL, ec.value(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&messageBuffer, 0, NULL);
+            std::wstring message(messageBuffer, size);
+            LocalFree(messageBuffer);
+            
+            // 转换为UTF-8
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, &message[0], (int)message.size(), NULL, 0, NULL, NULL);
+            std::string utf8_message(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, &message[0], (int)message.size(), &utf8_message[0], size_needed, NULL, NULL);
+            
+            // 移除末尾的换行符
+            utf8_message.erase(utf8_message.find_last_not_of("\r\n") + 1);
+            
+            g_logger->error("[Session] {} 读取头部失败: {}", m_id, utf8_message);
+#else
             g_logger->error("[Session] {} 读取头部失败: {}", m_id, ec.message());
+#endif
         } else {
             g_logger->warn("[Session] {} 触发 EOF。", m_id);
         }
@@ -278,7 +298,26 @@ void Session::do_read_body(unsigned int msg_len) {
 
 void Session::handle_read_body(const boost::system::error_code& ec, std::size_t bytes) {
     if (ec) {
+#if defined(_WIN32)
+        // 在Windows上，将系统错误消息转换为UTF-8
+        LPWSTR messageBuffer = nullptr;
+        size_t size = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     NULL, ec.value(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&messageBuffer, 0, NULL);
+        std::wstring message(messageBuffer, size);
+        LocalFree(messageBuffer);
+        
+        // 转换为UTF-8
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &message[0], (int)message.size(), NULL, 0, NULL, NULL);
+        std::string utf8_message(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, &message[0], (int)message.size(), &utf8_message[0], size_needed, NULL, NULL);
+        
+        // 移除末尾的换行符
+        utf8_message.erase(utf8_message.find_last_not_of("\r\n") + 1);
+        
+        g_logger->error("[Session] {} 读取消息体失败: {}", m_id, utf8_message);
+#else
         g_logger->error("[Session] {} 读取消息体失败: {}", m_id, ec.message());
+#endif
         m_server.leave(shared_from_this());
         return;
     }
@@ -361,7 +400,11 @@ void init_tracker_logger() {
 // --- main ---
 int main() {
 #if defined(_WIN32)
-    SetConsoleOutputCP(CP_UTF8);  // <-- 2. 在 main 函数开头添加此行
+    // 设置控制台编码为UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);  // 输入编码也设置UTF-8
+    // 设置区域为UTF-8，确保系统错误消息正确显示
+    std::setlocale(LC_ALL, ".UTF-8");
 #endif
 
     init_tracker_logger();

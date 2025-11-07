@@ -1,4 +1,4 @@
-﻿#include "VeritasSync/P2PManager.h"
+#include "VeritasSync/P2PManager.h"
 
 #include <snappy.h>
 
@@ -199,21 +199,23 @@ std::shared_ptr<P2PManager> P2PManager::create() {
         P2PManagerMaker() : P2PManager() {}
     };
     auto manager = std::make_shared<P2PManagerMaker>();
+    manager->m_last_data_time = std::chrono::steady_clock::now();  // 初始化时间
     manager->init();
     return manager;
 }
 
-P2PManager::P2PManager() : m_io_context(), m_kcp_update_timer(m_io_context) {
-    // (libjuice 日志设置 ... 保持不变 ...)
-    juice_set_log_level(JUICE_LOG_LEVEL_DEBUG);
+P2PManager::P2PManager() : m_io_context(), m_kcp_update_timer(m_io_context), m_cleanup_timer(m_io_context) {
+    // --- 优化：只记录重要的 libjuice 日志 (INFO 及以上级别) ---
+    juice_set_log_level(JUICE_LOG_LEVEL_INFO);  // 关闭 DEBUG 和 VERBOSE
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
         switch (level) {
-        case JUICE_LOG_LEVEL_VERBOSE:
-        case JUICE_LOG_LEVEL_DEBUG:
-            g_logger->debug("[libjuice] {}", message);
-            break;
         case JUICE_LOG_LEVEL_INFO:
-            g_logger->info("[libjuice] {}", message);
+            // 过滤掉一些噪音日志
+            if (std::string_view(message).find("Changing state to") != std::string_view::npos ||
+                std::string_view(message).find("Candidate gathering done") != std::string_view::npos ||
+                std::string_view(message).find("Connectivity timer") != std::string_view::npos) {
+                g_logger->info("[libjuice] {}", message);
+            }
             break;
         case JUICE_LOG_LEVEL_WARN:
             g_logger->warn("[libjuice] {}", message);
@@ -250,6 +252,7 @@ void P2PManager::init() {
         m_io_context.run();
     });
     schedule_kcp_update();
+    schedule_cleanup_task();  // 启动清理任务
 }
 P2PManager::~P2PManager() {
     m_io_context.stop();
@@ -275,7 +278,7 @@ int P2PManager::kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void*
     return 0;
 }
 void P2PManager::schedule_kcp_update() {
-    m_kcp_update_timer.expires_after(std::chrono::milliseconds(10));
+    m_kcp_update_timer.expires_after(std::chrono::milliseconds(m_kcp_update_interval_ms));
     m_kcp_update_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
         if (!ec) {
             self->update_all_kcps();
@@ -299,6 +302,22 @@ void P2PManager::update_all_kcps() {
             }
         }
     }
+    
+    // 优化：动态调整更新频率
+    if (!received_messages.empty()) {
+        m_last_data_time = std::chrono::steady_clock::now();
+        m_kcp_update_interval_ms = 10;  // 有数据时高频更新
+    } else {
+        auto idle_duration = std::chrono::steady_clock::now() - m_last_data_time;
+        if (idle_duration > std::chrono::seconds(5)) {
+            m_kcp_update_interval_ms = 100;  // 空闲5秒后降低频率
+        } else if (idle_duration > std::chrono::seconds(1)) {
+            m_kcp_update_interval_ms = 50;   // 空闲1秒后中等频率
+        } else {
+            m_kcp_update_interval_ms = 20;   // 默认频率
+        }
+    }
+    
     for (const auto& msg_pair : received_messages) {
         handle_kcp_message(msg_pair.first, msg_pair.second);
     }
@@ -353,8 +372,11 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
         if (self_id < peer_id) {
             // 我们的 ID 较小, 我们是 "Controlling" (控制方)
             g_logger->info("[ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 {})", peer_id);
-            // 作为 'Controlling', 我们调用 gather_candidates 来生成一个 Offer
+            // 作为 'Controlling', 我们需要：
+            // 1. 收集候选地址 (这将触发 cb_candidate 回调)
             juice_gather_candidates(agent);
+            // 2. 在收集完成后 (cb_gathering_done), 获取并发送完整的 SDP Offer
+            //    (这部分逻辑在 handle_juice_gathering_done 中实现)
         } else {
             // 我们的 ID 较大, 我们是 "Controlled" (受控方)
             g_logger->info("[ICE] Tie-breaking: 我们是 'Controlled' (Answer) 方 (对于 {})。等待 Offer...", peer_id);
@@ -393,8 +415,16 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
     if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
         if (!it->second->kcp) {
             g_logger->info("[KCP] ICE 连接建立，为 {} 设置 KCP 上下文。", peer_id);
-            uint32_t conv = static_cast<uint32_t>(std::hash<juice_agent_t*>{}(agent));
+            
+            // --- 关键修复：使用确定性的 conv ID ---
+            // 将 self_id 和 peer_id 排序后组合，确保双方生成相同的 conv
+            std::string self_id = m_tracker_client ? m_tracker_client->get_self_id() : "";
+            std::string id_pair = (self_id < peer_id) ? (self_id + peer_id) : (peer_id + self_id);
+            uint32_t conv = static_cast<uint32_t>(std::hash<std::string>{}(id_pair));
+            
+            g_logger->info("[KCP] 使用 conv ID: {} (基于: {} <-> {})", conv, self_id, peer_id);
             it->second->setup_kcp(conv);
+            
             if (m_role == SyncRole::Source) {
                 g_logger->info("[P2P] (Source) KCP 就绪，向新对等点 {} 发送全量状态...", peer_id);
                 m_state_manager->scan_directory();
@@ -422,52 +452,22 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
         return;
     }
 
-    std::string signal_type;
-
-    // --- 关键修复：必须先检查完整的 SDP (Offer/Answer)，再检查 Candidate ---
-
-    // 1. 检查这是否是一个完整的 SDP (Offer/Answer)
-    // (特征：包含 "m=" 媒体行 和 "o=" 源行)
-    if (sdp_str.find("m=") != std::string::npos && sdp_str.find("o=") != std::string::npos) {
-        // 这是一个完整的 SDP。现在判断是 Offer 还是 Answer。
-        // "a=setup:actpass" 表示这是一个 Offer
-        if (sdp_str.find("a=setup:actpass") != std::string::npos) {
-            signal_type = "sdp_offer";
-        }
-        // "a=setup:active" 或 "a=setup:passive" 表示这是一个 Answer
-        else if (sdp_str.find("a=setup:active") != std::string::npos ||
-                 sdp_str.find("a=setup:passive") != std::string::npos) {
-            signal_type = "sdp_answer";
-        } else {
-            // 回退：如果找不到 "a=setup" (理论上不应该)，我们根据角色猜测
-            std::string self_id = m_tracker_client->get_self_id();
-            if (self_id < peer_id) {
-                g_logger->warn("[ICE] 找不到 'a=setup' 属性，根据 Tie-Break 猜测为 'sdp_offer'。");
-                signal_type = "sdp_offer";  // 我们是 Controlling，所以这是 Offer
-            } else {
-                g_logger->warn("[ICE] 找不到 'a=setup' 属性，根据 Tie-Break 猜测为 'sdp_answer'。");
-                signal_type = "sdp_answer";  // 我们是 Controlled，所以这是 Answer
-            }
-        }
+    // --- 修复：libjuice 的 cb_candidate 回调只用于发送单个 ICE candidate ---
+    // 完整的 SDP Offer/Answer 应该在 gathering_done 后通过 juice_get_local_description 获取
+    
+    if (sdp_str.find("a=candidate") != std::string::npos) {
+        // 这是一个 ICE candidate
+        g_logger->info("[ICE] 为 {} (发送给 {}) 生成 ICE candidate: {}...", 
+                       m_tracker_client->get_self_id(), peer_id, sdp_str.substr(0, 40));
+        m_tracker_client->send_signaling_message(peer_id, "ice_candidate", sdp_str);
+    } else {
+        g_logger->warn("[ICE] handle_juice_candidate 收到非 candidate 数据 (已忽略): {}...", 
+                       sdp_str.substr(0, 40));
     }
-    // 2. 否则，检查这是否只是一个 ICE Candidate
-    else if (sdp_str.find("a=candidate") != std::string::npos) {
-        signal_type = "ice_candidate";
-    }
-    // 3. 否则，我们不知道这是什么
-    else {
-        g_logger->warn("[ICE] 收到来自 libjuice 的未知信令 (非 candidate 且非 SDP): {}", sdp_str);
-        return;
-    }
-
-    g_logger->info("[ICE] 为 {} (发送给 {}) 生成本地信令 ({}): {}...", m_tracker_client->get_self_id(), peer_id,
-                   signal_type, sdp_str.substr(0, 40));
-
-    // 使用检测到的正确类型发送信令
-    m_tracker_client->send_signaling_message(peer_id, signal_type, sdp_str);
 }
 void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
     std::string peer_id;
+    std::string self_id;
     {
         std::lock_guard<std::mutex> lock(m_peers_mutex);
         auto it = m_peers_by_agent.find(agent);
@@ -475,8 +475,31 @@ void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
         peer_id = it->second->peer_id;
     }
     if (!m_tracker_client) return;
+    
+    self_id = m_tracker_client->get_self_id();
     g_logger->info("[ICE] 对等点 {} 的候选地址收集完成。", peer_id);
-    // --- 修复：取消注释 ---
+    
+    // --- 关键修复：在 gathering 完成后，获取并发送完整的 SDP ---
+    
+    char local_description[4096];
+    if (juice_get_local_description(agent, local_description, sizeof(local_description)) == 0) {
+        std::string sdp_str(local_description);
+        
+        // 判断我们的角色，决定发送 Offer 还是 Answer
+        if (self_id < peer_id) {
+            // 我们是 Controlling (Offer 方)
+            g_logger->info("[ICE] 向 {} 发送 SDP Offer ({} 字节)", peer_id, sdp_str.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_offer", sdp_str);
+        } else {
+            // 我们是 Controlled (Answer 方)
+            g_logger->info("[ICE] 向 {} 发送 SDP Answer ({} 字节)", peer_id, sdp_str.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_answer", sdp_str);
+        }
+    } else {
+        g_logger->error("[ICE] 获取本地 SDP 描述失败 (对等点: {})", peer_id);
+    }
+    
+    // 仍然发送 gathering_done 通知
     m_tracker_client->send_signaling_message(peer_id, "ice_gathering_done", "");
 }
 void P2PManager::handle_juice_recv(juice_agent_t* agent, const char* data, size_t size) {
@@ -484,12 +507,17 @@ void P2PManager::handle_juice_recv(juice_agent_t* agent, const char* data, size_
     {
         std::lock_guard<std::mutex> lock(m_peers_mutex);
         auto it = m_peers_by_agent.find(agent);
-        if (it == m_peers_by_agent.end() || !it->second->kcp) {
-            g_logger->warn("[P2P] 收到来自未知或未就绪 (KCP) Agent 的数据。");
+        if (it == m_peers_by_agent.end()) {
+            g_logger->warn("[P2P] 收到来自未知 Agent 的数据 ({} bytes)。", size);
+            return;
+        }
+        if (!it->second->kcp) {
+            g_logger->warn("[P2P] 收到数据但 KCP 未就绪 (对等点: {}, {} bytes)。", it->second->peer_id, size);
             return;
         }
         context = it->second;
     }
+    // 移除调试日志，减少噪音
     ikcp_input(context->kcp, data, size);
 }
 void P2PManager::handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
@@ -546,10 +574,16 @@ void P2PManager::send_over_kcp(const std::string& msg) {
         return;
     }
     std::lock_guard<std::mutex> lock(m_peers_mutex);
+    int sent_count = 0;
     for (auto const& [agent, context] : m_peers_by_agent) {
         if (context->kcp) {
             ikcp_send(context->kcp, encrypted_msg.c_str(), encrypted_msg.length());
+            sent_count++;
         }
+    }
+    // 优化：只在有消息时记录 info 级别
+    if (sent_count > 0) {
+        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", sent_count, encrypted_msg.length());
     }
 }
 void P2PManager::send_over_kcp_peer(const std::string& msg, PeerContext* peer) {
@@ -570,19 +604,27 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerContext* peer) {
 void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_peer) {
     std::string decrypted_msg = decrypt_gcm(msg);
     if (decrypted_msg.empty()) {
+        g_logger->warn("[KCP] 解密失败 ({} bytes 原始数据)", msg.size());
         return;
     }
+    
     if (decrypted_msg.empty()) {
         g_logger->warn("[KCP] 收到空解密包。");
         return;
     }
     uint8_t msg_type = decrypted_msg[0];
     std::string payload(decrypted_msg.begin() + 1, decrypted_msg.end());
+    
     if (msg_type == MSG_TYPE_JSON) {
         try {
             auto json = nlohmann::json::parse(payload);
             const std::string json_msg_type = json.at(Protocol::MSG_TYPE).get<std::string>();
             auto& json_payload = json.at(Protocol::MSG_PAYLOAD);
+            
+            // 优化：只记录重要的消息类型
+            g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", 
+                          json_msg_type, from_peer ? from_peer->peer_id : "<unknown>");
+            
             if (json_msg_type == Protocol::TYPE_SHARE_STATE && m_role == SyncRole::Destination) {
                 handle_share_state(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE && m_role == SyncRole::Destination) {
@@ -595,10 +637,12 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
                 handle_dir_create(json_payload);
             } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && m_role == SyncRole::Destination) {
                 handle_dir_delete(json_payload, from_peer);
+            } else {
+                g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", 
+                             json_msg_type, m_role == SyncRole::Source ? "Source" : "Destination");
             }
         } catch (const std::exception& e) {
             g_logger->error("[P2P] 处理KCP JSON消息时发生错误: {}", e.what());
-            g_logger->error("       原始JSON: {}", payload);
         }
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
         if (m_role == SyncRole::Destination) {
@@ -893,6 +937,56 @@ void P2PManager::handle_file_chunk(const std::string& payload) {
         output_file.close();
         g_logger->info("[P2P] 成功: 文件 '{}' 已保存。", file_path_str);
         m_file_assembly_buffer.erase(file_path_str);
+    }
+}
+
+// --- 优化：清理停滞的文件组装缓冲区 ---
+void P2PManager::schedule_cleanup_task() {
+    m_cleanup_timer.expires_after(std::chrono::minutes(5));  // 每5分钟执行一次
+    m_cleanup_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
+        if (!ec) {
+            self->cleanup_stale_buffers();
+            self->schedule_cleanup_task();  // 重新调度
+        }
+    });
+}
+
+void P2PManager::cleanup_stale_buffers() {
+    static std::unordered_map<std::string, std::chrono::steady_clock::time_point> buffer_timestamps;
+    auto now = std::chrono::steady_clock::now();
+    
+    // 记录当前缓冲区的时间戳
+    for (const auto& [file_path, _] : m_file_assembly_buffer) {
+        if (buffer_timestamps.find(file_path) == buffer_timestamps.end()) {
+            buffer_timestamps[file_path] = now;
+        }
+    }
+    
+    // 清理超过10分钟未完成的缓冲区
+    std::vector<std::string> to_remove;
+    for (const auto& [file_path, timestamp] : buffer_timestamps) {
+        if (now - timestamp > std::chrono::minutes(10)) {
+            to_remove.push_back(file_path);
+        }
+    }
+    
+    for (const auto& file_path : to_remove) {
+        m_file_assembly_buffer.erase(file_path);
+        buffer_timestamps.erase(file_path);
+        g_logger->warn("[清理] 移除停滞的文件组装缓冲区: {}", file_path);
+    }
+    
+    // 清理已完成的文件的时间戳
+    for (auto it = buffer_timestamps.begin(); it != buffer_timestamps.end();) {
+        if (m_file_assembly_buffer.find(it->first) == m_file_assembly_buffer.end()) {
+            it = buffer_timestamps.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    if (!to_remove.empty()) {
+        g_logger->info("[清理] 已清理 {} 个停滞的缓冲区", to_remove.size());
     }
 }
 

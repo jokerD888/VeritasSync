@@ -14,6 +14,18 @@ if(WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00) # 将目标平台设置为 Windows 10
 endif()
 
+# --- 优化：Release 模式编译优化 ---
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    if(MSVC)
+        add_compile_options(/O2 /GL /arch:AVX2)
+        add_link_options(/LTCG)
+        message(STATUS "启用 MSVC Release 优化: /O2 /GL /LTCG")
+    else()
+        add_compile_options(-O3 -march=native)
+        message(STATUS "启用 GCC/Clang Release 优化: -O3 -march=native")
+    endif()
+endif()
+
 # --- 查找依赖包 ---
 find_package(openssl CONFIG REQUIRED)
 find_package(efsw CONFIG CONFIG REQUIRED)

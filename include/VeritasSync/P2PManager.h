@@ -69,7 +69,7 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     void handle_peer_leave(const std::string& peer_id);  // <-- (来自上次修复)
 
    private:
-    static constexpr size_t CHUNK_DATA_SIZE = 8192;
+    static constexpr size_t CHUNK_DATA_SIZE = 16384;  // 优化：从8KB增加到16KB提升传输效率
 
     // --- 修复：构造函数不再需要参数 ---
     P2PManager();
@@ -131,6 +131,15 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     std::string m_turn_username;
     std::string m_turn_password;
     juice_turn_server_t m_turn_server_config;
+    
+    // --- 优化：KCP更新频率自适应 ---
+    uint32_t m_kcp_update_interval_ms = 20;  // 默认20ms，在10-100ms之间动态调整
+    std::chrono::steady_clock::time_point m_last_data_time;
+    
+    // --- 优化：文件组装缓冲区清理 ---
+    boost::asio::steady_timer m_cleanup_timer;
+    void schedule_cleanup_task();
+    void cleanup_stale_buffers();
 };
 
 }  // namespace VeritasSync
