@@ -9,16 +9,24 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <boost/asio.hpp>
+#include <atomic>
+#include <sstream>
 
 #include "VeritasSync/Config.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
+#include "VeritasSync/WebUI.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>  // 文件夹选择对话框
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 #endif
 
 namespace VeritasSync {
@@ -46,22 +54,7 @@ void init_logger() {
     }
 }
 
-// (create_dummy_files ... 保持不变 ...)
-void create_dummy_files(const std::string& dir, const std::string& node_id) {
-    std::filesystem::path root(dir);
-    std::filesystem::create_directories(root);
-    if (node_id == "node1") {
-        VeritasSync::g_logger->info("[TestSetup] (Source) Creating files for Node 1...");
-        std::ofstream(root / "file_from_node1.txt") << "This file originated on Node 1.";
-        std::filesystem::create_directory(root / "common_dir");
-        std::ofstream(root / "common_dir" / "doc_A.txt") << "Document A";
-    } else if (node_id == "node2") {
-        VeritasSync::g_logger->info("[TestSetup] (Source) Creating files for Node 2...");
-        std::ofstream(root / "log_from_node2.log") << "This log file originated on Node 2.";
-        std::filesystem::create_directory(root / "common_dir");
-        std::ofstream(root / "common_dir" / "doc_B.txt") << "Document B";
-    }
-}
+// 测试代码已移除，使用实际的同步文件夹
 
 class SyncNode {
    public:
@@ -86,25 +79,12 @@ class SyncNode {
             return;
         }
 
-        if (is_source) {
-            if (std::filesystem::exists(m_task.sync_folder)) {
-                std::filesystem::remove_all(m_task.sync_folder);
-            }
-            if (m_task.sync_folder.find("SyncNode_A") != std::string::npos) {
-                create_dummy_files(m_task.sync_folder, "node1");
-            } else if (m_task.sync_folder.find("SyncNode_B") != std::string::npos) {
-                create_dummy_files(m_task.sync_folder, "node2");
-            } else {
-                std::filesystem::create_directories(m_task.sync_folder);
-                // --- 修复 1：添加命名空间 ---
-                VeritasSync::g_logger->info("[TestSetup] (Source) Using empty directory.");
-            }
+        // 确保同步目录存在（不清空已有文件，支持重启后继续工作）
+        if (!std::filesystem::exists(m_task.sync_folder)) {
+            std::filesystem::create_directories(m_task.sync_folder);
+            VeritasSync::g_logger->info("[SyncNode] 创建同步目录: {}", m_task.sync_folder);
         } else {
-            if (!std::filesystem::exists(m_task.sync_folder)) {
-                std::filesystem::create_directories(m_task.sync_folder);
-                // --- 修复 2：添加命名空间 ---
-                VeritasSync::g_logger->info("[TestSetup] (Destination) Folder created.");
-            }
+            VeritasSync::g_logger->info("[SyncNode] 使用现有同步目录: {}", m_task.sync_folder);
         }
 
         // --- 修复：启动顺序 ---
@@ -181,8 +161,26 @@ int main(int argc, char* argv[]) {
     }
     VeritasSync::g_logger->info("Configuration loaded. Tracker at {}:{}. Found {} task(s).", config.tracker_host,
                                 config.tracker_port, config.tasks.size());
+    
+    // 启动 Web UI
+    boost::asio::io_context ui_ioc;
+    VeritasSync::WebUIServer web_ui(ui_ioc, 8800, "config.json");
+    web_ui.start();
+    std::thread ui_thread([&ui_ioc]() { ui_ioc.run(); });
+    
+    VeritasSync::g_logger->info("[WebUI] 控制台已启动: http://127.0.0.1:{}", web_ui.get_port());
+    
+#if defined(_WIN32)
+    // Windows 下自动打开浏览器
+    ShellExecuteA(nullptr, "open", "http://127.0.0.1:8800", nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+    
     if (config.tasks.empty()) {
-        VeritasSync::g_logger->warn("No sync tasks defined in config.json. Exiting.");
+        VeritasSync::g_logger->warn("没有配置同步任务。请通过 Web UI (http://127.0.0.1:8800) 添加任务。");
+        VeritasSync::g_logger->info("\n--- 按 Ctrl+C 退出 ---");
+        std::this_thread::sleep_for(std::chrono::hours(24));
+        ui_ioc.stop();
+        if (ui_thread.joinable()) ui_thread.join();
         spdlog::shutdown();
         return 0;
     }
@@ -192,8 +190,13 @@ int main(int argc, char* argv[]) {
         node->start();
         nodes.push_back(std::move(node));
     }
-    VeritasSync::g_logger->info("\n--- All nodes are running. Press Ctrl+C to exit. ---");
+    VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---");
     std::this_thread::sleep_for(std::chrono::hours(24));
+    
+    // 清理
+    ui_ioc.stop();
+    if (ui_thread.joinable()) ui_thread.join();
+    
     VeritasSync::g_logger->info("--- Shutting down. ---");
     spdlog::shutdown();
     return 0;
