@@ -253,6 +253,7 @@ void P2PManager::init() {
     });
     schedule_kcp_update();
     schedule_cleanup_task();  // 启动清理任务
+    init_upnp();  // 启动 UPnP 发现
 }
 P2PManager::~P2PManager() {
     m_io_context.stop();
@@ -457,9 +458,14 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
     
     if (sdp_str.find("a=candidate") != std::string::npos) {
         // 这是一个 ICE candidate
+        
+        // --- 【新增】UPnP 重写逻辑 ---
+        std::string final_candidate = rewrite_candidate(sdp_str);
+        // --------------------------
+        
         g_logger->info("[ICE] 为 {} (发送给 {}) 生成 ICE candidate: {}...", 
-                       m_tracker_client->get_self_id(), peer_id, sdp_str.substr(0, 40));
-        m_tracker_client->send_signaling_message(peer_id, "ice_candidate", sdp_str);
+                       m_tracker_client->get_self_id(), peer_id, final_candidate.substr(0, 40));
+        m_tracker_client->send_signaling_message(peer_id, "ice_candidate", final_candidate);
     } else {
         g_logger->warn("[ICE] handle_juice_candidate 收到非 candidate 数据 (已忽略): {}...", 
                        sdp_str.substr(0, 40));
@@ -988,6 +994,121 @@ void P2PManager::cleanup_stale_buffers() {
     if (!to_remove.empty()) {
         g_logger->info("[清理] 已清理 {} 个停滞的缓冲区", to_remove.size());
     }
+}
+
+// --- UPnP 功能实现 ---
+
+void P2PManager::init_upnp() {
+    // 在 P2P 的 IO 线程中执行,避免阻塞
+    boost::asio::post(m_io_context, [this]() {
+        std::lock_guard<std::mutex> lock(m_upnp_mutex);
+        
+        int error = 0;
+        // 发现路由器 (2000ms 超时)
+        struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
+        if (devlist) {
+            g_logger->info("[UPnP] 发现 UPnP 设备列表。");
+            // 获取有效的 IGD (互联网网关设备)
+            // API: UPNP_GetValidIGD(devlist, urls, data, lanaddr, lanaddrlen, wanaddr, wanaddrlen)
+            char wanaddr[64] = {0};
+            int r = UPNP_GetValidIGD(devlist, &m_upnp_urls, &m_upnp_data, 
+                                     m_upnp_lan_addr, sizeof(m_upnp_lan_addr),
+                                     wanaddr, sizeof(wanaddr));
+            
+            if (r == 1) {
+                g_logger->info("[UPnP] 成功连接到路由器: {}", m_upnp_urls.controlURL);
+                g_logger->info("[UPnP] 我们的局域网 IP: {}", m_upnp_lan_addr);
+
+                // 获取公网 IP
+                char public_ip[40];
+                r = UPNP_GetExternalIPAddress(m_upnp_urls.controlURL, 
+                                            m_upnp_data.first.servicetype, 
+                                            public_ip);
+                
+                if (r == UPNPCOMMAND_SUCCESS) {
+                    m_upnp_public_ip = public_ip;
+                    m_upnp_available = true;
+                    g_logger->info("[UPnP] 成功获取公网 IP: {}", m_upnp_public_ip);
+                } else {
+                    g_logger->warn("[UPnP] 无法获取公网 IP (错误码: {}).", r);
+                }
+            } else {
+                g_logger->warn("[UPnP] 未找到有效的 IGD (互联网网关设备).");
+            }
+            freeUPNPDevlist(devlist);
+        } else {
+            g_logger->warn("[UPnP] 未发现 UPnP 设备 (错误: {}).", error);
+        }
+    });
+}
+
+// 辅助函数，用于解析 SDP
+static std::string get_sdp_field(const std::string& sdp, int index) {
+    std::istringstream iss(sdp);
+    std::string field;
+    for(int i = 0; i <= index; ++i) {
+        iss >> field;
+        if (iss.fail()) return "";
+    }
+    return field;
+}
+
+std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
+    std::lock_guard<std::mutex> lock(m_upnp_mutex);
+
+    // 如果 UPnP 不可用，或者我们没有公网IP，则不重写
+    if (!m_upnp_available || m_upnp_public_ip.empty()) {
+        return sdp_candidate;
+    }
+
+    // libjuice 的候选地址格式: "a=candidate:..."
+    // 我们只关心 "host" 类型的候选地址，它们包含局域网IP
+    std::string cand_type = get_sdp_field(sdp_candidate, 7);
+    if (cand_type != "host") {
+        return sdp_candidate; // 不是 "host"，可能是 "srflx" 或 "relay"，直接返回
+    }
+
+    // "a=candidate:..." 字段: 4=ip, 5=port
+    std::string local_ip = get_sdp_field(sdp_candidate, 4);
+    std::string local_port = get_sdp_field(sdp_candidate, 5);
+
+    // 确保是我们自己的局域网 IP
+    if (local_ip != m_upnp_lan_addr) {
+        g_logger->debug("[UPnP] 候选 IP {} 与 UPnP 局域网 IP {} 不匹配，跳过。", 
+                       local_ip, m_upnp_lan_addr);
+        return sdp_candidate;
+    }
+
+    // 尝试在路由器上添加这个端口映射
+    // (将 公网端口 映射到 局域网IP:局域网端口)
+    int r = UPNP_AddPortMapping(m_upnp_urls.controlURL, 
+                                m_upnp_data.first.servicetype,
+                                local_port.c_str(), // external_port (使用与内部相同的端口)
+                                local_port.c_str(), // internal_port
+                                m_upnp_lan_addr, // internal_client
+                                "VeritasSync P2P",  // description
+                                "UDP",              // protocol
+                                nullptr, "0");      // remote_host, duration
+
+    if (r == UPNPCOMMAND_SUCCESS) {
+        g_logger->info("[UPnP] 成功为候选地址 {}:{} 映射公网端口 {}", 
+                       local_ip, local_port, local_port);
+        
+        // 成功！现在重写候选地址，用公网IP替换局域网IP
+        std::string rewritten_candidate = sdp_candidate;
+        size_t pos = rewritten_candidate.find(local_ip);
+        if (pos != std::string::npos) {
+            rewritten_candidate.replace(pos, local_ip.length(), m_upnp_public_ip);
+            g_logger->info("[UPnP] 重写候选地址为: {}...", rewritten_candidate.substr(0, 40));
+            return rewritten_candidate;
+        }
+    } else {
+        g_logger->warn("[UPnP] 无法为 {}:{} 映射端口 (错误码: {}).", 
+                       local_ip, local_port, r);
+    }
+
+    // 映射失败，返回原始候选地址
+    return sdp_candidate;
 }
 
 }  // namespace VeritasSync

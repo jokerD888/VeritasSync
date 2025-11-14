@@ -8,10 +8,16 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
+
+// --- miniupnpc 头文件 ---
+#include <miniupnpc/miniupnpc.h>
+#include <miniupnpc/upnpcommands.h>
+// --------------------------
 
 #include "VeritasSync/Protocol.h"
 
@@ -108,6 +114,10 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     void handle_juice_gathering_done(juice_agent_t* agent);
     void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
 
+    // --- UPnP 辅助函数 ---
+    void init_upnp();
+    std::string rewrite_candidate(const std::string& sdp_candidate);
+
     // --- 成员变量 ---
     boost::asio::io_context m_io_context;
     std::jthread m_thread;
@@ -140,6 +150,15 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     boost::asio::steady_timer m_cleanup_timer;
     void schedule_cleanup_task();
     void cleanup_stale_buffers();
+
+    // --- UPnP 成员变量 ---
+    std::mutex m_upnp_mutex;
+    bool m_upnp_available = false;
+    char m_upnp_lan_addr[64] = {0};
+    std::string m_upnp_public_ip;
+    struct UPNPUrls m_upnp_urls;
+    struct IGDdatas m_upnp_data;
+    // --------------------------
 };
 
 }  // namespace VeritasSync

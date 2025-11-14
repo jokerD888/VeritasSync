@@ -36,6 +36,7 @@ find_package(Snappy CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(LibJuice CONFIG REQUIRED)
 find_package(unofficial-b64 CONFIG REQUIRED)
+find_package(miniupnpc CONFIG REQUIRED)
 
 
 
@@ -66,6 +67,7 @@ target_link_libraries(veritas_sync PRIVATE
     Snappy::snappy
     spdlog::spdlog
     LibJuice::LibJuice
+    miniupnpc::miniupnpc
 )
 
 
