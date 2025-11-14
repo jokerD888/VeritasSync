@@ -57,20 +57,12 @@ static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
 // (PeerContext 实现 ... 保持不变 ...)
 PeerContext::PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr)
-    : peer_id(std::move(id)), 
-      agent(ag), 
-      p2p_manager_ptr(std::move(manager_ptr)),
-      retry_timer(std::make_unique<boost::asio::steady_timer>(p2p_manager_ptr->get_io_context()))
-{}
+    : peer_id(std::move(id)), agent(ag), p2p_manager_ptr(std::move(manager_ptr)) {}
 
 PeerContext::~PeerContext() {
     if (kcp) {
         ikcp_release(kcp);
         kcp = nullptr;
-    }
-    // 取消重试定时器
-    if (retry_timer) {
-        retry_timer->cancel();
     }
 }
 void PeerContext::setup_kcp(uint32_t conv) {
@@ -429,8 +421,60 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
     g_logger->info("[ICE] 对等点 {} 状态改变: {}", peer_id, juice_state_to_string(state));
     
     if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
+        
+        // --- 查询当前的连接类型 ---
+        char local_sdp[1024];
+        char remote_sdp[1024];
+        ConnectionType new_type = ConnectionType::None;
+
+        // 获取当前选定的候选地址对
+        if (juice_get_selected_candidates(agent, local_sdp, sizeof(local_sdp), 
+                                         remote_sdp, sizeof(remote_sdp)) == 0) 
+        {
+            std::string local_str(local_sdp);
+            // 检查本地候选地址的类型
+            if (local_str.find(" typ host") != std::string::npos || 
+                local_str.find(" typ srflx") != std::string::npos) 
+            {
+                new_type = ConnectionType::P2P;
+            } 
+            else if (local_str.find(" typ relay") != std::string::npos) 
+            {
+                new_type = ConnectionType::Relay;
+            }
+            
+            g_logger->debug("[ICE] 候选地址: {}", local_str);
+        }
+        // -----------------------------------
+
+        // --- 检查连接类型是否发生变化 ---
+        if (new_type != ConnectionType::None && new_type != context->current_type) {
+            
+            if (new_type == ConnectionType::Relay) {
+                // Relay 中继连接建立
+                g_logger->warn("[ICE] 连接已建立：当前使用 UDP Relay (中继服务器) -> {}", peer_id);
+                g_logger->warn("[ICE] 正在后台尝试 P2P 直连优化...");
+            } 
+            else if (new_type == ConnectionType::P2P) {
+                if (context->current_type == ConnectionType::Relay) {
+                    // 从 Relay 升级到 P2P
+                    g_logger->info("[ICE] ✨ P2P升级成功！连接已自动切换到 UDP P2P (直连) -> {}", peer_id);
+                    g_logger->info("[ICE] 流量已不再经过 TURN 服务器，节省带宽成本。");
+                } else {
+                    // 直接 P2P 连接成功
+                    g_logger->info("[ICE] 连接已建立：直接 P2P 直连 -> {}", peer_id);
+                }
+            }
+            context->current_type = new_type;
+        }
+        // -----------------------------------
+        
+        // --- 只在 KCP 未设置时才设置 KCP ---
         if (!context->kcp) {
-            g_logger->info("[KCP] ICE 连接建立，为 {} 设置 KCP 上下文。", peer_id);
+            std::string conn_type_str = (new_type == ConnectionType::P2P) ? "P2P" : 
+                                       (new_type == ConnectionType::Relay) ? "Relay" : "Unknown";
+            g_logger->info("[KCP] ICE 连接建立 ({})，为 {} 设置 KCP 上下文。", 
+                           conn_type_str, peer_id);
             
             // --- 关键修复：使用确定性的 conv ID ---
             // 将 self_id 和 peer_id 排序后组合，确保双方生成相同的 conv
@@ -448,20 +492,12 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
                 send_over_kcp_peer(json_state, context.get());
             }
         }
-        
-        // --- P2P 成功，重置重试状态 ---
-        g_logger->info("[ICE] P2P连接成功，已为 {} 清除重试状态。", peer_id);
-        context->retry_count = 0;
-        if (context->retry_timer) {
-            context->retry_timer->cancel();
-        }
-        // ---------------------------------
+        // -----------------------------------
         
     } else if (state == JUICE_STATE_FAILED) {
-        // --- P2P 失败，安排重试 ---
-        g_logger->error("[ICE] 对等点 {} 连接失败。将安排重试...", peer_id);
-        schedule_p2p_retry(context);
-        // ---------------------------
+        // 【重要】只保留日志，不重试
+        // libjuice 将会自动尝试 Relay 升级
+        g_logger->error("[ICE] 对等点 {} P2P/Relay 均连接失败。", peer_id);
     }
 }
 void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
@@ -1136,62 +1172,6 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
 
     // 映射失败，返回原始候选地址
     return sdp_candidate;
-}
-
-// --- P2P 重试机制实现 ---
-
-void P2PManager::schedule_p2p_retry(std::shared_ptr<PeerContext> context) {
-    // 快速重试策略：1s, 2s, 5s, 10s, 然后固定 30s
-    int delay_seconds;
-    if (context->retry_count == 0) delay_seconds = 1;       // 第一次重试：1秒后 (尽快)
-    else if (context->retry_count == 1) delay_seconds = 2;
-    else if (context->retry_count == 2) delay_seconds = 5;
-    else if (context->retry_count == 3) delay_seconds = 10;
-    else delay_seconds = 30;                                // 之后所有重试都间隔 30 秒
-
-    g_logger->info("[ICE] {} 的第 {} 次 P2P 重试将在 {} 秒后执行。", 
-                   context->peer_id, context->retry_count + 1, delay_seconds);
-
-    context->retry_timer->expires_after(std::chrono::seconds(delay_seconds));
-
-    std::string peer_id_copy = context->peer_id; // 复制 peer_id 以便 lambda 捕获
-
-    // 使用 weak_ptr 捕获 context，防止循环引用
-    context->retry_timer->async_wait(
-        [self = shared_from_this(), context_weak = std::weak_ptr(context), peer_id_copy]
-        (const boost::system::error_code& ec) {
-
-        if (ec) { 
-            // 如果是 operation_aborted，说明定时器被取消了 (例如连接成功了)
-            if (ec == boost::asio::error::operation_aborted) {
-                g_logger->debug("[ICE] {} 的 P2P 重试定时器被取消。", peer_id_copy);
-            }
-            return;
-        }
-
-        // 检查 PeerContext 是否仍然存在 (即对等点没有离开)
-        if (auto context_shared = context_weak.lock()) {
-            g_logger->info("[ICE] 正在为 {} 执行 P2P 重连...", peer_id_copy);
-            context_shared->retry_count++; // 增加重试计数
-            self->retry_p2p_connection(peer_id_copy);
-        } else {
-            g_logger->info("[ICE] {} 在重试前已离开，取消重连。", peer_id_copy);
-        }
-    });
-}
-
-void P2PManager::retry_p2p_connection(const std::string& peer_id) {
-    g_logger->info("[ICE] 开始为 {} 重新建立 P2P 连接...", peer_id);
-    
-    // 1. 彻底销毁旧的、失败的 P2P 实例
-    //    handle_peer_leave 会自动清理 m_peers_by_id, m_peers_by_agent, 
-    //    并销毁 juice_agent_t 和 PeerContext (包括它的定时器)
-    handle_peer_leave(peer_id);
-
-    // 2. 重新启动 P2P 连接
-    //    connect_to_peers 会创建一个全新的 PeerContext 和 juice_agent_t，
-    //    开始一次全新的 P2P 握手（包括 UPnP 重写）。
-    connect_to_peers({peer_id});
 }
 
 }  // namespace VeritasSync

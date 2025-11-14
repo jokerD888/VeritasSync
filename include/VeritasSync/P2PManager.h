@@ -23,6 +23,14 @@
 
 namespace VeritasSync {
 
+// --- ICE 连接类型枚举 ---
+enum class ConnectionType { 
+    None,   // 未连接
+    P2P,    // 直连 (host 或 srflx)
+    Relay   // 中继 (relay)
+};
+// -------------------------
+
 enum class SyncRole { Source, Destination };
 
 class StateManager;
@@ -35,9 +43,8 @@ struct PeerContext {
     ikcpcb* kcp = nullptr;
     std::shared_ptr<P2PManager> p2p_manager_ptr;
 
-    // --- P2P 重试状态 ---
-    int retry_count = 0;
-    std::unique_ptr<boost::asio::steady_timer> retry_timer;
+    // --- 连接类型跟踪 ---
+    ConnectionType current_type = ConnectionType::None;
     // --------------------
 
     PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
@@ -122,10 +129,6 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     // --- UPnP 辅助函数 ---
     void init_upnp();
     std::string rewrite_candidate(const std::string& sdp_candidate);
-
-    // --- P2P 重试机制 ---
-    void schedule_p2p_retry(std::shared_ptr<PeerContext> context);
-    void retry_p2p_connection(const std::string& peer_id);
 
     // --- 成员变量 ---
     boost::asio::io_context m_io_context;
