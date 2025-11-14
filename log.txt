@@ -1,0 +1,210 @@
+源端：
+D:\VeritasTest\NodeA>veritas_sync.exe
+[2025-11-14 15:36:35.044] [veritas_sync] [info] --- Veritas Sync Node Starting Up ---
+[2025-11-14 15:36:35.044] [veritas_sync] [info] [System] Windows console output set to UTF-8.
+[2025-11-14 15:36:35.052] [veritas_sync] [info] Configuration loaded. Tracker at 47.121.187.240:9988. Found 1 task(s).
+[2025-11-14 15:36:35.054] [veritas_sync] [info] [WebUI] 控制台已启动: http://127.0.0.1:8800
+[2025-11-14 15:36:35.703] [veritas_sync] [info] --- Starting Sync Task [my-p2p-test] ---
+[2025-11-14 15:36:35.703] [veritas_sync] [info] [Config] Role: source
+[2025-11-14 15:36:35.703] [veritas_sync] [info] [Config] Sync Folder: ./SyncSource
+[2025-11-14 15:36:35.704] [veritas_sync] [info] [SyncNode] 创建同步目录: ./SyncSource
+[2025-11-14 15:36:35.709] [veritas_sync] [info] [P2P] IO context 在后台线程运行...
+[2025-11-14 15:36:35.709] [veritas_sync] [info] [P2P] 加密密钥已从 'sync_key' 派生。
+[2025-11-14 15:36:35.710] [veritas_sync] [info] [Config] No TURN server configured.
+[2025-11-14 15:36:35.710] [veritas_sync] [info] [StateManager] 已启动对目录 'D:\VeritasTest\NodeA\SyncSource' 的实时监控 (Source 模式)。
+[2025-11-14 15:36:35.710] [veritas_sync] [info] [StateManager] Scanning directory: D:\VeritasTest\NodeA\SyncSource
+[2025-11-14 15:36:35.710] [veritas_sync] [info] [StateManager] Scan complete. Found 0 files and 0 directories.
+[2025-11-14 15:36:35.710] [veritas_sync] [info] [my-p2p-test] --- Phase 1: Contacting Tracker ---
+[2025-11-14 15:36:35.711] [veritas_sync] [info]
+--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---
+[2025-11-14 15:36:35.711] [veritas_sync] [info] [TrackerClient] IO context 在后台线程运行...
+[2025-11-14 15:36:35.738] [veritas_sync] [info] [TrackerClient] 已连接到 Tracker 47.121.187.240:9988
+[2025-11-14 15:36:35.764] [veritas_sync] [info] [TrackerClient] 注册成功。我的 ID: 218.77.209.162:2726。收到 2 个对等点。
+[2025-11-14 15:36:43.756] [veritas_sync] [warning] [UPnP] 未发现 UPnP 设备 (错误: 0).
+[2025-11-14 15:36:43.756] [veritas_sync] [info] [my-p2p-test] --- Phase 2: P2P (ICE) connection ---
+[2025-11-14 15:36:43.756] [veritas_sync] [info] [ICE] 正在为对等点 183.255.39.33:39478 创建 ICE Agent...
+[2025-11-14 15:36:43.756] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlled' (Answer) 方 (对于 183.255.39.33:39478)。等待 Offer...
+[2025-11-14 15:36:43.756] [veritas_sync] [info] [ICE] 正在为对等点 150.255.159.94:7186 创建 ICE Agent...
+[2025-11-14 15:36:43.756] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlled' (Answer) 方 (对于 150.255.159.94:7186)。等待 Offer...
+[2025-11-14 15:37:16.658] [veritas_sync] [info] [TrackerClient] 对等点 150.255.159.94:2122 已加入。
+[2025-11-14 15:37:16.658] [veritas_sync] [info] [ICE] 正在为对等点 150.255.159.94:2122 创建 ICE Agent...
+[2025-11-14 15:37:16.658] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlled' (Answer) 方 (对于 150.255.159.94:2122)。等待 Offer...
+[2025-11-14 15:37:18.977] [veritas_sync] [info] [ICE] 收到来自 150.255.159.94:2122 的信令: ice_candidate
+[2025-11-14 15:37:19.125] [veritas_sync] [info] [ICE] 收到来自 150.255.159.94:2122 的信令: ice_candidate
+[2025-11-14 15:37:19.204] [veritas_sync] [info] [ICE] 收到来自 150.255.159.94:2122 的信令: sdp_offer
+[2025-11-14 15:37:19.204] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to gathering
+[2025-11-14 15:37:19.208] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connecting
+[2025-11-14 15:37:19.208] [veritas_sync] [info] [libjuice] agent.c:2491: Candidate gathering done
+[2025-11-14 15:37:19.208] [veritas_sync] [info] [libjuice] agent.c:2475: Connectivity timer started
+[2025-11-14 15:37:19.208] [veritas_sync] [warning] [libjuice] conn_poll.c:421: Send failed, errno=10051
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 收到来自 150.255.159.94:2122 的信令: ice_gathering_done
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:2122 状态改变: gathering
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 为 218.77.209.162:2726 (发送给 150.255.159.94:2122) 生成 ICE candidate: a=candidate:1 1 UDP 2122317823 192.168.2...
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 为 218.77.209.162:2726 (发送给 150.255.159.94:2122) 生成 ICE candidate: a=candidate:2 1 UDP 2122317567 192.168.5...
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 为 218.77.209.162:2726 (发送给 150.255.159.94:2122) 生成 ICE candidate: a=candidate:3 1 UDP 2122317311 172.26.19...
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 为 218.77.209.162:2726 (发送给 150.255.159.94:2122) 生成 ICE candidate: a=candidate:4 1 UDP 2122317055 172.19.19...
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 为 218.77.209.162:2726 (发送给 150.255.159.94:2122) 生成 ICE candidate: a=candidate:5 1 UDP 2122316799 192.168.3...
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:2122 状态改变: connecting
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:2122 的候选地址收集完成。
+[2025-11-14 15:37:19.209] [veritas_sync] [info] [ICE] 向 150.255.159.94:2122 发送 SDP Answer (394 字节)
+[2025-11-14 15:37:19.312] [veritas_sync] [warning] [libjuice] conn_poll.c:421: Send failed, errno=10051
+[2025-11-14 15:37:57.068] [veritas_sync] [debug] [Watcher] 检测到变化: D:/VeritasTest/NodeA/SyncSource/新建 文本文档.txt
+[2025-11-14 15:37:58.924] [veritas_sync] [info] [libjuice] agent.c:1130: Connectivity timer expired
+[2025-11-14 15:37:58.924] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to failed
+[2025-11-14 15:37:58.924] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:2122 状态改变: failed
+[2025-11-14 15:37:58.924] [veritas_sync] [error] [ICE] 对等点 150.255.159.94:2122 连接失败。
+[2025-11-14 15:38:01.291] [veritas_sync] [debug] [Watcher] 检测到变化: D:/VeritasTest/NodeA/SyncSource/新建 文本文档.txt
+[2025-11-14 15:38:01.291] [veritas_sync] [debug] [Watcher] 检测到变化: D:/VeritasTest/NodeA/SyncSource/test.txt
+[2025-11-14 15:38:06.293] [veritas_sync] [info] [Watcher] 文件系统稳定，正在处理增量变化...
+[2025-11-14 15:38:06.295] [veritas_sync] [info] [StateManager] 广播更新: test.txt
+[2025-11-14 15:38:06.295] [veritas_sync] [info] [P2P] (Source) 广播增量更新: test.txt
+
+目的端：
+sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: ice_candidate
+[2025-11-10 18:55:46.385] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: ice_candidate
+[2025-11-10 18:55:46.768] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: ice_candidate
+[2025-11-10 18:55:46.850] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: ice_candidate
+[2025-11-10 18:55:46.851] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: sdp_answer
+[2025-11-10 18:55:46.851] [veritas_sync] [info] [libjuice] agent.c:2475: Connectivity timer started
+[2025-11-10 18:55:46.851] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:21497 的信令: ice_gathering_done
+[2025-11-10 18:55:47.523] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connected
+[2025-11-10 18:55:47.523] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:21497 状态改变: connected
+[2025-11-10 18:55:47.523] [veritas_sync] [info] [KCP] ICE 连接建立，为 218.77.209.162:21497 设置 KCP 上下文。
+[2025-11-10 18:55:47.523] [veritas_sync] [info] [KCP] 使用 conv ID: 590714267 (基于: 150.255.159.94:3652 <-> 218.77.209.162:21497)
+[2025-11-10 18:55:47.693] [veritas_sync] [info] [KCP] 收到 'share_state' 消息 (来自: 218.77.209.162:21497)
+[2025-11-10 18:55:47.693] [veritas_sync] [info] [KCP] (Destination) 收到来自 218.77.209.162:21497 (Source) 的 'share_state' 消息。
+[2025-11-10 18:55:47.693] [veritas_sync] [info] [StateManager] Scanning directory: D:\VeritasSync_test\SyncNode_B
+[2025-11-10 18:55:47.695] [veritas_sync] [info] [StateManager] Scan complete. Found 2 files and 1 directories.
+[2025-11-10 18:55:47.695] [veritas_sync] [info] [SyncManager] 正在比较本地目录 (1 个) 与远程目录 (1 个).
+[2025-11-10 18:55:49.737] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to completed
+[2025-11-10 18:55:49.737] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:21497 状态改变: completed
+[2025-11-10 19:05:29.093] [veritas_sync] [info] [TrackerClient] 对等点 218.77.209.162:21497 已离开。
+[2025-11-10 19:05:29.093] [veritas_sync] [info] [P2P] 对等点 218.77.209.162:21497 已断开连接，正在清理...
+[2025-11-10 19:09:20.287] [veritas_sync] [info] [TrackerClient] 对等点 183.255.39.33:1346 已离开。
+[2025-11-10 19:09:20.287] [veritas_sync] [info] [P2P] 对等点 183.255.39.33:1346 已断开连接，正在清理...
+[2025-11-10 19:23:41.395] [veritas_sync] [warning] [TrackerClient] Tracker 已断开连接。
+[2025-11-14 13:49:14.479] [veritas_sync] [info] --- Veritas Sync Node Starting Up ---
+[2025-11-14 13:49:14.479] [veritas_sync] [info] [System] Windows console output set to UTF-8.
+[2025-11-14 13:49:14.495] [veritas_sync] [info] Configuration loaded. Tracker at 47.121.187.240:9988. Found 1 task(s).
+[2025-11-14 13:49:14.495] [veritas_sync] [info] --- Starting Sync Task [my-p2p-test] ---
+[2025-11-14 13:49:14.495] [veritas_sync] [info] [Config] Role: destination
+[2025-11-14 13:49:14.495] [veritas_sync] [info] [Config] Sync Folder: ./SyncDest
+[2025-11-14 13:49:14.496] [veritas_sync] [info] [TestSetup] (Destination) Folder created.
+[2025-11-14 13:49:14.500] [veritas_sync] [info] [P2P] IO context 在后台线程运行...
+[2025-11-14 13:49:14.501] [veritas_sync] [info] [P2P] 加密密钥已从 'sync_key' 派生。
+[2025-11-14 13:49:14.501] [veritas_sync] [info] [Config] No TURN server configured.
+[2025-11-14 13:49:14.502] [veritas_sync] [info] [StateManager] 以 'Destination' 模式启动，文件监控已禁用。
+[2025-11-14 13:49:14.502] [veritas_sync] [info] [StateManager] Scanning directory: D:\VeritasSync_test\SyncDest
+[2025-11-14 13:49:14.503] [veritas_sync] [info] [StateManager] Scan complete. Found 0 files and 0 directories.
+[2025-11-14 13:49:14.503] [veritas_sync] [info] [my-p2p-test] --- Phase 1: Contacting Tracker ---
+[2025-11-14 13:49:14.503] [veritas_sync] [info] 
+--- All nodes are running. Press Ctrl+C to exit. ---
+[2025-11-14 13:49:14.503] [veritas_sync] [info] [TrackerClient] IO context 在后台线程运行...
+[2025-11-14 13:49:14.534] [veritas_sync] [info] [TrackerClient] 已连接到 Tracker 47.121.187.240:9988
+[2025-11-14 13:49:14.564] [veritas_sync] [info] [TrackerClient] 注册成功。我的 ID: 150.255.159.94:7186。收到 1 个对等点。
+[2025-11-14 13:49:14.564] [veritas_sync] [info] [my-p2p-test] --- Phase 2: P2P (ICE) connection ---
+[2025-11-14 13:49:14.564] [veritas_sync] [info] [ICE] 正在为对等点 183.255.39.33:39478 创建 ICE Agent...
+[2025-11-14 13:49:14.565] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 183.255.39.33:39478)
+[2025-11-14 13:49:14.565] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to gathering
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connecting
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [libjuice] agent.c:2491: Candidate gathering done
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 状态改变: gathering
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 为 150.255.159.94:7186 (发送给 183.255.39.33:39478) 生成 ICE candidate: a=candidate:1 1 UDP 2130706431 2408:8360...
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 为 150.255.159.94:7186 (发送给 183.255.39.33:39478) 生成 ICE candidate: a=candidate:2 1 UDP 2122317567 192.168.1...
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 状态改变: connecting
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 的候选地址收集完成。
+[2025-11-14 13:49:14.570] [veritas_sync] [info] [ICE] 向 183.255.39.33:39478 发送 SDP Offer (240 字节)
+[2025-11-14 13:49:14.769] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_candidate
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_candidate
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_candidate
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_candidate
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_candidate
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: sdp_answer
+[2025-11-14 13:49:14.844] [veritas_sync] [info] [libjuice] agent.c:2475: Connectivity timer started
+[2025-11-14 13:49:14.849] [veritas_sync] [info] [ICE] 收到来自 183.255.39.33:39478 的信令: ice_gathering_done
+[2025-11-14 13:49:54.839] [veritas_sync] [info] [libjuice] agent.c:1130: Connectivity timer expired
+[2025-11-14 13:49:54.839] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to failed
+[2025-11-14 13:49:54.839] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 状态改变: failed
+[2025-11-14 13:49:54.839] [veritas_sync] [error] [ICE] 对等点 183.255.39.33:39478 连接失败。
+[2025-11-14 14:57:37.733] [veritas_sync] [error] [TrackerClient] 读取头部失败: �ɱ���ϵͳ��ֹ�������ӡ�
+[2025-11-14 15:29:54.847] [veritas_sync] [info] [libjuice] agent.c:1130: Connectivity timer expired
+[2025-11-14 15:37:15.462] [veritas_sync] [info] --- Veritas Sync Node Starting Up ---
+[2025-11-14 15:37:15.462] [veritas_sync] [info] [System] Windows console output set to UTF-8.
+[2025-11-14 15:37:15.463] [veritas_sync] [info] Configuration loaded. Tracker at 47.121.187.240:9988. Found 1 task(s).
+[2025-11-14 15:37:15.465] [veritas_sync] [info] [WebUI] 控制台已启动: http://127.0.0.1:8800
+[2025-11-14 15:37:15.841] [veritas_sync] [info] --- Starting Sync Task [my-p2p-test] ---
+[2025-11-14 15:37:15.841] [veritas_sync] [info] [Config] Role: destination
+[2025-11-14 15:37:15.841] [veritas_sync] [info] [Config] Sync Folder: ./SyncDest
+[2025-11-14 15:37:15.841] [veritas_sync] [info] [SyncNode] 使用现有同步目录: ./SyncDest
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [P2P] 加密密钥已从 'sync_key' 派生。
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [Config] No TURN server configured.
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [StateManager] 以 'Destination' 模式启动，文件监控已禁用。
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [StateManager] Scanning directory: D:\VeritasSync_test\SyncDest
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [StateManager] Scan complete. Found 0 files and 0 directories.
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [my-p2p-test] --- Phase 1: Contacting Tracker ---
+[2025-11-14 15:37:15.842] [veritas_sync] [info] 
+--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [P2P] IO context 在后台线程运行...
+[2025-11-14 15:37:15.842] [veritas_sync] [info] [TrackerClient] IO context 在后台线程运行...
+[2025-11-14 15:37:15.873] [veritas_sync] [info] [TrackerClient] 已连接到 Tracker 47.121.187.240:9988
+[2025-11-14 15:37:15.906] [veritas_sync] [info] [TrackerClient] 注册成功。我的 ID: 150.255.159.94:2122。收到 3 个对等点。
+[2025-11-14 15:37:17.872] [veritas_sync] [info] [UPnP] 发现 UPnP 设备列表。
+[2025-11-14 15:37:17.894] [veritas_sync] [info] [UPnP] 成功连接到路由器: http://192.168.1.1:49652/upnp/control/WANIPConn1
+[2025-11-14 15:37:17.894] [veritas_sync] [info] [UPnP] 我们的局域网 IP: 192.168.1.50
+[2025-11-14 15:37:17.908] [veritas_sync] [info] [UPnP] 成功获取公网 IP: 150.255.159.94
+[2025-11-14 15:37:17.908] [veritas_sync] [info] [my-p2p-test] --- Phase 2: P2P (ICE) connection ---
+[2025-11-14 15:37:17.908] [veritas_sync] [info] [ICE] 正在为对等点 183.255.39.33:39478 创建 ICE Agent...
+[2025-11-14 15:37:17.908] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 183.255.39.33:39478)
+[2025-11-14 15:37:17.908] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to gathering
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connecting
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [libjuice] agent.c:2491: Candidate gathering done
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [ICE] 正在为对等点 150.255.159.94:7186 创建 ICE Agent...
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 150.255.159.94:7186)
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to gathering
+[2025-11-14 15:37:17.910] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connecting
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [libjuice] agent.c:2491: Candidate gathering done
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [ICE] 正在为对等点 218.77.209.162:2726 创建 ICE Agent...
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 218.77.209.162:2726)
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to gathering
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to connecting
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [libjuice] agent.c:2491: Candidate gathering done
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 状态改变: gathering
+[2025-11-14 15:37:17.911] [veritas_sync] [debug] [UPnP] 候选 IP 2408:8360:dc01:6450:f2a0:3bd9:42e3:3022 与 UPnP 局域网 IP 192.168.1.50 不匹配，跳过。
+[2025-11-14 15:37:17.911] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 183.255.39.33:39478) 生成 ICE candidate: a=candidate:2 1 UDP 2130706175 2408:8360...
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [UPnP] 成功为候选地址 192.168.1.50:51610 映射公网端口 51610
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [UPnP] 重写候选地址为: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 183.255.39.33:39478) 生成 ICE candidate: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 状态改变: connecting
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 对等点 183.255.39.33:39478 的候选地址收集完成。
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 向 183.255.39.33:39478 发送 SDP Offer (240 字节)
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:7186 状态改变: gathering
+[2025-11-14 15:37:18.055] [veritas_sync] [debug] [UPnP] 候选 IP 2408:8360:dc01:6450:f2a0:3bd9:42e3:3022 与 UPnP 局域网 IP 192.168.1.50 不匹配，跳过。
+[2025-11-14 15:37:18.055] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 150.255.159.94:7186) 生成 ICE candidate: a=candidate:2 1 UDP 2130706175 2408:8360...
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [UPnP] 成功为候选地址 192.168.1.50:51611 映射公网端口 51611
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [UPnP] 重写候选地址为: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 150.255.159.94:7186) 生成 ICE candidate: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:7186 状态改变: connecting
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 对等点 150.255.159.94:7186 的候选地址收集完成。
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 向 150.255.159.94:7186 发送 SDP Offer (240 字节)
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:2726 状态改变: gathering
+[2025-11-14 15:37:18.194] [veritas_sync] [debug] [UPnP] 候选 IP 2408:8360:dc01:6450:f2a0:3bd9:42e3:3022 与 UPnP 局域网 IP 192.168.1.50 不匹配，跳过。
+[2025-11-14 15:37:18.194] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 218.77.209.162:2726) 生成 ICE candidate: a=candidate:2 1 UDP 2130706175 2408:8360...
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [UPnP] 成功为候选地址 192.168.1.50:51612 映射公网端口 51612
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [UPnP] 重写候选地址为: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [ICE] 为 150.255.159.94:2122 (发送给 218.77.209.162:2726) 生成 ICE candidate: a=candidate:1 1 UDP 2122317823 150.255.1...
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:2726 状态改变: connecting
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:2726 的候选地址收集完成。
+[2025-11-14 15:37:18.373] [veritas_sync] [info] [ICE] 向 218.77.209.162:2726 发送 SDP Offer (240 字节)
+[2025-11-14 15:37:18.513] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_candidate
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_candidate
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_candidate
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_candidate
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_candidate
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: sdp_answer
+[2025-11-14 15:37:18.579] [veritas_sync] [info] [libjuice] agent.c:2475: Connectivity timer started
+[2025-11-14 15:37:18.591] [veritas_sync] [info] [ICE] 收到来自 218.77.209.162:2726 的信令: ice_gathering_done
+[2025-11-14 15:37:58.552] [veritas_sync] [info] [libjuice] agent.c:1130: Connectivity timer expired
+[2025-11-14 15:37:58.552] [veritas_sync] [info] [libjuice] agent.c:1158: Changing state to failed
+[2025-11-14 15:37:58.553] [veritas_sync] [info] [ICE] 对等点 218.77.209.162:2726 状态改变: failed
+[2025-11-14 15:37:58.553] [veritas_sync] [error] [ICE] 对等点 218.77.209.162:2726 连接失败。
+

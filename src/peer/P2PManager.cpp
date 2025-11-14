@@ -57,11 +57,20 @@ static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
 // (PeerContext 实现 ... 保持不变 ...)
 PeerContext::PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr)
-    : peer_id(std::move(id)), agent(ag), p2p_manager_ptr(std::move(manager_ptr)) {}
+    : peer_id(std::move(id)), 
+      agent(ag), 
+      p2p_manager_ptr(std::move(manager_ptr)),
+      retry_timer(std::make_unique<boost::asio::steady_timer>(p2p_manager_ptr->get_io_context()))
+{}
+
 PeerContext::~PeerContext() {
     if (kcp) {
         ikcp_release(kcp);
         kcp = nullptr;
+    }
+    // 取消重试定时器
+    if (retry_timer) {
+        retry_timer->cancel();
     }
 }
 void PeerContext::setup_kcp(uint32_t conv) {
@@ -408,13 +417,19 @@ void P2PManager::on_juice_recv(juice_agent_t* agent, const char* data, size_t si
                       [self, agent, data_str]() { self->handle_juice_recv(agent, data_str.data(), data_str.size()); });
 }
 void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t state) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    auto it = m_peers_by_agent.find(agent);
-    if (it == m_peers_by_agent.end()) return;
-    std::string peer_id = it->second->peer_id;
+    std::shared_ptr<PeerContext> context;
+    {
+        std::lock_guard<std::mutex> lock(m_peers_mutex);
+        auto it = m_peers_by_agent.find(agent);
+        if (it == m_peers_by_agent.end()) return;
+        context = it->second;
+    }
+    std::string peer_id = context->peer_id;
+    
     g_logger->info("[ICE] 对等点 {} 状态改变: {}", peer_id, juice_state_to_string(state));
+    
     if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
-        if (!it->second->kcp) {
+        if (!context->kcp) {
             g_logger->info("[KCP] ICE 连接建立，为 {} 设置 KCP 上下文。", peer_id);
             
             // --- 关键修复：使用确定性的 conv ID ---
@@ -424,17 +439,29 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
             uint32_t conv = static_cast<uint32_t>(std::hash<std::string>{}(id_pair));
             
             g_logger->info("[KCP] 使用 conv ID: {} (基于: {} <-> {})", conv, self_id, peer_id);
-            it->second->setup_kcp(conv);
+            context->setup_kcp(conv);
             
             if (m_role == SyncRole::Source) {
                 g_logger->info("[P2P] (Source) KCP 就绪，向新对等点 {} 发送全量状态...", peer_id);
                 m_state_manager->scan_directory();
                 std::string json_state = m_state_manager->get_state_as_json_string();
-                send_over_kcp_peer(json_state, it->second.get());
+                send_over_kcp_peer(json_state, context.get());
             }
         }
+        
+        // --- P2P 成功，重置重试状态 ---
+        g_logger->info("[ICE] P2P连接成功，已为 {} 清除重试状态。", peer_id);
+        context->retry_count = 0;
+        if (context->retry_timer) {
+            context->retry_timer->cancel();
+        }
+        // ---------------------------------
+        
     } else if (state == JUICE_STATE_FAILED) {
-        g_logger->error("[ICE] 对等点 {} 连接失败。", peer_id);
+        // --- P2P 失败，安排重试 ---
+        g_logger->error("[ICE] 对等点 {} 连接失败。将安排重试...", peer_id);
+        schedule_p2p_retry(context);
+        // ---------------------------
     }
 }
 void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
@@ -1109,6 +1136,62 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
 
     // 映射失败，返回原始候选地址
     return sdp_candidate;
+}
+
+// --- P2P 重试机制实现 ---
+
+void P2PManager::schedule_p2p_retry(std::shared_ptr<PeerContext> context) {
+    // 快速重试策略：1s, 2s, 5s, 10s, 然后固定 30s
+    int delay_seconds;
+    if (context->retry_count == 0) delay_seconds = 1;       // 第一次重试：1秒后 (尽快)
+    else if (context->retry_count == 1) delay_seconds = 2;
+    else if (context->retry_count == 2) delay_seconds = 5;
+    else if (context->retry_count == 3) delay_seconds = 10;
+    else delay_seconds = 30;                                // 之后所有重试都间隔 30 秒
+
+    g_logger->info("[ICE] {} 的第 {} 次 P2P 重试将在 {} 秒后执行。", 
+                   context->peer_id, context->retry_count + 1, delay_seconds);
+
+    context->retry_timer->expires_after(std::chrono::seconds(delay_seconds));
+
+    std::string peer_id_copy = context->peer_id; // 复制 peer_id 以便 lambda 捕获
+
+    // 使用 weak_ptr 捕获 context，防止循环引用
+    context->retry_timer->async_wait(
+        [self = shared_from_this(), context_weak = std::weak_ptr(context), peer_id_copy]
+        (const boost::system::error_code& ec) {
+
+        if (ec) { 
+            // 如果是 operation_aborted，说明定时器被取消了 (例如连接成功了)
+            if (ec == boost::asio::error::operation_aborted) {
+                g_logger->debug("[ICE] {} 的 P2P 重试定时器被取消。", peer_id_copy);
+            }
+            return;
+        }
+
+        // 检查 PeerContext 是否仍然存在 (即对等点没有离开)
+        if (auto context_shared = context_weak.lock()) {
+            g_logger->info("[ICE] 正在为 {} 执行 P2P 重连...", peer_id_copy);
+            context_shared->retry_count++; // 增加重试计数
+            self->retry_p2p_connection(peer_id_copy);
+        } else {
+            g_logger->info("[ICE] {} 在重试前已离开，取消重连。", peer_id_copy);
+        }
+    });
+}
+
+void P2PManager::retry_p2p_connection(const std::string& peer_id) {
+    g_logger->info("[ICE] 开始为 {} 重新建立 P2P 连接...", peer_id);
+    
+    // 1. 彻底销毁旧的、失败的 P2P 实例
+    //    handle_peer_leave 会自动清理 m_peers_by_id, m_peers_by_agent, 
+    //    并销毁 juice_agent_t 和 PeerContext (包括它的定时器)
+    handle_peer_leave(peer_id);
+
+    // 2. 重新启动 P2P 连接
+    //    connect_to_peers 会创建一个全新的 PeerContext 和 juice_agent_t，
+    //    开始一次全新的 P2P 握手（包括 UPnP 重写）。
+    connect_to_peers({peer_id});
 }
 
 }  // namespace VeritasSync
