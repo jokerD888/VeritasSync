@@ -82,8 +82,17 @@ add_executable(efsw_test
     src/efsw_test.cpp
 )
 
-
 target_link_libraries(efsw_test PRIVATE efsw::efsw)
+
+
+# ===========================================================
+# 目标 4: nat_demo (NAT穿透测试程序)
+# ===========================================================
+add_executable(nat_demo src/nat_demo.cpp)
+target_include_directories(nat_demo PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(nat_demo PRIVATE
+    LibJuice::LibJuice
+)
 
 
 # --- 为 veritas_tracker 链接库 ---
@@ -93,3 +102,59 @@ target_link_libraries(veritas_tracker PRIVATE
     nlohmann_json::nlohmann_json
     spdlog::spdlog
 )
+
+# ===========================================================
+# 安装规则：自动收集所有依赖DLL并生成发行版
+# ===========================================================
+set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Installation Directory")
+
+# 安装所有可执行文件到 bin 目录
+install(TARGETS veritas_sync veritas_tracker efsw_test nat_demo
+    RUNTIME DESTINATION bin
+    COMPONENT Runtime
+)
+
+# 自动收集并安装所有依赖的DLL文件（仅Windows平台）
+if(WIN32)
+    install(CODE [[
+        file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES 
+                "${CMAKE_INSTALL_PREFIX}/bin/veritas_sync.exe"
+                "${CMAKE_INSTALL_PREFIX}/bin/veritas_tracker.exe"
+                "${CMAKE_INSTALL_PREFIX}/bin/efsw_test.exe"
+                "${CMAKE_INSTALL_PREFIX}/bin/nat_demo.exe"
+            RESOLVED_DEPENDENCIES_VAR _r_deps
+            UNRESOLVED_DEPENDENCIES_VAR _u_deps
+            DIRECTORIES
+                "$ENV{VCPKG_ROOT}/installed/x64-windows/bin"
+            PRE_EXCLUDE_REGEXES
+                "api-ms-.*" "ext-ms-.*"
+            POST_EXCLUDE_REGEXES
+                ".*[Ss]ystem32/.*\\.dll"
+        )
+        foreach(_file ${_r_deps})
+            # 只复制vcpkg目录下的DLL
+            string(TOLOWER "${_file}" _file_lower)
+            if(_file_lower MATCHES "vcpkg")
+                file(INSTALL
+                    DESTINATION "${CMAKE_INSTALL_PREFIX}/bin"
+                    TYPE SHARED_LIBRARY
+                    FOLLOW_SYMLINK_CHAIN
+                    FILES "${_file}"
+                )
+            endif()
+        endforeach()
+        list(LENGTH _u_deps _u_length)
+        if("${_u_length}" GREATER 0)
+            message(STATUS "已过滤的系统依赖项数量: ${_u_length}")
+        endif()
+    ]] COMPONENT Runtime)
+endif()
+
+# 可选：添加配置文件示例到发行版
+if(EXISTS "${CMAKE_SOURCE_DIR}/config.example.json")
+    install(FILES "${CMAKE_SOURCE_DIR}/config.example.json"
+        DESTINATION .
+        COMPONENT Runtime
+    )
+endif()

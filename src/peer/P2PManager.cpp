@@ -235,6 +235,13 @@ void P2PManager::set_state_manager(StateManager* sm) { m_state_manager = sm; }
 void P2PManager::set_tracker_client(TrackerClient* tc) { m_tracker_client = tc; }  // <-- 新增实现
 void P2PManager::set_role(SyncRole role) { m_role = role; }
 
+// 新增：STUN配置
+void P2PManager::set_stun_config(std::string host, uint16_t port) {
+    m_stun_host = std::move(host);
+    m_stun_port = port;
+    g_logger->info("[Config] STUN 服务器设置为: {}:{}", m_stun_host, m_stun_port);
+}
+
 // (set_turn_config, init, ~P2PManager ... 保持不变 ...)
 void P2PManager::set_turn_config(std::string host, uint16_t port, std::string username, std::string password) {
     m_turn_host = std::move(host);
@@ -350,12 +357,25 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
             continue;
         }
 
-        g_logger->info("[ICE] 正在为对等点 {} 创建 ICE Agent...", peer_id);
+        g_logger->info("[ICE] 正在为对等点 {} 创建ICE Agent...", peer_id);
         juice_config_t config = {};
+                
+        // --- 配置STUN服务器 (关键！) ---
+        if (!m_stun_host.empty()) {
+            config.stun_server_host = m_stun_host.c_str();
+            config.stun_server_port = m_stun_port;
+            g_logger->debug("[ICE] 对等点 {} 使用 STUN: {}:{}", peer_id, m_stun_host, m_stun_port);
+        }
+        // ----------------------------------
+                
+        // --- 配置TURN服务器 ---
         if (!m_turn_host.empty()) {
             config.turn_servers = &m_turn_server_config;
             config.turn_servers_count = 1;
+            g_logger->debug("[ICE] 对等点 {} 使用 TURN: {}:{}", peer_id, m_turn_host, m_turn_port);
         }
+        // ----------------------------------
+                
         config.user_ptr = this;
         config.cb_state_changed = &P2PManager::on_juice_state_changed;
         config.cb_candidate = &P2PManager::on_juice_candidate;

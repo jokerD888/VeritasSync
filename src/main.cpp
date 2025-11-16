@@ -103,6 +103,18 @@ class SyncNode {
         // 4. 配置 P2PManager
         m_p2p_manager->set_role(role);
         m_p2p_manager->set_encryption_key(m_task.sync_key);
+        
+        // --- 配置 STUN 服务器 (关键！) ---
+        if (!m_global_config.stun_host.empty()) {
+            VeritasSync::g_logger->info("[Config] Using STUN server at {}:{}", m_global_config.stun_host,
+                                        m_global_config.stun_port);
+            m_p2p_manager->set_stun_config(m_global_config.stun_host, m_global_config.stun_port);
+        } else {
+            VeritasSync::g_logger->warn("[Config] No STUN server configured. P2P NAT traversal may fail!");
+        }
+        // -------------------------------------
+        
+        // --- 配置 TURN 服务器 (可选) ---
         if (!m_global_config.turn_host.empty()) {
             VeritasSync::g_logger->info("[Config] Using TURN server at {}:{}", m_global_config.turn_host,
                                         m_global_config.turn_port);
@@ -111,6 +123,7 @@ class SyncNode {
         } else {
             VeritasSync::g_logger->info("[Config] No TURN server configured.");
         }
+        // -------------------------------------
 
         // 5. 创建 StateManager
         m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source);

@@ -66,6 +66,7 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     void set_state_manager(StateManager* sm);
     void set_tracker_client(TrackerClient* tc);  // <-- 新增
     void set_role(SyncRole role);
+    void set_stun_config(std::string host, uint16_t port);  // <-- 新增 STUN配置
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
     static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
@@ -147,6 +148,11 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
 
     std::map<std::string, std::pair<int, std::map<int, std::string>>> m_file_assembly_buffer;
     std::string m_encryption_key;
+
+    // --- STUN 服务器配置 ---
+    std::string m_stun_host = "stun.l.google.com";  // 默认公共STUN
+    uint16_t m_stun_port = 19302;
+    // --------------------------
 
     std::string m_turn_host;
     uint16_t m_turn_port = 3478;

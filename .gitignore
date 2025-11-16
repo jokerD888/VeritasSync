@@ -30,3 +30,4 @@ CMakeUserPresets.json
  
 # Backup files 
 tmpCMakeSettings.json 
+*log*

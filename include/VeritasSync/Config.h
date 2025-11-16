@@ -22,6 +22,11 @@ struct Config {
     std::string tracker_host = "127.0.0.1";
     unsigned short tracker_port = 9988;
 
+    // --- 新增：STUN 服务器配置 ---
+    std::string stun_host = "stun.l.google.com";  // 默认公共STUN
+    unsigned short stun_port = 19302;  // STUN标准端口
+    // ----------------------------
+
     // --- 新增：TURN 服务器配置 ---
     std::string turn_host;
     unsigned short turn_port = 3478;  // 默认
@@ -79,6 +84,11 @@ inline void to_json(nlohmann::json& j, const Config& config) {
 inline void from_json(const nlohmann::json& j, Config& config) {
     j.at("tracker_host").get_to(config.tracker_host);
     j.at("tracker_port").get_to(config.tracker_port);
+
+    // --- 新增：加载 STUN (如果存在) ---
+    if (j.contains("stun_host")) j.at("stun_host").get_to(config.stun_host);
+    if (j.contains("stun_port")) j.at("stun_port").get_to(config.stun_port);
+    // ---------------------------------
 
     // --- 新增：加载 TURN (如果存在) ---
     if (j.contains("turn_host")) j.at("turn_host").get_to(config.turn_host);
