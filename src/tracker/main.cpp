@@ -7,14 +7,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <nlohmann/json.hpp>  // <-- 新增：需要 JSON 库
+#include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
 
 #if defined(_WIN32)
-#include <windows.h>  // <-- 1. 包含头文件
-#include <locale.h>   // <-- 新增：包含区域设置头文件
+#include <locale.h>
+#include <windows.h>
 #endif
 
 using boost::asio::ip::tcp;
@@ -38,28 +38,28 @@ class TrackerServer;  // 前向声明
 // Session 类现在处理持久连接和 JSON 消息
 class Session : public std::enable_shared_from_this<Session> {
    public:
-    Session(tcp::socket socket, TrackerServer& server)
-        : m_socket(std::move(socket)),
-          m_server(server)  // <-- 新增：保存对 server 的引用
-    {
-        // 为此会话生成一个唯一的 ID
-        std::stringstream ss;
-        ss << m_socket.remote_endpoint().address().to_string() << ":" << m_socket.remote_endpoint().port();
-        m_id = ss.str();
-        g_logger->info("[Session] {} 已连接。", m_id);
-    }
+       Session(tcp::socket socket, TrackerServer& server)
+           : m_socket(std::move(socket)),
+             m_server(server)  // <-- 保存对 server 的引用
+       {
+           // 为此会话生成一个唯一的 ID
+           std::stringstream ss;
+           ss << m_socket.remote_endpoint().address().to_string() << ":" << m_socket.remote_endpoint().port();
+           m_id = ss.str();
+           g_logger->info("[Session] {} 已连接。", m_id);
+       }
 
     ~Session() { g_logger->info("[Session] {} 已断开连接。", m_id); }
 
     void start() { do_read_header(); }
 
-    // --- 新增：获取此会话的唯一 ID ---
+    // --- 获取此会话的唯一 ID ---
     std::string get_id() const { return m_id; }
 
-    // --- 新增：获取此会话所属的同步组 ---
+    // --- 获取此会话所属的同步组 ---
     std::string get_sync_key() const { return m_sync_key; }
 
-    // --- 新增：异步发送 JSON 消息 ---
+    // --- 异步发送 JSON 消息 ---
     void send(const json& msg);
 
    private:
@@ -68,7 +68,7 @@ class Session : public std::enable_shared_from_this<Session> {
     void do_read_body(unsigned int msg_len);
     void handle_read_body(const boost::system::error_code& ec, std::size_t bytes);
 
-    // --- 新增：消息处理器 ---
+    // --- 消息处理器 ---
     void handle_message(const json& msg);
     void handle_register(const json& payload);
     void handle_signal(const json& msg);
@@ -92,7 +92,7 @@ class TrackerServer {
         start_accept();
     }
 
-    // --- 新增：会话管理 ---
+    // --- 会话管理 ---
     void join(std::shared_ptr<Session> session, const std::string& sync_key);
     void leave(std::shared_ptr<Session> session);
     void forward(const std::string& to_peer_id, const json& msg);
@@ -345,7 +345,7 @@ void Session::handle_message(const json& msg) {
         if (type == SignalProto::TYPE_REGISTER) {
             handle_register(payload);
         } else if (type == SignalProto::TYPE_SIGNAL) {
-            handle_signal(msg);  // <-- 修复：传递完整的 msg
+            handle_signal(msg);
         }
 
     } catch (const std::exception& e) {
@@ -364,8 +364,8 @@ void Session::handle_register(const json& payload) {
     m_server.join(shared_from_this(), m_sync_key);
 }
 
-void Session::handle_signal(const json& msg) {  // <-- 修改：接收完整的 msg
-    // --- 修复：从 msg 中解析 payload ---
+void Session::handle_signal(const json& msg) {
+    // --- 从 msg 中解析 payload ---
     const auto& payload = msg.at(SignalProto::MSG_PAYLOAD);
     std::string to_peer_id = payload.at("to").get<std::string>();
 

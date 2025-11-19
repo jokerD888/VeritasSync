@@ -1,10 +1,11 @@
 ﻿#pragma once
-
 #include <ikcp.h>
 #include <juice/juice.h>
 
 #include <array>
 #include <boost/asio.hpp>
+#include <chrono>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -52,21 +53,28 @@ struct PeerContext {
     void setup_kcp(uint32_t conv);
 };
 
+struct TransferStatus {
+    std::string path;
+    uint32_t total_chunks;
+    uint32_t received_chunks;
+    float progress;  // 0.0 - 100.0
+};
+
 class StateManager;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
    public:
     boost::asio::io_context& get_io_context();
-    // --- 修复：create 不再需要参数 ---
+    // --- create 不再需要参数 ---
     static std::shared_ptr<P2PManager> create();
 
     void set_encryption_key(const std::string& key_string);
 
     // --- 依赖注入 ---
     void set_state_manager(StateManager* sm);
-    void set_tracker_client(TrackerClient* tc);  // <-- 新增
+    void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
-    void set_stun_config(std::string host, uint16_t port);  // <-- 新增 STUN配置
+    void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
     static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
@@ -85,12 +93,15 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     // --- 由 TrackerClient 调用 ---
     void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
                                   const std::string& payload);
-    void handle_peer_leave(const std::string& peer_id);  // <-- (来自上次修复)
+    void handle_peer_leave(const std::string& peer_id);
 
-   private:
-    static constexpr size_t CHUNK_DATA_SIZE = 16384;  // 优化：从8KB增加到16KB提升传输效率
+    std::vector<TransferStatus> get_active_downloads();
 
-    // --- 修复：构造函数不再需要参数 ---
+private:
+    static constexpr size_t CHUNK_DATA_SIZE = 16384;
+
+    std::mutex m_transfer_mutex;
+
     P2PManager();
     void init();
 
@@ -136,7 +147,7 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     std::jthread m_thread;
     boost::asio::steady_timer m_kcp_update_timer;
 
-    TrackerClient* m_tracker_client = nullptr;  // <-- 修复：初始化为 nullptr
+    TrackerClient* m_tracker_client = nullptr;
     StateManager* m_state_manager = nullptr;
     SyncRole m_role = SyncRole::Source;
 
@@ -146,7 +157,16 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     std::mutex m_peers_mutex;
     // -----------------------
 
-    std::map<std::string, std::pair<int, std::map<int, std::string>>> m_file_assembly_buffer;
+    struct ReceivingFile {
+        std::ofstream file_stream;                          // 文件流，直接写硬盘
+        std::string temp_path;                              // 临时文件路径
+        uint32_t total_chunks = 0;                          // 总块数
+        uint32_t received_chunks = 0;                       // 已接收块数
+        std::chrono::steady_clock::time_point last_active;  // 最后活跃时间
+    };
+
+    std::map<std::string, ReceivingFile> m_receiving_files;
+
     std::string m_encryption_key;
 
     // --- STUN 服务器配置 ---
@@ -159,12 +179,12 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     std::string m_turn_username;
     std::string m_turn_password;
     juice_turn_server_t m_turn_server_config;
-    
-    // --- 优化：KCP更新频率自适应 ---
+
+    // --- KCP更新频率自适应 ---
     uint32_t m_kcp_update_interval_ms = 20;  // 默认20ms，在10-100ms之间动态调整
     std::chrono::steady_clock::time_point m_last_data_time;
-    
-    // --- 优化：文件组装缓冲区清理 ---
+
+    // --- 文件组装缓冲区清理 ---
     boost::asio::steady_timer m_cleanup_timer;
     void schedule_cleanup_task();
     void cleanup_stale_buffers();

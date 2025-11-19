@@ -10,12 +10,12 @@
 #include <thread>  // 用于 sleep
 #include <vector>
 
-#include "VeritasSync/Logger.h" // <-- 新增
+#include "VeritasSync/Logger.h"
 
 namespace VeritasSync {
 
     std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
-        // --- 修复：使用 non-throwing (ec) 重载 ---
+        // --- 使用 non-throwing (ec) 重载 ---
         std::error_code ec;
 
         // 1. 检查文件是否存在且为常规文件
@@ -28,7 +28,7 @@ namespace VeritasSync {
         // 2. 以二进制模式打开文件
         std::ifstream file(filePath, std::ios::binary);
 
-        // --- 修复：处理文件锁定的重试逻辑 ---
+        // --- 处理文件锁定的重试逻辑 ---
         if (!file.is_open()) {
             // 使用 logger 替换 std::cerr
             if (g_logger) {

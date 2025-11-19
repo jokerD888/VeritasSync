@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include <boost/asio/io_context.hpp>  // 需要包含
+#include <boost/asio/io_context.hpp>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -8,7 +8,7 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include <unordered_set>  // 优化：使用 unordered_set
+#include <unordered_set>
 
 #include "VeritasSync/Protocol.h"
 
@@ -38,7 +38,7 @@ namespace VeritasSync {
         const std::filesystem::path& get_root_path() const { return m_root_path; }
         std::set<std::string> get_local_directories() const;
 
-        // --- 新增：P2PManager 需要的辅助函数 ---
+        // --- P2PManager 需要的辅助函数 ---
         boost::asio::io_context& get_io_context();
         void add_dir_to_map(const std::string& relative_path);
         void remove_dir_from_map(const std::string& relative_path);
@@ -47,7 +47,7 @@ namespace VeritasSync {
         void remove_path_from_map(const std::string& relative_path);
 
     private:
-        // --- 新增：供 UpdateListener 调用的内部方法 ---
+        // --- 供 UpdateListener 调用的内部方法 ---
         friend class UpdateListener;
         void notify_change_detected(const std::string& full_path);
         void process_debounced_changes();
@@ -58,6 +58,7 @@ namespace VeritasSync {
 
         // 文件状态的核心存储结构
         std::map<std::string, FileInfo> m_file_map;
+        std::map<std::string, FileInfo> m_previous_file_map;  // 上一次扫描的缓存，用于避免重复计算 Hash
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
 
         std::set<std::string> m_dir_map;

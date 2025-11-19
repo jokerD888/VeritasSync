@@ -29,14 +29,14 @@ std::string ActionToString(efsw::Action action) {
 
 // 辅助函数：获取高精度时间戳
 std::string GetTimestamp() {
-    // --- 修复：使用 system_clock 来获取可转换为 time_t 的 wall clock 时间 ---
+    // --- 使用 system_clock 来获取可转换为 time_t 的 wall clock 时间 ---
     auto now = std::chrono::system_clock::now();
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()) %
         1000;
 
-    // --- 修复：to_time_t 是 system_clock 的静态成员 ---
+    // --- to_time_t 是 system_clock 的静态成员 ---
     time_t t = std::chrono::system_clock::to_time_t(now);
     std::tm bt;
 

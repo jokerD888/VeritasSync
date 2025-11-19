@@ -194,7 +194,7 @@ void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
     send_over_kcp(msg.dump());
 }
 
-// --- 静态工厂与构造函数 (修复) ---
+// --- 静态工厂与构造函数  ---
 std::shared_ptr<P2PManager> P2PManager::create() {
     struct P2PManagerMaker : public P2PManager {
         P2PManagerMaker() : P2PManager() {}
@@ -206,7 +206,7 @@ std::shared_ptr<P2PManager> P2PManager::create() {
 }
 
 P2PManager::P2PManager() : m_io_context(), m_kcp_update_timer(m_io_context), m_cleanup_timer(m_io_context) {
-    // --- 优化：只记录重要的 libjuice 日志 (INFO 及以上级别) ---
+    // --- 只记录重要的 libjuice 日志 (INFO 及以上级别) ---
     juice_set_log_level(JUICE_LOG_LEVEL_INFO);  // 关闭 DEBUG 和 VERBOSE
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
         switch (level) {
@@ -232,10 +232,9 @@ P2PManager::P2PManager() : m_io_context(), m_kcp_update_timer(m_io_context), m_c
 }
 
 void P2PManager::set_state_manager(StateManager* sm) { m_state_manager = sm; }
-void P2PManager::set_tracker_client(TrackerClient* tc) { m_tracker_client = tc; }  // <-- 新增实现
+void P2PManager::set_tracker_client(TrackerClient* tc) { m_tracker_client = tc; }
 void P2PManager::set_role(SyncRole role) { m_role = role; }
 
-// 新增：STUN配置
 void P2PManager::set_stun_config(std::string host, uint16_t port) {
     m_stun_host = std::move(host);
     m_stun_port = port;
@@ -311,8 +310,8 @@ void P2PManager::update_all_kcps() {
             }
         }
     }
-    
-    // 优化：动态调整更新频率
+
+    // 动态调整更新频率
     if (!received_messages.empty()) {
         m_last_data_time = std::chrono::steady_clock::now();
         m_kcp_update_interval_ms = 10;  // 有数据时高频更新
@@ -390,7 +389,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
         m_peers_by_agent[agent] = context;
         m_peers_by_id[peer_id] = context;
 
-        // --- 2. 关键修复：TIE-BREAKER 逻辑 ---
+        // --- 2. TIE-BREAKER 逻辑 ---
         if (self_id < peer_id) {
             // 我们的 ID 较小, 我们是 "Controlling" (控制方)
             g_logger->info("[ICE] Tie-breaking: 我们是 'Controlling' (Offer) 方 (对于 {})", peer_id);
@@ -495,8 +494,8 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
                                        (new_type == ConnectionType::Relay) ? "Relay" : "Unknown";
             g_logger->info("[KCP] ICE 连接建立 ({})，为 {} 设置 KCP 上下文。", 
                            conn_type_str, peer_id);
-            
-            // --- 关键修复：使用确定性的 conv ID ---
+
+            // --- 使用确定性的 conv ID ---
             // 将 self_id 和 peer_id 排序后组合，确保双方生成相同的 conv
             std::string self_id = m_tracker_client ? m_tracker_client->get_self_id() : "";
             std::string id_pair = (self_id < peer_id) ? (self_id + peer_id) : (peer_id + self_id);
@@ -536,13 +535,13 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
         return;
     }
 
-    // --- 修复：libjuice 的 cb_candidate 回调只用于发送单个 ICE candidate ---
+    // --- libjuice 的 cb_candidate 回调只用于发送单个 ICE candidate ---
     // 完整的 SDP Offer/Answer 应该在 gathering_done 后通过 juice_get_local_description 获取
-    
+
     if (sdp_str.find("a=candidate") != std::string::npos) {
         // 这是一个 ICE candidate
-        
-        // --- 【新增】UPnP 重写逻辑 ---
+
+        // --- UPnP 重写逻辑 ---
         std::string final_candidate = rewrite_candidate(sdp_str);
         // --------------------------
         
@@ -567,9 +566,9 @@ void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
     
     self_id = m_tracker_client->get_self_id();
     g_logger->info("[ICE] 对等点 {} 的候选地址收集完成。", peer_id);
-    
-    // --- 关键修复：在 gathering 完成后，获取并发送完整的 SDP ---
-    
+
+    // --- 在 gathering 完成后，获取并发送完整的 SDP ---
+
     char local_description[4096];
     if (juice_get_local_description(agent, local_description, sizeof(local_description)) == 0) {
         std::string sdp_str(local_description);
@@ -634,7 +633,6 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id, const
     }
 }
 
-// --- 新增：处理 PEER_LEAVE ---
 void P2PManager::handle_peer_leave(const std::string& peer_id) {
     std::lock_guard<std::mutex> lock(m_peers_mutex);
     auto it = m_peers_by_id.find(peer_id);
@@ -670,7 +668,7 @@ void P2PManager::send_over_kcp(const std::string& msg) {
             sent_count++;
         }
     }
-    // 优化：只在有消息时记录 info 级别
+    // 只在有消息时记录 info 级别
     if (sent_count > 0) {
         g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", sent_count, encrypted_msg.length());
     }
@@ -709,8 +707,8 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
             auto json = nlohmann::json::parse(payload);
             const std::string json_msg_type = json.at(Protocol::MSG_TYPE).get<std::string>();
             auto& json_payload = json.at(Protocol::MSG_PAYLOAD);
-            
-            // 优化：只记录重要的消息类型
+
+            // 只记录重要的消息类型
             g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", 
                           json_msg_type, from_peer ? from_peer->peer_id : "<unknown>");
             
@@ -983,6 +981,8 @@ void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext*
 void P2PManager::handle_file_chunk(const std::string& payload) {
     const char* data_ptr = payload.c_str();
     size_t data_len = payload.length();
+
+    // 1. 解析头部信息 (这部分不需要锁，纯数据解析)
     uint16_t path_len = read_uint16(data_ptr, data_len);
     if (path_len == 0 || data_len < path_len) {
         g_logger->error("[KCP] 二进制块解析失败：路径长度无效。");
@@ -991,45 +991,112 @@ void P2PManager::handle_file_chunk(const std::string& payload) {
     std::string file_path_str(data_ptr, path_len);
     data_ptr += path_len;
     data_len -= path_len;
+
     uint32_t chunk_index = read_uint32(data_ptr, data_len);
     uint32_t total_chunks = read_uint32(data_ptr, data_len);
+
+    // 2. 解压数据 (耗时操作，放在锁外进行)
     std::string compressed_chunk_data(data_ptr, data_len);
     std::string uncompressed_data;
     if (data_len == 0) {
+        // 空数据块
     } else if (!snappy::Uncompress(compressed_chunk_data.data(), compressed_chunk_data.size(), &uncompressed_data)) {
         g_logger->error("[KCP] Snappy 解压失败 (包可能已损坏): {}", file_path_str);
         return;
     }
-    auto& assembly_info = m_file_assembly_buffer[file_path_str];
-    assembly_info.first = total_chunks;
-    assembly_info.second[chunk_index] = std::move(uncompressed_data);
-    g_logger->debug("[KCP] 收到文件 '{}' 的块 {}/{} (压缩后: {} 字节, 解压后: {} 字节).", file_path_str,
-                    chunk_index + 1, total_chunks, compressed_chunk_data.size(),
-                    assembly_info.second[chunk_index].size());
-    if (assembly_info.second.size() == total_chunks) {
-        g_logger->info("[KCP] 文件 '{}' 的所有块已收齐，正在重组...", file_path_str);
+
+    // ================== 进入临界区 ==================
+    // 加锁，保护 m_receiving_files，防止与 WebUI 线程或清理线程冲突
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+
+    // 3. 获取或创建接收状态
+    auto it = m_receiving_files.find(file_path_str);
+    if (it == m_receiving_files.end()) {
+        // 这是这个文件的第一个到达块
+
+        // 计算完整路径
         std::filesystem::path relative_path(
             std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
         std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
+
+        // 确保父目录存在
         if (full_path.has_parent_path()) {
             std::filesystem::create_directories(full_path.parent_path());
         }
-        std::ofstream output_file(full_path, std::ios::binary);
-        if (!output_file.is_open()) {
-            g_logger->error("[P2P] 创建文件失败: {}", full_path.string());
-            m_file_assembly_buffer.erase(file_path_str);
+
+        // 生成临时文件路径： filename.veritas_tmp
+        std::filesystem::path temp_path = full_path;
+        temp_path += ".veritas_tmp";
+
+        ReceivingFile new_file;
+        new_file.temp_path = temp_path.string();
+        new_file.total_chunks = total_chunks;
+        new_file.received_chunks = 0;
+        new_file.last_active = std::chrono::steady_clock::now();
+
+        // 以二进制模式打开
+        new_file.file_stream.open(temp_path, std::ios::binary | std::ios::out);
+        if (!new_file.file_stream.is_open()) {
+            g_logger->error("[P2P] 无法创建临时文件: {}", temp_path.string());
             return;
         }
-        for (int i = 0; i < total_chunks; ++i) {
-            output_file.write(assembly_info.second[i].data(), assembly_info.second[i].length());
-        }
-        output_file.close();
-        g_logger->info("[P2P] 成功: 文件 '{}' 已保存。", file_path_str);
-        m_file_assembly_buffer.erase(file_path_str);
-    }
-}
 
-// --- 优化：清理停滞的文件组装缓冲区 ---
+        // 插入 map
+        auto res = m_receiving_files.insert({file_path_str, std::move(new_file)});
+        it = res.first;
+
+        g_logger->info("[P2P] 开始接收文件 '{}' (总块数: {}), 写入临时文件: {}", file_path_str, total_chunks,
+                       temp_path.filename().string());
+    }
+
+    ReceivingFile& recv_file = it->second;
+
+    // 更新活跃时间
+    recv_file.last_active = std::chrono::steady_clock::now();
+
+    // 4. Seek 并写入数据 (流式写入)
+    if (recv_file.file_stream.is_open()) {
+        size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
+        recv_file.file_stream.seekp(offset);
+        recv_file.file_stream.write(uncompressed_data.data(), uncompressed_data.size());
+
+        // 简单统计已接收块数
+        recv_file.received_chunks++;
+
+        g_logger->debug("[P2P] 写入文件 '{}' 块 {}/{} (偏移: {})", file_path_str, chunk_index + 1, total_chunks,
+                        offset);
+    }
+
+    // 5. 检查是否完成
+    if (recv_file.received_chunks >= total_chunks) {
+        g_logger->info("[P2P] 文件 '{}' 接收完毕，正在进行原子重命名...", file_path_str);
+
+        // 关闭流
+        recv_file.file_stream.close();
+
+        // 准备路径
+        std::filesystem::path relative_path(
+            std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
+        std::filesystem::path final_path = m_state_manager->get_root_path() / relative_path;
+        std::filesystem::path temp_path(recv_file.temp_path);
+
+        // 原子重命名 (Atomic Rename)
+        std::error_code ec;
+        std::filesystem::rename(temp_path, final_path, ec);
+
+        if (!ec) {
+            g_logger->info("[P2P] ✅ 成功: 文件已保存至 {}", final_path.string());
+        } else {
+            g_logger->error("[P2P] ❌ 重命名失败: {} -> {} 错误: {}", temp_path.string(), final_path.string(),
+                            ec.message());
+        }
+
+        // 下载完成，从 Map 中移除
+        m_receiving_files.erase(it);
+    }
+    // ================== 离开临界区 (lock 析构) ==================
+}
+// --- 清理停滞的文件组装缓冲区 ---
 void P2PManager::schedule_cleanup_task() {
     m_cleanup_timer.expires_after(std::chrono::minutes(5));  // 每5分钟执行一次
     m_cleanup_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
@@ -1039,44 +1106,59 @@ void P2PManager::schedule_cleanup_task() {
         }
     });
 }
-
-void P2PManager::cleanup_stale_buffers() {
-    static std::unordered_map<std::string, std::chrono::steady_clock::time_point> buffer_timestamps;
-    auto now = std::chrono::steady_clock::now();
-    
-    // 记录当前缓冲区的时间戳
-    for (const auto& [file_path, _] : m_file_assembly_buffer) {
-        if (buffer_timestamps.find(file_path) == buffer_timestamps.end()) {
-            buffer_timestamps[file_path] = now;
-        }
+std::vector<TransferStatus> P2PManager::get_active_downloads() {
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);  // 加锁
+    std::vector<TransferStatus> list;
+    for (const auto& [path, recv] : m_receiving_files) {
+        float prog =
+            (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
+        list.push_back({path, recv.total_chunks, recv.received_chunks, prog});
     }
-    
-    // 清理超过10分钟未完成的缓冲区
+    return list;
+}
+void P2PManager::cleanup_stale_buffers() {
+    auto now = std::chrono::steady_clock::now();
     std::vector<std::string> to_remove;
-    for (const auto& [file_path, timestamp] : buffer_timestamps) {
-        if (now - timestamp > std::chrono::minutes(10)) {
+
+    // ================== 进入临界区 ==================
+    // 加锁，保护 m_receiving_files
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+
+    // 遍历检查超时
+    for (auto& [file_path, recv_file] : m_receiving_files) {
+        auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - recv_file.last_active);
+
+        // 设定超时时间，例如 10 分钟
+        if (duration.count() > 10) {
+            g_logger->warn("[清理] 文件接收超时 ({} 分钟无数据): {}", duration.count(), file_path);
+
+            // 1. 关闭流
+            if (recv_file.file_stream.is_open()) {
+                recv_file.file_stream.close();
+            }
+
+            // 2. 删除临时文件 (清理垃圾)
+            std::error_code ec;
+            std::filesystem::remove(recv_file.temp_path, ec);
+            if (ec) {
+                g_logger->error("[清理] 删除临时文件失败: {}", ec.message());
+            } else {
+                g_logger->info("[清理] 已删除残留临时文件: {}", recv_file.temp_path);
+            }
+
             to_remove.push_back(file_path);
         }
     }
-    
-    for (const auto& file_path : to_remove) {
-        m_file_assembly_buffer.erase(file_path);
-        buffer_timestamps.erase(file_path);
-        g_logger->warn("[清理] 移除停滞的文件组装缓冲区: {}", file_path);
+
+    // 从 Map 中移除
+    for (const auto& path : to_remove) {
+        m_receiving_files.erase(path);
     }
-    
-    // 清理已完成的文件的时间戳
-    for (auto it = buffer_timestamps.begin(); it != buffer_timestamps.end();) {
-        if (m_file_assembly_buffer.find(it->first) == m_file_assembly_buffer.end()) {
-            it = buffer_timestamps.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    
+
     if (!to_remove.empty()) {
-        g_logger->info("[清理] 已清理 {} 个停滞的缓冲区", to_remove.size());
+        g_logger->info("[清理] 已清理 {} 个超时的下载任务。", to_remove.size());
     }
+    // ================== 离开临界区 ==================
 }
 
 // --- UPnP 功能实现 ---

@@ -14,7 +14,7 @@ if(WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00) # 将目标平台设置为 Windows 10
 endif()
 
-# --- 优化：Release 模式编译优化 ---
+# --- Release 模式编译优化 ---
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
         add_compile_options(/O2 /GL /arch:AVX2)
@@ -158,3 +158,38 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/config.example.json")
         COMPONENT Runtime
     )
 endif()
+
+
+
+
+# ===========================================================
+# 单元测试 (GTest)
+# ===========================================================
+enable_testing()
+
+find_package(GTest CONFIG REQUIRED)
+
+# 定义测试可执行文件
+add_executable(unit_tests 
+    tests/test_sync_logic.cpp 
+    tests/test_protocol.cpp
+    tests/test_hashing.cpp
+    src/peer/SyncManager.cpp 
+    src/peer/Hashing.cpp
+)
+
+# 包含头文件路径
+target_include_directories(unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+# 链接依赖
+target_link_libraries(unit_tests PRIVATE 
+    GTest::gtest 
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog 
+    OpenSSL::Crypto # Hashing 需要
+)
+
+# 注册测试
+include(GoogleTest)
+gtest_discover_tests(unit_tests)

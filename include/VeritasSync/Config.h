@@ -12,8 +12,6 @@ namespace VeritasSync {
 struct SyncTask {
     std::string sync_key;
     std::string role;  // "source" or "destination"
-    // 移除: p2p_port 不再由 config.json 指定，而是由 libjuice 自动选择
-    // unsigned short p2p_port;
     std::string sync_folder;
 };
 
@@ -22,24 +20,24 @@ struct Config {
     std::string tracker_host = "127.0.0.1";
     unsigned short tracker_port = 9988;
 
-    // --- 新增：STUN 服务器配置 ---
+    // --- STUN 服务器配置 ---
     std::string stun_host = "stun.l.google.com";  // 默认公共STUN
     unsigned short stun_port = 19302;  // STUN标准端口
     // ----------------------------
 
-    // --- 新增：TURN 服务器配置 ---
+    // --- TURN 服务器配置 ---
     std::string turn_host;
     unsigned short turn_port = 3478;  // 默认
     std::string turn_username;
     std::string turn_password;
     // ----------------------------
-    
-    // --- 优化：日志级别配置 (8,9) ---
+
+    // --- 日志级别配置  ---
     std::string log_level = "info";  // debug, info, warn, error
     std::string libjuice_log_level = "info";
     // ----------------------------
-    
-    // --- 优化：性能参数配置 (8) ---
+
+    // --- 性能参数配置  ---
     uint32_t kcp_update_interval_ms = 20;  // KCP更新间隔 (10-100ms)
     size_t chunk_size = 16384;  // 文件分块大小 (bytes)
     uint32_t kcp_window_size = 256;  // KCP窗口大小
@@ -85,19 +83,19 @@ inline void from_json(const nlohmann::json& j, Config& config) {
     j.at("tracker_host").get_to(config.tracker_host);
     j.at("tracker_port").get_to(config.tracker_port);
 
-    // --- 新增：加载 STUN (如果存在) ---
+    // --- 加载 STUN (如果存在) ---
     if (j.contains("stun_host")) j.at("stun_host").get_to(config.stun_host);
     if (j.contains("stun_port")) j.at("stun_port").get_to(config.stun_port);
     // ---------------------------------
 
-    // --- 新增：加载 TURN (如果存在) ---
+    // --- 加载 TURN (如果存在) ---
     if (j.contains("turn_host")) j.at("turn_host").get_to(config.turn_host);
     if (j.contains("turn_port")) j.at("turn_port").get_to(config.turn_port);
     if (j.contains("turn_username")) j.at("turn_username").get_to(config.turn_username);
     if (j.contains("turn_password")) j.at("turn_password").get_to(config.turn_password);
     // ---------------------------------
-    
-    // --- 优化：加载日志和性能配置 (如果存在) ---
+
+    // --- 加载日志和性能配置 (如果存在) ---
     if (j.contains("log_level")) j.at("log_level").get_to(config.log_level);
     if (j.contains("libjuice_log_level")) j.at("libjuice_log_level").get_to(config.libjuice_log_level);
     if (j.contains("kcp_update_interval_ms")) j.at("kcp_update_interval_ms").get_to(config.kcp_update_interval_ms);
@@ -118,7 +116,7 @@ inline Config load_config_or_create_default(const std::string& config_path = "co
         return j.get<Config>();
     } else {
         Config defaultConfig;
-        // --- 新增：示例 TURN ---
+        // --- 示例 TURN ---
         defaultConfig.turn_host = "your_turn_server.com";
         defaultConfig.turn_username = "user";
         defaultConfig.turn_password = "pass";

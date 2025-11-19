@@ -40,7 +40,8 @@ public:
         }
         reload_config();
     }
-
+    using StatusProvider = std::function<std::vector<nlohmann::json>()>;
+    void set_status_provider(StatusProvider provider) { m_status_provider = provider; }
     void start() { do_accept(); }
     unsigned short get_port() const { return m_port; }
 
@@ -65,6 +66,7 @@ public:
     }
 
 private:
+    StatusProvider m_status_provider;
     // --- 内部无锁保存逻辑 (防止死锁) ---
     bool save_config_internal() {
         try {
@@ -280,6 +282,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
              << m_config.tracker_host << ":" << m_config.tracker_port << R"HTML(</div></div>
             <div class="card"><div style="color:var(--sub);font-size:0.875rem">活跃任务</div><div class="stat-val" id="task-count">0</div></div>
         </div>
+        <div class="card">
+            <h3 style="margin-bottom:1rem">🚀 正在传输</h3>
+            <div id="transfer-container" style="color:#666;font-size:0.9rem">暂无活跃传输</div>
+        </div>
         <h3 style="margin-bottom:1rem">我的同步目录</h3><div class="task-grid" id="task-container"></div>
     </div>
     <div id="view-settings" class="view-section section-hidden">
@@ -347,6 +353,31 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
     const fi=id('newFolder');fi.addEventListener('dragover',e=>e.preventDefault());fi.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer.files[0])fi.value=(e.dataTransfer.files[0].path||e.dataTransfer.files[0].name).replace(/\\/g,'/');});
     setInterval(()=>{if(!id('view-logs').classList.contains('section-hidden')&&id('autoScroll').checked)fetchGlobalLog()},3000);
     loadTasks();
+    setInterval(async () => {
+            try {
+                const r = await fetch('/api/status');
+                const data = await r.json();
+                const el = id('transfer-container');
+                if (data.length === 0) {
+                    el.innerHTML = '暂无活跃传输';
+                } else {
+                    el.innerHTML = data.map(d => `
+                        <div style="margin-bottom:10px">
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                                <span>${d.path}</span>
+                                <span style="font-weight:bold;color:var(--primary)">${d.progress.toFixed(1)}%</span>
+                            </div>
+                            <div style="background:#e5e7eb;height:6px;border-radius:3px;overflow:hidden">
+                                <div style="background:var(--primary);height:100%;width:${d.progress}%"></div>
+                            </div>
+                            <div style="font-size:12px;color:#999;margin-top:2px">
+                                任务: ${d.key} | 块: ${d.recv}/${d.total}
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            } catch(e){}
+        }, 1000);
 </script>
 </body>
 </html>)HTML";
@@ -360,6 +391,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 
             if (path == "/") {
                 write_response(socket, "HTTP/1.1 200 OK", "text/html; charset=utf-8", build_html());
+            } else if (path == "/api/status") {
+                nlohmann::json j = nlohmann::json::array();
+                if (m_status_provider) {
+                    auto status_list = m_status_provider();
+                    for (const auto& item : status_list) j.push_back(item);
+                }
+                write_response(socket, "HTTP/1.1 200 OK", "application/json", j.dump());
             } else if (path == "/api/log") {
                 write_response(socket, "HTTP/1.1 200 OK", "text/plain; charset=utf-8",
                                tail_log("veritas_sync.log", 16384));

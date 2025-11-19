@@ -43,7 +43,7 @@ std::string sys_err_to_utf8(const boost::system::error_code& ec) {
 std::string sys_err_to_utf8(const boost::system::error_code& ec) { return ec.message(); }
 #endif
 
-// --- 修复：构造函数 ---
+// --- 构造函数 ---
 TrackerClient::TrackerClient(std::string host, unsigned short port)
     : m_io_context(),                                            // 初始化自己的 io_context
       m_work_guard(boost::asio::make_work_guard(m_io_context)),  // 保持 io_context 运行
@@ -61,7 +61,7 @@ TrackerClient::~TrackerClient() {
 
 void TrackerClient::set_p2p_manager(P2PManager* p2p) { m_p2p_manager = p2p; }
 
-// --- 修复：connect 签名和实现 ---
+// --- connect 签名和实现 ---
 void TrackerClient::connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready) {
     if (!m_p2p_manager) {
         g_logger->error("[TrackerClient] P2PManager 未设置。无法连接。");
@@ -70,7 +70,7 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
     m_sync_key = sync_key;
     m_on_ready_callback = std::move(on_ready);
 
-    // --- 修复：启动自己的线程 ---
+    // --- 启动自己的线程 ---
     m_thread = std::jthread([this]() {
         g_logger->info("[TrackerClient] IO context 在后台线程运行...");
         m_io_context.run();
@@ -81,7 +81,6 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
     boost::asio::post(m_io_context, [this]() { do_connect(); });
 }
 
-// (do_connect, do_register ... 保持不变 ...)
 void TrackerClient::do_connect() {
     tcp::resolver resolver(m_io_context);
     auto endpoints = resolver.resolve(m_host, std::to_string(m_port));
@@ -105,10 +104,9 @@ void TrackerClient::do_register() {
     do_write(msg.dump());
 }
 
-// (send_signaling_message, do_read_header, handle_read_header ... 保持不变 ...)
 void TrackerClient::send_signaling_message(const std::string& to_peer_id, const std::string& type,
                                            const std::string& sdp) {
-    // --- 修复：确保 post 到自己的 io_context 线程 ---
+    // --- 确保 post 到自己的 io_context 线程 ---
     nlohmann::json payload;
     payload["from"] = m_self_id;
     payload["to"] = to_peer_id;
@@ -148,7 +146,6 @@ void TrackerClient::do_read_header() {
                             });
 }
 
-// (handle_read_body, handle_message ... 保持不变 ...)
 void TrackerClient::do_read_body(unsigned int msg_len) {
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(msg_len),
                             [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
@@ -177,14 +174,14 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
             std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
             g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
             if (m_on_ready_callback) {
-                // --- 修复：在 P2PManager 的 io_context 上调用回调 ---
+                // --- 在 P2PManager 的 io_context 上调用回调 ---
                 boost::asio::post(m_p2p_manager->get_io_context(), [this, peers]() { m_on_ready_callback(peers); });
             }
         } else if (type == SignalProto::TYPE_PEER_JOIN) {
             std::string peer_id = payload.at("peer_id").get<std::string>();
             g_logger->info("[TrackerClient] 对等点 {} 已加入。", peer_id);
             if (m_p2p_manager) {
-                // --- 修复：在 P2PManager 的 io_context 上调用 ---
+                // --- 在 P2PManager 的 io_context 上调用 ---
                 boost::asio::post(m_p2p_manager->get_io_context(),
                                   [this, peer_id]() { m_p2p_manager->connect_to_peers({peer_id}); });
             }
@@ -192,7 +189,7 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
             std::string peer_id = payload.at("peer_id").get<std::string>();
             g_logger->info("[TrackerClient] 对等点 {} 已离开。", peer_id);
             if (m_p2p_manager) {
-                // --- 修复：在 P2PManager 的 io_context 上调用 ---
+                // --- 在 P2PManager 的 io_context 上调用 ---
                 boost::asio::post(m_p2p_manager->get_io_context(),
                                   [this, peer_id]() { m_p2p_manager->handle_peer_leave(peer_id); });
             }
@@ -201,7 +198,7 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
             std::string signal_type = payload.at("signal_type").get<std::string>();
             std::string sdp = payload.at("sdp").get<std::string>();
             if (m_p2p_manager) {
-                // --- 修复：在 P2PManager 的 io_context 上调用 ---
+                // --- 在 P2PManager 的 io_context 上调用 ---
                 boost::asio::post(m_p2p_manager->get_io_context(), [this, from, signal_type, sdp]() {
                     m_p2p_manager->handle_signaling_message(from, signal_type, sdp);
                 });
@@ -212,7 +209,6 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
     }
 }
 
-// (do_write, close_socket ... 保持不变 ...)
 void TrackerClient::do_write(const std::string& msg) {
     uint32_t len_net = boost::asio::detail::socket_ops::host_to_network_long(static_cast<uint32_t>(msg.length()));
     m_write_buffer.resize(4 + msg.length());
@@ -227,7 +223,7 @@ void TrackerClient::do_write(const std::string& msg) {
                              });
 }
 void TrackerClient::close_socket() {
-    // --- 修复：post 到自己的 io_context ---
+    // --- post 到自己的 io_context ---
     boost::asio::post(m_io_context, [this]() {
         if (m_socket.is_open()) {
             boost::system::error_code ec;

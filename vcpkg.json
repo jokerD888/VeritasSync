@@ -1,0 +1,18 @@
+{
+    "name": "veritassync",
+    "version-string": "1.0.0",
+    "dependencies": [
+        "boost-system",
+        "boost-asio",
+        "openssl",
+        "efsw",
+        "nlohmann-json",
+        "kcp",
+        "snappy",
+        "spdlog",
+        "libjuice",
+        "b64",
+        "miniupnpc",
+        "gtest"
+    ]
+}

@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 #include <boost/asio.hpp>
-#include <boost/asio/ip/tcp.hpp>  // <-- 1. 关键修复：包含此头文件
+#include <boost/asio/ip/tcp.hpp>
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -23,7 +23,7 @@ constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
 constexpr const char* TYPE_SIGNAL = "SIGNAL";
 }  // namespace SignalProto
 
-// --- 2. 关键修复：添加 using ---
+// --- 2. 添加 using ---
 using boost::asio::ip::tcp;
 
 class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
@@ -55,7 +55,7 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     std::jthread m_thread;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
 
-    // --- 3. 修复：现在 tcp::socket 是已知的 ---
+    // --- 3. 现在 tcp::socket 是已知的 ---
     tcp::socket m_socket;
 
     std::string m_host;
