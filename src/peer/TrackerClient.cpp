@@ -9,6 +9,40 @@
 
 namespace VeritasSync {
 
+#ifdef _WIN32
+#include <windows.h>
+// 辅助函数：将系统错误码转换为 UTF-8 字符串
+std::string sys_err_to_utf8(const boost::system::error_code& ec) {
+    // 获取系统默认语言的错误消息 (通常是 GBK)
+    LPWSTR messageBuffer = nullptr;
+    size_t size =
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL, ec.value(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&messageBuffer, 0, NULL);
+
+    if (size == 0 || messageBuffer == nullptr) {
+        return ec.message();  // 回退到默认
+    }
+
+    std::wstring wmsg(messageBuffer, size);
+    LocalFree(messageBuffer);
+
+    // 转换为 UTF-8
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wmsg[0], (int)wmsg.size(), NULL, 0, NULL, NULL);
+    std::string utf8_msg(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wmsg[0], (int)wmsg.size(), &utf8_msg[0], size_needed, NULL, NULL);
+
+    // 移除末尾可能存在的换行符
+    while (!utf8_msg.empty() && (utf8_msg.back() == '\r' || utf8_msg.back() == '\n')) {
+        utf8_msg.pop_back();
+    }
+
+    return utf8_msg;
+}
+#else
+// 非 Windows 平台直接返回原消息
+std::string sys_err_to_utf8(const boost::system::error_code& ec) { return ec.message(); }
+#endif
+
 // --- 修复：构造函数 ---
 TrackerClient::TrackerClient(std::string host, unsigned short port)
     : m_io_context(),                                            // 初始化自己的 io_context
@@ -54,7 +88,7 @@ void TrackerClient::do_connect() {
     boost::asio::async_connect(m_socket, endpoints,
                                [self = shared_from_this()](const boost::system::error_code& ec, const tcp::endpoint&) {
                                    if (ec) {
-                                       g_logger->error("[TrackerClient] 连接 Tracker 失败: {}", ec.message());
+                                       g_logger->error("[TrackerClient] 连接 Tracker 失败: {}", sys_err_to_utf8(ec));
                                        return;
                                    }
                                    g_logger->info("[TrackerClient] 已连接到 Tracker {}:{}", self->m_host, self->m_port);
@@ -93,7 +127,7 @@ void TrackerClient::do_read_header() {
                             [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
                                 if (ec) {
                                     if (ec != boost::asio::error::eof) {
-                                        g_logger->error("[TrackerClient] 读取头部失败: {}", ec.message());
+                                        g_logger->error("[TrackerClient] 读取头部失败: {}", sys_err_to_utf8(ec));
                                     } else {
                                         g_logger->warn("[TrackerClient] Tracker 已断开连接。");
                                     }
