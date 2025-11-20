@@ -37,7 +37,7 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(LibJuice CONFIG REQUIRED)
 find_package(unofficial-b64 CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
-
+find_package(httplib CONFIG REQUIRED)
 
 
 
@@ -51,6 +51,19 @@ add_executable(veritas_sync
     src/peer/P2PManager.cpp
     src/peer/StateManager.cpp
     src/peer/SyncManager.cpp
+    src/peer/FileFilter.cpp
+)
+add_custom_command(TARGET veritas_sync POST_BUILD
+    # 2. 在 exe 旁边创建一个 web 文件夹
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:veritas_sync>/web
+    
+    # 3. 把 src/web/index.html 复制过去
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/web/index.html
+        $<TARGET_FILE_DIR:veritas_sync>/web/index.html
+    
+    # 4. (可选) 打印一条日志让你知道发生了什么
+    COMMENT "Copying WebUI assets to output directory..."
 )
 
 target_include_directories(veritas_sync PRIVATE ${PROJECT_SOURCE_DIR}/include)
@@ -68,6 +81,7 @@ target_link_libraries(veritas_sync PRIVATE
     spdlog::spdlog
     LibJuice::LibJuice
     miniupnpc::miniupnpc
+    httplib::httplib
 )
 
 

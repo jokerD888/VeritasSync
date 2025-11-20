@@ -66,6 +66,8 @@ inline void from_json(const nlohmann::json& j, SyncTask& task) {
 inline void to_json(nlohmann::json& j, const Config& config) {
     j = nlohmann::json{{"tracker_host", config.tracker_host},
                        {"tracker_port", config.tracker_port},
+                       {"stun_host", config.stun_host},
+                       {"stun_port", config.stun_port},
                        {"turn_host", config.turn_host},
                        {"turn_port", config.turn_port},
                        {"turn_username", config.turn_username},

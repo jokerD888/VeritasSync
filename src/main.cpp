@@ -174,12 +174,10 @@ int main(int argc, char* argv[]) {
                                 config.tracker_port, config.tasks.size());
 
     // 启动 Web UI
-    boost::asio::io_context ui_ioc;
-    VeritasSync::WebUIServer web_ui(ui_ioc, 8800, "config.json");
-    web_ui.start();
-    std::thread ui_thread([&ui_ioc]() { ui_ioc.run(); });
+    VeritasSync::WebUIServer web_ui(8800, "config.json");
 
-    VeritasSync::g_logger->info("[WebUI] 控制台已启动: http://127.0.0.1:{}", web_ui.get_port());
+    // 在后台线程启动阻塞的 listen 循环
+    std::thread ui_thread([&web_ui]() { web_ui.start(); });
 
 #if defined(_WIN32)
     // Windows 下自动打开浏览器
@@ -190,7 +188,7 @@ int main(int argc, char* argv[]) {
         VeritasSync::g_logger->warn("没有配置同步任务。请通过 Web UI (http://127.0.0.1:8800) 添加任务。");
         VeritasSync::g_logger->info("\n--- 按 Ctrl+C 退出 ---");
         std::this_thread::sleep_for(std::chrono::hours(24));
-        ui_ioc.stop();
+        web_ui.stop();
         if (ui_thread.joinable()) ui_thread.join();
         spdlog::shutdown();
         return 0;
@@ -232,7 +230,7 @@ int main(int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::hours(24));
 
     // 清理
-    ui_ioc.stop();
+    web_ui.stop();
     if (ui_thread.joinable()) ui_thread.join();
 
     VeritasSync::g_logger->info("--- Shutting down. ---");

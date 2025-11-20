@@ -13,6 +13,7 @@
         "libjuice",
         "b64",
         "miniupnpc",
-        "gtest"
+        "gtest",
+        "cpp-httplib"
     ]
 }

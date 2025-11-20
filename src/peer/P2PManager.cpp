@@ -152,14 +152,45 @@ std::string P2PManager::decrypt_gcm(const std::string& ciphertext) {
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
-// (广播方法 ... 保持不变 ...)
 void P2PManager::broadcast_current_state() {
     if (m_role != SyncRole::Source) return;
     if (!m_state_manager) return;
-    g_logger->info("[P2P] (Source) 文件系统发生变化，正在向所有节点广播最新状态...");
-    m_state_manager->scan_directory();
-    std::string json_state = m_state_manager->get_state_as_json_string();
-    send_over_kcp(json_state);
+
+    // 异步投递任务到线程池，避免阻塞主网络线程
+    boost::asio::post(m_worker_pool, [self = shared_from_this()]() {
+        // [Worker线程] 1. 执行耗时的文件扫描
+        self->m_state_manager->scan_directory();
+        std::string json_state = self->m_state_manager->get_state_as_json_string();
+
+        // [Worker线程] 2. 预先进行加密 (耗时操作)
+        // 注意：m_encryption_key 在启动后只读，因此这里是线程安全的
+        std::string json_packet;
+        json_packet.push_back(MSG_TYPE_JSON);
+        json_packet.append(json_state);
+
+        std::string encrypted_msg = self->encrypt_gcm(json_packet);
+
+        if (encrypted_msg.empty()) {
+            g_logger->error("[Worker] 加密失败，放弃广播。");
+            return;
+        }
+
+        // [Main线程] 3. 切回 IO 线程发送数据
+        // 因为 m_peers_by_agent 和 kcp 均非线程安全，必须在 io_context 线程操作
+        boost::asio::post(self->m_io_context, [self, encrypted_msg = std::move(encrypted_msg)]() {
+            std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+            int sent_count = 0;
+            for (auto const& [agent, context] : self->m_peers_by_agent) {
+                if (context->kcp) {
+                    ikcp_send(context->kcp, encrypted_msg.c_str(), encrypted_msg.length());
+                    sent_count++;
+                }
+            }
+            if (sent_count > 0) {
+                g_logger->info("[P2P] (Source) 广播状态完成 (发送给 {} 个对等点)", sent_count);
+            }
+        });
+    });
 }
 void P2PManager::broadcast_file_update(const FileInfo& file_info) {
     if (m_role != SyncRole::Source) return;
@@ -205,7 +236,11 @@ std::shared_ptr<P2PManager> P2PManager::create() {
     return manager;
 }
 
-P2PManager::P2PManager() : m_io_context(), m_kcp_update_timer(m_io_context), m_cleanup_timer(m_io_context) {
+P2PManager::P2PManager()
+    : m_io_context(),
+      m_kcp_update_timer(m_io_context),
+      m_cleanup_timer(m_io_context),
+      m_worker_pool(std::thread::hardware_concurrency()) {
     // --- 只记录重要的 libjuice 日志 (INFO 及以上级别) ---
     juice_set_log_level(JUICE_LOG_LEVEL_INFO);  // 关闭 DEBUG 和 VERBOSE
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
@@ -264,6 +299,7 @@ void P2PManager::init() {
 }
 P2PManager::~P2PManager() {
     m_io_context.stop();
+    m_worker_pool.join();
     if (m_thread.joinable()) {
         m_thread.join();
     }
@@ -920,63 +956,83 @@ void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* f
 }
 void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext* from_peer) {
     const std::string requested_path_str = payload.at("path").get<std::string>();
-    g_logger->info("[KCP] 收到来自 {} 对文件 '{}' 的请求。", from_peer ? from_peer->peer_id : std::string("<unknown>"),
-                   requested_path_str);
-    std::filesystem::path relative_path(
-        std::u8string_view(reinterpret_cast<const char8_t*>(requested_path_str.c_str()), requested_path_str.length()));
-    std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-    if (!std::filesystem::exists(full_path)) {
-        g_logger->error("[P2P] 被请求的文件不存在: {}", full_path.string());
-        return;
-    }
-    std::ifstream file(full_path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        g_logger->error("[P2P] 无法打开文件: {}", full_path.string());
-        return;
-    }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    auto send_binary_packet = [&](std::string packet_payload) {
-        std::string binary_packet;
-        binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
-        binary_packet.append(std::move(packet_payload));
-        std::string encrypted_msg = encrypt_gcm(binary_packet);
-        if (encrypted_msg.empty()) {
-            g_logger->error("[KCP] 错误：加密失败，文件块未发送至 {}",
-                            from_peer ? from_peer->peer_id : std::string("<unknown>"));
+    // 捕获 peer_id 而不是指针，防止任务执行期间 Peer 断开导致悬空指针
+    std::string peer_id = from_peer ? from_peer->peer_id : "";
+
+    if (peer_id.empty()) return;
+
+    g_logger->info("[P2P] 收到文件请求: {} (来自 {}) -> 派发至工作线程池", requested_path_str, peer_id);
+
+    // 异步投递到线程池
+    boost::asio::post(m_worker_pool, [self = shared_from_this(), requested_path_str, peer_id]() {
+        // [Worker线程] 1. 准备文件路径
+        std::filesystem::path relative_path(std::u8string_view(
+            reinterpret_cast<const char8_t*>(requested_path_str.c_str()), requested_path_str.length()));
+        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+        if (!std::filesystem::exists(full_path)) {
+            g_logger->error("[Worker] 被请求的文件不存在: {}", full_path.string());
             return;
         }
-        if (from_peer && from_peer->kcp) {
-            ikcp_send(from_peer->kcp, encrypted_msg.c_str(), encrypted_msg.length());
+
+        std::ifstream file(full_path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            g_logger->error("[Worker] 无法打开文件: {}", full_path.string());
+            return;
         }
-    };
-    if (size == 0) {
-        g_logger->info("[KCP] 正在发送零字节文件 '{}' 的元信息...", requested_path_str);
-        std::string packet_payload;
-        append_uint16(packet_payload, static_cast<uint16_t>(requested_path_str.length()));
-        packet_payload.append(requested_path_str);
-        append_uint32(packet_payload, 0);
-        append_uint32(packet_payload, 1);
-        send_binary_packet(std::move(packet_payload));
-        return;
-    }
-    int total_chunks = static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE);
-    std::vector<char> buffer(CHUNK_DATA_SIZE);
-    g_logger->info("[KCP] 正在将文件 '{}' ({} 字节) 分成 {} 块 (压缩并) 发送给 {}", requested_path_str, size,
-                   total_chunks, from_peer ? from_peer->peer_id : std::string("<unknown>"));
-    for (int i = 0; i < total_chunks; ++i) {
-        file.read(buffer.data(), CHUNK_DATA_SIZE);
-        std::streamsize bytes_read = file.gcount();
-        std::string compressed_data;
-        snappy::Compress(buffer.data(), bytes_read, &compressed_data);
-        std::string packet_payload;
-        append_uint16(packet_payload, static_cast<uint16_t>(requested_path_str.length()));
-        packet_payload.append(requested_path_str);
-        append_uint32(packet_payload, i);
-        append_uint32(packet_payload, total_chunks);
-        packet_payload.append(compressed_data);
-        send_binary_packet(std::move(packet_payload));
-    }
+
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        int total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
+
+        // 定义一个 Lambda 用于发送单个块 (包含加密逻辑)
+        auto send_chunk_async = [&](int index, std::string compressed_data) {
+            std::string packet_payload;
+            append_uint16(packet_payload, static_cast<uint16_t>(requested_path_str.length()));
+            packet_payload.append(requested_path_str);
+            append_uint32(packet_payload, index);
+            append_uint32(packet_payload, total_chunks);
+            packet_payload.append(compressed_data);
+
+            std::string binary_packet;
+            binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
+            binary_packet.append(std::move(packet_payload));
+
+            // [Worker线程] 加密耗时操作
+            std::string encrypted_msg = self->encrypt_gcm(binary_packet);
+            if (encrypted_msg.empty()) return;
+
+            // [Main线程] 投递回主线程发送
+            boost::asio::post(self->m_io_context, [self, peer_id, encrypted_msg = std::move(encrypted_msg)]() {
+                std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+                auto it = self->m_peers_by_id.find(peer_id);
+                if (it != self->m_peers_by_id.end() && it->second->kcp) {
+                    ikcp_send(it->second->kcp, encrypted_msg.c_str(), encrypted_msg.length());
+                }
+            });
+        };
+
+        // 处理空文件
+        if (size == 0) {
+            send_chunk_async(0, "");
+            return;
+        }
+
+        // [Worker线程] 2. 循环读取、压缩、加密
+        std::vector<char> buffer(CHUNK_DATA_SIZE);
+        for (int i = 0; i < total_chunks; ++i) {
+            file.read(buffer.data(), CHUNK_DATA_SIZE);
+            std::streamsize bytes_read = file.gcount();
+
+            std::string compressed_data;
+            snappy::Compress(buffer.data(), bytes_read, &compressed_data);
+
+            send_chunk_async(i, std::move(compressed_data));
+        }
+
+        g_logger->info("[Worker] 文件 '{}' 处理完毕，共 {} 块。", requested_path_str, total_chunks);
+    });
 }
 void P2PManager::handle_file_chunk(const std::string& payload) {
     const char* data_ptr = payload.c_str();

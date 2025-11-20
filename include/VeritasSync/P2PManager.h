@@ -4,6 +4,7 @@
 
 #include <array>
 #include <boost/asio.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -197,6 +198,10 @@ private:
     struct UPNPUrls m_upnp_urls;
     struct IGDdatas m_upnp_data;
     // --------------------------
+
+    // --- 线程池 ---
+    // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作
+    boost::asio::thread_pool m_worker_pool;
 };
 
 }  // namespace VeritasSync

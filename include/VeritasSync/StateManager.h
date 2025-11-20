@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "VeritasSync/FileFilter.h"
 #include "VeritasSync/Protocol.h"
 
 namespace efsw {
@@ -71,6 +72,9 @@ namespace VeritasSync {
         // 待处理变更的集合 (优化：使用 unordered_set 提升查找性能)
         std::unordered_set<std::string> m_pending_changes;
         std::mutex m_changes_mutex;
+
+        // 过滤器实例
+        FileFilter m_file_filter;
     };
 
 }  // namespace VeritasSync
