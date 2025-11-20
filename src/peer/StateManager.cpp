@@ -91,17 +91,25 @@ namespace VeritasSync {
     // --- StateManager 实现 ---
 
     StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher)
-        : m_root_path(std::filesystem::absolute(root_path)),
-          m_p2p_manager(&p2p_manager)  // --- 保存 P2PManager 指针 ---
-    {
+        : m_root_path(std::filesystem::absolute(root_path)), m_p2p_manager(&p2p_manager) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", m_root_path.string());
             std::filesystem::create_directory(m_root_path);
         }
 
+        // --- 初始化数据库 ---
+        // 数据库文件放在同步根目录下的隐藏文件中，例如 .veritas.db
+        // 这样随目录移动，且不污染用户文件（已被默认 FileFilter 忽略）
+        try {
+            std::filesystem::path db_path = m_root_path / ".veritas.db";
+            m_db = std::make_unique<Database>(db_path);
+        } catch (const std::exception& e) {
+            g_logger->error("[StateManager] 数据库初始化失败: {}", e.what());
+        }
+        // -------------------------
+
         if (enable_watcher) {
             m_file_watcher = std::make_unique<efsw::FileWatcher>();
-            // --- 将 'this' 传递给 UpdateListener ---
             m_listener = std::make_unique<UpdateListener>(this);
             m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
             m_file_watcher->watch();
@@ -147,8 +155,6 @@ namespace VeritasSync {
 
     // --- 由 UpdateListener 定时器调用 ---
     void StateManager::process_debounced_changes() {
-        // g_logger->info("[Watcher] 文件系统稳定，正在处理增量变化...");
-
         std::unordered_set<std::string> changes_to_process;
         {
             std::lock_guard<std::mutex> lock(m_changes_mutex);
@@ -157,45 +163,37 @@ namespace VeritasSync {
 
         if (changes_to_process.empty()) return;
 
-        // --- 1. 实时重载忽略规则 ---
-        // 确保用户刚刚修改的 .veritasignore 能立即对本次变更生效
-        // FileFilter 内部有 mutex 保护，是线程安全的
         m_file_filter.load_rules(m_root_path);
-        // -----------------------------------
 
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
+
+        // --- 开启事务 ---
+        // 虽然是增量，但如果一次有几百个文件变动，事务依然能显著加速
+        if (m_db) m_db->begin_transaction();
 
         for (const auto& full_path_str : changes_to_process) {
             try {
                 std::filesystem::path full_path(std::u8string_view(
                     reinterpret_cast<const char8_t*>(full_path_str.c_str()), full_path_str.length()));
 
-                std::filesystem::path relative_path;
-
                 if (full_path == m_root_path) continue;
 
                 std::error_code ec;
-                relative_path = std::filesystem::relative(full_path, m_root_path, ec);
-                if (ec) {
-                    continue;
-                }
+                std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
+                if (ec) continue;
 
                 const std::u8string u8_path_str = relative_path.u8string();
                 std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
 
-                // --- 2. 过滤器检查 ---
                 if (m_file_filter.should_ignore(rel_path_str)) {
-                    // 即使是忽略文件，建议用 debug 级别，info 级别可能会刷屏
-                    g_logger->debug("[Watcher] 忽略变更 (规则匹配): {}", rel_path_str);
+                    g_logger->debug("[Watcher] 忽略变更: {}", rel_path_str);
                     continue;
                 }
-                // --------------------
 
-                // --- 3. 正常的业务逻辑  ---
                 if (std::filesystem::exists(full_path, ec) && !ec) {
                     if (std::filesystem::is_regular_file(full_path, ec) && !ec) {
-                        // 文件 更新/创建
+                        // --- 文件更新 ---
                         FileInfo info;
                         info.path = rel_path_str;
 
@@ -207,12 +205,16 @@ namespace VeritasSync {
                         info.hash = Hashing::CalculateSHA256(full_path);
                         if (info.hash.empty()) continue;
 
+                        // 更新内存
                         m_file_map[info.path] = info;
+
+                        // 更新数据库
+                        if (m_db) m_db->update_file(info.path, info.hash, info.modified_time);
+
                         g_logger->info("[StateManager] 广播文件更新: {}", info.path);
                         m_p2p_manager->broadcast_file_update(info);
 
                     } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
-                        // 目录 创建
                         if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
                             m_dir_map.insert(rel_path_str);
                             g_logger->info("[StateManager] 广播目录创建: {}", rel_path_str);
@@ -220,8 +222,11 @@ namespace VeritasSync {
                         }
                     }
                 } else {
-                    // 文件/目录 不存在 -> 删除
+                    // --- 文件删除 ---
                     if (m_file_map.erase(rel_path_str) > 0) {
+                        // 从数据库删除
+                        if (m_db) m_db->remove_file(rel_path_str);
+
                         g_logger->info("[StateManager] 广播文件删除: {}", rel_path_str);
                         m_p2p_manager->broadcast_file_delete(rel_path_str);
                     } else if (m_dir_map.erase(rel_path_str) > 0) {
@@ -233,97 +238,96 @@ namespace VeritasSync {
                 g_logger->error("[StateManager] 处理变更异常: {} ({})", full_path_str, e.what());
             }
         }
+
+        // --- 提交事务 ---
+        if (m_db) m_db->commit_transaction();
     }
 
-    // --- 实现 remove_path_from_map (由 P2PManager 调用) ---
     void StateManager::remove_path_from_map(const std::string& relative_path) {
         std::lock_guard<std::mutex> lock(m_file_map_mutex);
         m_file_map.erase(relative_path);
+
+        // 同时也从数据库移除，保持一致性
+        if (m_db) {
+            m_db->remove_file(relative_path);
+        }
     }
 
     void StateManager::scan_directory() {
         g_logger->info("[StateManager] Scanning directory: {}", m_root_path.string());
 
-        // --- 1. 加载忽略规则 ---
-        // 每次扫描前重新加载，这样用户修改 .veritasignore 后下次扫描立即生效
+        // 1. 加载忽略规则
         m_file_filter.load_rules(m_root_path);
-        // ---------------------
 
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
 
-        // 备份当前状态到缓存，用于优化 Hash 计算
-        if (!m_file_map.empty()) {
-            m_previous_file_map = m_file_map;
-        }
-
+        // 旧的 m_previous_file_map 逻辑已删除
         m_file_map.clear();
         m_dir_map.clear();
 
         std::error_code ec;
-        // 使用递归迭代器遍历目录
         auto iterator = std::filesystem::recursive_directory_iterator(m_root_path, ec);
 
         if (ec) {
-            g_logger->error("[StateManager] Error creating directory iterator for path {}: {}", m_root_path.string(),
-                            ec.message());
+            g_logger->error("[StateManager] Error creating directory iterator: {}", ec.message());
             return;
         }
 
+        // --- 开启事务 (极大提升批量写入性能) ---
+        if (m_db) m_db->begin_transaction();
+        // -----------------------------------
+
         int cache_hit_count = 0;
         int calc_count = 0;
-        int ignored_count = 0;
 
         for (const auto& entry : iterator) {
-            // 获取相对路径
             std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
             if (ec) continue;
 
-            // 转换为通用 UTF-8 字符串
             const std::u8string u8_path_str = relative_path.u8string();
             std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
 
             if (rel_path_str.empty()) continue;
 
-            // --- 2. 使用过滤器 ---
-            // 替代了之前硬编码的 .veritas_tmp, .DS_Store 等检查
+            // 过滤器检查
             if (m_file_filter.should_ignore(rel_path_str)) {
-                // 如果是目录被忽略，我们不需要遍历其子目录（优化性能）
                 if (entry.is_directory(ec) && !ec) {
                     iterator.disable_recursion_pending();
                 }
-                ignored_count++;
                 continue;
             }
-            // --------------------
 
             if (entry.is_regular_file(ec) && !ec) {
                 FileInfo info;
                 info.path = rel_path_str;
 
-                // 获取修改时间
                 auto ftime = std::filesystem::last_write_time(entry, ec);
                 if (ec) continue;
                 auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                 info.modified_time = sctp.time_since_epoch().count();
 
-                // 检查缓存
-                auto it = m_previous_file_map.find(rel_path_str);
-                bool cache_hit = false;
-
-                if (it != m_previous_file_map.end()) {
-                    if (it->second.modified_time == info.modified_time) {
-                        info.hash = it->second.hash;
-                        cache_hit = true;
+                // --- 【核心】数据库查询逻辑 ---
+                bool need_calc = true;
+                if (m_db) {
+                    auto cached_meta = m_db->get_file(rel_path_str);
+                    // 如果数据库有记录，且修改时间一致 -> Cache Hit
+                    if (cached_meta && cached_meta->mtime == info.modified_time) {
+                        info.hash = cached_meta->hash;
+                        need_calc = false;
                         cache_hit_count++;
                     }
                 }
 
-                // 未命中缓存，重新计算 Hash
-                if (!cache_hit) {
+                // Cache Miss -> 计算哈希并写入 DB
+                if (need_calc) {
                     info.hash = Hashing::CalculateSHA256(entry.path());
                     calc_count++;
+                    if (m_db && !info.hash.empty()) {
+                        m_db->update_file(info.path, info.hash, info.modified_time);
+                    }
                 }
+                // -----------------------------
 
                 if (!info.hash.empty()) {
                     m_file_map[info.path] = info;
@@ -334,11 +338,12 @@ namespace VeritasSync {
             }
         }
 
-        g_logger->info("[StateManager] 扫描完成。文件: {}, 目录: {} (缓存命中: {}, 重算: {}, 忽略: {})",
-                       m_file_map.size(), m_dir_map.size(), cache_hit_count, calc_count, ignored_count);
+        // --- 提交事务 ---
+        if (m_db) m_db->commit_transaction();
+        // --------------
 
-        // 清理旧缓存
-        m_previous_file_map.clear();
+        g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", m_file_map.size(), cache_hit_count,
+                       calc_count);
     }
 
     std::string StateManager::get_state_as_json_string() {

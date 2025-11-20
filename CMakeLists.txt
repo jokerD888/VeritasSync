@@ -38,7 +38,7 @@ find_package(LibJuice CONFIG REQUIRED)
 find_package(unofficial-b64 CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(httplib CONFIG REQUIRED)
-
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 
 # ===========================================================
@@ -54,6 +54,7 @@ add_executable(veritas_sync
     src/peer/FileFilter.cpp
     src/peer/CryptoLayer.cpp
     src/peer/TransferManager.cpp
+    src/peer/Database.cpp
 )
 add_custom_command(TARGET veritas_sync POST_BUILD
     # 2. 在 exe 旁边创建一个 web 文件夹
@@ -84,6 +85,7 @@ target_link_libraries(veritas_sync PRIVATE
     LibJuice::LibJuice
     miniupnpc::miniupnpc
     httplib::httplib
+    unofficial::sqlite3::sqlite3
 )
 
 

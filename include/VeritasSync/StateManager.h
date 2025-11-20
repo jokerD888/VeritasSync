@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "VeritasSync/Database.h"
 #include "VeritasSync/FileFilter.h"
 #include "VeritasSync/Protocol.h"
 
@@ -59,7 +60,7 @@ namespace VeritasSync {
 
         // 文件状态的核心存储结构
         std::map<std::string, FileInfo> m_file_map;
-        std::map<std::string, FileInfo> m_previous_file_map;  // 上一次扫描的缓存，用于避免重复计算 Hash
+        std::unique_ptr<Database> m_db;
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
 
         std::set<std::string> m_dir_map;
