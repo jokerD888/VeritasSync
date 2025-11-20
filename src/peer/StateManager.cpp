@@ -192,7 +192,7 @@ namespace VeritasSync {
                 }
                 // --------------------
 
-                // --- 3. 正常的业务逻辑 (保持不变) ---
+                // --- 3. 正常的业务逻辑  ---
                 if (std::filesystem::exists(full_path, ec) && !ec) {
                     if (std::filesystem::is_regular_file(full_path, ec) && !ec) {
                         // 文件 更新/创建

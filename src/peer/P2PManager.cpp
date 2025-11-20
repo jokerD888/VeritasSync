@@ -1,13 +1,9 @@
 #include "VeritasSync/P2PManager.h"
 
-#include <snappy.h>
-
 #include <algorithm>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <nlohmann/json.hpp>
-#include <sstream>
 
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/Logger.h"
@@ -26,15 +22,6 @@
 
 namespace VeritasSync {
 
-// (append/read uint16/32 辅助函数 ... 保持不变 ...)
-void append_uint16(std::string& s, uint16_t val) {
-    uint16_t net_val = boost::asio::detail::socket_ops::host_to_network_short(val);
-    s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
-}
-void append_uint32(std::string& s, uint32_t val) {
-    uint32_t net_val = boost::asio::detail::socket_ops::host_to_network_long(val);
-    s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
-}
 uint16_t read_uint16(const char*& data, size_t& len) {
     if (len < sizeof(uint16_t)) return 0;
     uint16_t net_val;
@@ -55,7 +42,6 @@ uint32_t read_uint32(const char*& data, size_t& len) {
 static const uint8_t MSG_TYPE_JSON = 0x01;
 static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
-// (PeerContext 实现 ... 保持不变 ...)
 PeerContext::PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr)
     : peer_id(std::move(id)), agent(ag), p2p_manager_ptr(std::move(manager_ptr)) {}
 
@@ -72,83 +58,10 @@ void PeerContext::setup_kcp(uint32_t conv) {
     ikcp_wndsize(kcp, 256, 256);
 }
 
-// (set_encryption_key, encrypt_gcm, decrypt_gcm ... 保持不变 ...)
-void P2PManager::set_encryption_key(const std::string& key_string) {
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, key_string.c_str(), key_string.length());
-    SHA256_Final(hash, &sha256);
-    m_encryption_key.assign(reinterpret_cast<const char*>(hash), SHA256_DIGEST_LENGTH);
-    g_logger->info("[P2P] 加密密钥已从 'sync_key' 派生。");
-}
+void P2PManager::set_encryption_key(const std::string& key_string) { m_crypto.set_key(key_string); }
+
 static const int GCM_IV_LEN = 12;
 static const int GCM_TAG_LEN = 16;
-std::string P2PManager::encrypt_gcm(const std::string& plaintext) {
-    if (m_encryption_key.empty()) {
-        g_logger->error("[KCP] 加密失败：密钥未设置。");
-        return "";
-    }
-    unsigned char iv[GCM_IV_LEN];
-    if (RAND_bytes(iv, sizeof(iv)) != 1) {
-        g_logger->error("[KCP] 加密失败：无法生成 IV。");
-        return "";
-    }
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "";
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
-    EVP_EncryptInit_ex(ctx, NULL, NULL, reinterpret_cast<const unsigned char*>(m_encryption_key.c_str()), iv);
-    int out_len;
-    std::vector<unsigned char> ciphertext(plaintext.length() + EVP_MAX_BLOCK_LENGTH);
-    EVP_EncryptUpdate(ctx, ciphertext.data(), &out_len, reinterpret_cast<const unsigned char*>(plaintext.c_str()),
-                      plaintext.length());
-    int ciphertext_len = out_len;
-    EVP_EncryptFinal_ex(ctx, ciphertext.data() + out_len, &out_len);
-    ciphertext_len += out_len;
-    unsigned char tag[GCM_TAG_LEN];
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag);
-    EVP_CIPHER_CTX_free(ctx);
-    std::string final_payload;
-    final_payload.append(reinterpret_cast<const char*>(iv), GCM_IV_LEN);
-    final_payload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext_len);
-    final_payload.append(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
-    return final_payload;
-}
-std::string P2PManager::decrypt_gcm(const std::string& ciphertext) {
-    if (m_encryption_key.empty()) {
-        g_logger->error("[KCP] 解密失败：密钥未设置。");
-        return "";
-    }
-    if (ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) {
-        g_logger->warn("[KCP] 解密失败：数据包过短 ({} bytes)。", ciphertext.length());
-        return "";
-    }
-    const unsigned char* iv = reinterpret_cast<const unsigned char*>(ciphertext.c_str());
-    const unsigned char* tag =
-        reinterpret_cast<const unsigned char*>(ciphertext.c_str() + ciphertext.length() - GCM_TAG_LEN);
-    const unsigned char* encrypted_data = reinterpret_cast<const unsigned char*>(ciphertext.c_str() + GCM_IV_LEN);
-    int encrypted_data_len = ciphertext.length() - GCM_IV_LEN - GCM_TAG_LEN;
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "";
-    EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
-    EVP_DecryptInit_ex(ctx, NULL, NULL, reinterpret_cast<const unsigned char*>(m_encryption_key.c_str()), iv);
-    int out_len;
-    std::vector<unsigned char> plaintext(encrypted_data_len);
-    EVP_DecryptUpdate(ctx, plaintext.data(), &out_len, encrypted_data, encrypted_data_len);
-    int plaintext_len = out_len;
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, const_cast<unsigned char*>(tag));
-    int ret = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &out_len);
-    EVP_CIPHER_CTX_free(ctx);
-    if (ret > 0) {
-        plaintext_len += out_len;
-        return std::string(reinterpret_cast<const char*>(plaintext.data()), plaintext_len);
-    } else {
-        g_logger->warn("[KCP] 解密失败：认证标签不匹配 (数据可能被篡改或密钥错误)。");
-        return "";
-    }
-}
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
@@ -168,7 +81,7 @@ void P2PManager::broadcast_current_state() {
         json_packet.push_back(MSG_TYPE_JSON);
         json_packet.append(json_state);
 
-        std::string encrypted_msg = self->encrypt_gcm(json_packet);
+        std::string encrypted_msg = self->m_crypto.encrypt(json_packet);
 
         if (encrypted_msg.empty()) {
             g_logger->error("[Worker] 加密失败，放弃广播。");
@@ -245,23 +158,23 @@ P2PManager::P2PManager()
     juice_set_log_level(JUICE_LOG_LEVEL_INFO);  // 关闭 DEBUG 和 VERBOSE
     juice_set_log_handler([](juice_log_level_t level, const char* message) {
         switch (level) {
-        case JUICE_LOG_LEVEL_INFO:
-            // 过滤掉一些噪音日志
-            if (std::string_view(message).find("Changing state to") != std::string_view::npos ||
-                std::string_view(message).find("Candidate gathering done") != std::string_view::npos ||
-                std::string_view(message).find("Connectivity timer") != std::string_view::npos) {
-                g_logger->info("[libjuice] {}", message);
-            }
-            break;
-        case JUICE_LOG_LEVEL_WARN:
-            g_logger->warn("[libjuice] {}", message);
-            break;
-        case JUICE_LOG_LEVEL_ERROR:
-        case JUICE_LOG_LEVEL_FATAL:
-            g_logger->error("[libjuice] {}", message);
-            break;
-        default:
-            break;
+            case JUICE_LOG_LEVEL_INFO:
+                // 过滤掉一些噪音日志
+                if (std::string_view(message).find("Changing state to") != std::string_view::npos ||
+                    std::string_view(message).find("Candidate gathering done") != std::string_view::npos ||
+                    std::string_view(message).find("Connectivity timer") != std::string_view::npos) {
+                    g_logger->info("[libjuice] {}", message);
+                }
+                break;
+            case JUICE_LOG_LEVEL_WARN:
+                g_logger->warn("[libjuice] {}", message);
+                break;
+            case JUICE_LOG_LEVEL_ERROR:
+            case JUICE_LOG_LEVEL_FATAL:
+                g_logger->error("[libjuice] {}", message);
+                break;
+            default:
+                break;
         }
     });
 }
@@ -276,7 +189,6 @@ void P2PManager::set_stun_config(std::string host, uint16_t port) {
     g_logger->info("[Config] STUN 服务器设置为: {}:{}", m_stun_host, m_stun_port);
 }
 
-// (set_turn_config, init, ~P2PManager ... 保持不变 ...)
 void P2PManager::set_turn_config(std::string host, uint16_t port, std::string username, std::string password) {
     m_turn_host = std::move(host);
     m_turn_port = port;
@@ -288,6 +200,22 @@ void P2PManager::set_turn_config(std::string host, uint16_t port, std::string us
     m_turn_server_config.password = m_turn_password.c_str();
 }
 void P2PManager::init() {
+    auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id, const std::string& encrypted_data) {
+        // 切回 IO 线程发送
+        auto self = weak_self.lock();
+        if (!self) return;
+
+        boost::asio::post(self->m_io_context, [self, peer_id, encrypted_data]() {
+            std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+            auto it = self->m_peers_by_id.find(peer_id);
+            if (it != self->m_peers_by_id.end() && it->second->kcp) {
+                ikcp_send(it->second->kcp, encrypted_data.c_str(), encrypted_data.length());
+            }
+        });
+    };
+
+    // 创建实例
+    m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_worker_pool, m_crypto, send_cb);
     m_thread = std::jthread([this]() {
         g_logger->info("[P2P] IO context 在后台线程运行...");
         auto work_guard = boost::asio::make_work_guard(m_io_context);
@@ -311,7 +239,6 @@ P2PManager::~P2PManager() {
     m_peers_by_id.clear();
 }
 
-// (kcp_output_callback, schedule_kcp_update, update_all_kcps ... 保持不变 ...)
 int P2PManager::kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user) {
     PeerContext* context = static_cast<PeerContext*>(user);
     if (context && context->agent) {
@@ -356,20 +283,17 @@ void P2PManager::update_all_kcps() {
         if (idle_duration > std::chrono::seconds(5)) {
             m_kcp_update_interval_ms = 100;  // 空闲5秒后降低频率
         } else if (idle_duration > std::chrono::seconds(1)) {
-            m_kcp_update_interval_ms = 50;   // 空闲1秒后中等频率
+            m_kcp_update_interval_ms = 50;  // 空闲1秒后中等频率
         } else {
-            m_kcp_update_interval_ms = 20;   // 默认频率
+            m_kcp_update_interval_ms = 20;  // 默认频率
         }
     }
-    
+
     for (const auto& msg_pair : received_messages) {
         handle_kcp_message(msg_pair.first, msg_pair.second);
     }
     schedule_kcp_update();
 }
-
-// (connect_to_peers, C 回调, C++ 处理器 ... 保持不变 ...)
-// src/peer/P2PManager.cpp
 
 void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses) {
     std::lock_guard<std::mutex> lock(m_peers_mutex);
@@ -686,12 +610,11 @@ void P2PManager::handle_peer_leave(const std::string& peer_id) {
     }
 }
 
-// (send_over_kcp, send_over_kcp_peer, handle_kcp_message ... 保持不变 ...)
 void P2PManager::send_over_kcp(const std::string& msg) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
-    std::string encrypted_msg = encrypt_gcm(json_packet);
+    std::string encrypted_msg = m_crypto.encrypt(json_packet);
     if (encrypted_msg.empty()) {
         g_logger->error("[KCP] 错误：加密失败，广播消息未发送");
         return;
@@ -717,7 +640,7 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerContext* peer) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
-    std::string encrypted_msg = encrypt_gcm(json_packet);
+    std::string encrypted_msg = m_crypto.encrypt(json_packet);
     if (encrypted_msg.empty()) {
         g_logger->error("[KCP] 错误：加密失败，单播消息未发送至 {}", peer->peer_id);
         return;
@@ -725,19 +648,19 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerContext* peer) {
     ikcp_send(peer->kcp, encrypted_msg.c_str(), encrypted_msg.length());
 }
 void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_peer) {
-    std::string decrypted_msg = decrypt_gcm(msg);
+    std::string decrypted_msg = m_crypto.decrypt(msg);
     if (decrypted_msg.empty()) {
         g_logger->warn("[KCP] 解密失败 ({} bytes 原始数据)", msg.size());
         return;
     }
-    
+
     if (decrypted_msg.empty()) {
         g_logger->warn("[KCP] 收到空解密包。");
         return;
     }
     uint8_t msg_type = decrypted_msg[0];
     std::string payload(decrypted_msg.begin() + 1, decrypted_msg.end());
-    
+
     if (msg_type == MSG_TYPE_JSON) {
         try {
             auto json = nlohmann::json::parse(payload);
@@ -745,9 +668,9 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
             auto& json_payload = json.at(Protocol::MSG_PAYLOAD);
 
             // 只记录重要的消息类型
-            g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", 
-                          json_msg_type, from_peer ? from_peer->peer_id : "<unknown>");
-            
+            g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", json_msg_type,
+                           from_peer ? from_peer->peer_id : "<unknown>");
+
             if (json_msg_type == Protocol::TYPE_SHARE_STATE && m_role == SyncRole::Destination) {
                 handle_share_state(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE && m_role == SyncRole::Destination) {
@@ -755,28 +678,29 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
             } else if (json_msg_type == Protocol::TYPE_FILE_DELETE && m_role == SyncRole::Destination) {
                 handle_file_delete(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE && m_role == SyncRole::Source) {
-                handle_file_request(json_payload, from_peer);
+                if (from_peer) {
+                    m_transfer_manager->queue_upload(from_peer->peer_id, json_payload);
+                }
             } else if (json_msg_type == Protocol::TYPE_DIR_CREATE && m_role == SyncRole::Destination) {
                 handle_dir_create(json_payload);
             } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && m_role == SyncRole::Destination) {
                 handle_dir_delete(json_payload, from_peer);
             } else {
-                g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", 
-                             json_msg_type, m_role == SyncRole::Source ? "Source" : "Destination");
+                g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
+                               m_role == SyncRole::Source ? "Source" : "Destination");
             }
         } catch (const std::exception& e) {
             g_logger->error("[P2P] 处理KCP JSON消息时发生错误: {}", e.what());
         }
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
         if (m_role == SyncRole::Destination) {
-            handle_file_chunk(payload);
+            m_transfer_manager->handle_chunk(payload);
         }
     } else {
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);
     }
 }
 
-// (所有 handle_... 处理器 ... 保持不变 ...)
 void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role != SyncRole::Destination) return;
     g_logger->info("[KCP] (Destination) 收到来自 {} (Source) 的 'share_state' 消息。",
@@ -927,6 +851,12 @@ void P2PManager::handle_dir_create(const nlohmann::json& payload) {
         g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
     }
 }
+void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext* from_peer) {
+    // 此函数现在可能不再被直接调用，或者仅仅作为 wrapper
+    if (from_peer) {
+        m_transfer_manager->queue_upload(from_peer->peer_id, payload);
+    }
+}
 void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role != SyncRole::Destination) return;
     std::string relative_path_str;
@@ -954,204 +884,7 @@ void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* f
         }
     }
 }
-void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext* from_peer) {
-    const std::string requested_path_str = payload.at("path").get<std::string>();
-    // 捕获 peer_id 而不是指针，防止任务执行期间 Peer 断开导致悬空指针
-    std::string peer_id = from_peer ? from_peer->peer_id : "";
 
-    if (peer_id.empty()) return;
-
-    g_logger->info("[P2P] 收到文件请求: {} (来自 {}) -> 派发至工作线程池", requested_path_str, peer_id);
-
-    // 异步投递到线程池
-    boost::asio::post(m_worker_pool, [self = shared_from_this(), requested_path_str, peer_id]() {
-        // [Worker线程] 1. 准备文件路径
-        std::filesystem::path relative_path(std::u8string_view(
-            reinterpret_cast<const char8_t*>(requested_path_str.c_str()), requested_path_str.length()));
-        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
-
-        if (!std::filesystem::exists(full_path)) {
-            g_logger->error("[Worker] 被请求的文件不存在: {}", full_path.string());
-            return;
-        }
-
-        std::ifstream file(full_path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            g_logger->error("[Worker] 无法打开文件: {}", full_path.string());
-            return;
-        }
-
-        std::streamsize size = file.tellg();
-        file.seekg(0, std::ios::beg);
-
-        int total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
-
-        // 定义一个 Lambda 用于发送单个块 (包含加密逻辑)
-        auto send_chunk_async = [&](int index, std::string compressed_data) {
-            std::string packet_payload;
-            append_uint16(packet_payload, static_cast<uint16_t>(requested_path_str.length()));
-            packet_payload.append(requested_path_str);
-            append_uint32(packet_payload, index);
-            append_uint32(packet_payload, total_chunks);
-            packet_payload.append(compressed_data);
-
-            std::string binary_packet;
-            binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
-            binary_packet.append(std::move(packet_payload));
-
-            // [Worker线程] 加密耗时操作
-            std::string encrypted_msg = self->encrypt_gcm(binary_packet);
-            if (encrypted_msg.empty()) return;
-
-            // [Main线程] 投递回主线程发送
-            boost::asio::post(self->m_io_context, [self, peer_id, encrypted_msg = std::move(encrypted_msg)]() {
-                std::lock_guard<std::mutex> lock(self->m_peers_mutex);
-                auto it = self->m_peers_by_id.find(peer_id);
-                if (it != self->m_peers_by_id.end() && it->second->kcp) {
-                    ikcp_send(it->second->kcp, encrypted_msg.c_str(), encrypted_msg.length());
-                }
-            });
-        };
-
-        // 处理空文件
-        if (size == 0) {
-            send_chunk_async(0, "");
-            return;
-        }
-
-        // [Worker线程] 2. 循环读取、压缩、加密
-        std::vector<char> buffer(CHUNK_DATA_SIZE);
-        for (int i = 0; i < total_chunks; ++i) {
-            file.read(buffer.data(), CHUNK_DATA_SIZE);
-            std::streamsize bytes_read = file.gcount();
-
-            std::string compressed_data;
-            snappy::Compress(buffer.data(), bytes_read, &compressed_data);
-
-            send_chunk_async(i, std::move(compressed_data));
-        }
-
-        g_logger->info("[Worker] 文件 '{}' 处理完毕，共 {} 块。", requested_path_str, total_chunks);
-    });
-}
-void P2PManager::handle_file_chunk(const std::string& payload) {
-    const char* data_ptr = payload.c_str();
-    size_t data_len = payload.length();
-
-    // 1. 解析头部信息 (这部分不需要锁，纯数据解析)
-    uint16_t path_len = read_uint16(data_ptr, data_len);
-    if (path_len == 0 || data_len < path_len) {
-        g_logger->error("[KCP] 二进制块解析失败：路径长度无效。");
-        return;
-    }
-    std::string file_path_str(data_ptr, path_len);
-    data_ptr += path_len;
-    data_len -= path_len;
-
-    uint32_t chunk_index = read_uint32(data_ptr, data_len);
-    uint32_t total_chunks = read_uint32(data_ptr, data_len);
-
-    // 2. 解压数据 (耗时操作，放在锁外进行)
-    std::string compressed_chunk_data(data_ptr, data_len);
-    std::string uncompressed_data;
-    if (data_len == 0) {
-        // 空数据块
-    } else if (!snappy::Uncompress(compressed_chunk_data.data(), compressed_chunk_data.size(), &uncompressed_data)) {
-        g_logger->error("[KCP] Snappy 解压失败 (包可能已损坏): {}", file_path_str);
-        return;
-    }
-
-    // ================== 进入临界区 ==================
-    // 加锁，保护 m_receiving_files，防止与 WebUI 线程或清理线程冲突
-    std::lock_guard<std::mutex> lock(m_transfer_mutex);
-
-    // 3. 获取或创建接收状态
-    auto it = m_receiving_files.find(file_path_str);
-    if (it == m_receiving_files.end()) {
-        // 这是这个文件的第一个到达块
-
-        // 计算完整路径
-        std::filesystem::path relative_path(
-            std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
-        std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-
-        // 确保父目录存在
-        if (full_path.has_parent_path()) {
-            std::filesystem::create_directories(full_path.parent_path());
-        }
-
-        // 生成临时文件路径： filename.veritas_tmp
-        std::filesystem::path temp_path = full_path;
-        temp_path += ".veritas_tmp";
-
-        ReceivingFile new_file;
-        new_file.temp_path = temp_path.string();
-        new_file.total_chunks = total_chunks;
-        new_file.received_chunks = 0;
-        new_file.last_active = std::chrono::steady_clock::now();
-
-        // 以二进制模式打开
-        new_file.file_stream.open(temp_path, std::ios::binary | std::ios::out);
-        if (!new_file.file_stream.is_open()) {
-            g_logger->error("[P2P] 无法创建临时文件: {}", temp_path.string());
-            return;
-        }
-
-        // 插入 map
-        auto res = m_receiving_files.insert({file_path_str, std::move(new_file)});
-        it = res.first;
-
-        g_logger->info("[P2P] 开始接收文件 '{}' (总块数: {}), 写入临时文件: {}", file_path_str, total_chunks,
-                       temp_path.filename().string());
-    }
-
-    ReceivingFile& recv_file = it->second;
-
-    // 更新活跃时间
-    recv_file.last_active = std::chrono::steady_clock::now();
-
-    // 4. Seek 并写入数据 (流式写入)
-    if (recv_file.file_stream.is_open()) {
-        size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
-        recv_file.file_stream.seekp(offset);
-        recv_file.file_stream.write(uncompressed_data.data(), uncompressed_data.size());
-
-        // 简单统计已接收块数
-        recv_file.received_chunks++;
-
-        g_logger->debug("[P2P] 写入文件 '{}' 块 {}/{} (偏移: {})", file_path_str, chunk_index + 1, total_chunks,
-                        offset);
-    }
-
-    // 5. 检查是否完成
-    if (recv_file.received_chunks >= total_chunks) {
-        g_logger->info("[P2P] 文件 '{}' 接收完毕，正在进行原子重命名...", file_path_str);
-
-        // 关闭流
-        recv_file.file_stream.close();
-
-        // 准备路径
-        std::filesystem::path relative_path(
-            std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
-        std::filesystem::path final_path = m_state_manager->get_root_path() / relative_path;
-        std::filesystem::path temp_path(recv_file.temp_path);
-
-        // 原子重命名 (Atomic Rename)
-        std::error_code ec;
-        std::filesystem::rename(temp_path, final_path, ec);
-
-        if (!ec) {
-            g_logger->info("[P2P] ✅ 成功: 文件已保存至 {}", final_path.string());
-        } else {
-            g_logger->error("[P2P] ❌ 重命名失败: {} -> {} 错误: {}", temp_path.string(), final_path.string(),
-                            ec.message());
-        }
-
-        // 下载完成，从 Map 中移除
-        m_receiving_files.erase(it);
-    }
-    // ================== 离开临界区 (lock 析构) ==================
-}
 // --- 清理停滞的文件组装缓冲区 ---
 void P2PManager::schedule_cleanup_task() {
     m_cleanup_timer.expires_after(std::chrono::minutes(5));  // 每5分钟执行一次
@@ -1163,60 +896,16 @@ void P2PManager::schedule_cleanup_task() {
     });
 }
 std::vector<TransferStatus> P2PManager::get_active_downloads() {
-    std::lock_guard<std::mutex> lock(m_transfer_mutex);  // 加锁
-    std::vector<TransferStatus> list;
-    for (const auto& [path, recv] : m_receiving_files) {
-        float prog =
-            (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
-        list.push_back({path, recv.total_chunks, recv.received_chunks, prog});
+    if (m_transfer_manager) {
+        return m_transfer_manager->get_active_downloads();
     }
-    return list;
+    return {};
 }
 void P2PManager::cleanup_stale_buffers() {
-    auto now = std::chrono::steady_clock::now();
-    std::vector<std::string> to_remove;
-
-    // ================== 进入临界区 ==================
-    // 加锁，保护 m_receiving_files
-    std::lock_guard<std::mutex> lock(m_transfer_mutex);
-
-    // 遍历检查超时
-    for (auto& [file_path, recv_file] : m_receiving_files) {
-        auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - recv_file.last_active);
-
-        // 设定超时时间，例如 10 分钟
-        if (duration.count() > 10) {
-            g_logger->warn("[清理] 文件接收超时 ({} 分钟无数据): {}", duration.count(), file_path);
-
-            // 1. 关闭流
-            if (recv_file.file_stream.is_open()) {
-                recv_file.file_stream.close();
-            }
-
-            // 2. 删除临时文件 (清理垃圾)
-            std::error_code ec;
-            std::filesystem::remove(recv_file.temp_path, ec);
-            if (ec) {
-                g_logger->error("[清理] 删除临时文件失败: {}", ec.message());
-            } else {
-                g_logger->info("[清理] 已删除残留临时文件: {}", recv_file.temp_path);
-            }
-
-            to_remove.push_back(file_path);
-        }
+    if (m_transfer_manager) {
+        m_transfer_manager->cleanup_stale_buffers();
     }
-
-    // 从 Map 中移除
-    for (const auto& path : to_remove) {
-        m_receiving_files.erase(path);
-    }
-
-    if (!to_remove.empty()) {
-        g_logger->info("[清理] 已清理 {} 个超时的下载任务。", to_remove.size());
-    }
-    // ================== 离开临界区 ==================
 }
-
 // --- UPnP 功能实现 ---
 
 void P2PManager::init_upnp() {

@@ -16,6 +16,9 @@
 #include <thread>
 #include <vector>
 
+#include "VeritasSync/CryptoLayer.h"
+#include "VeritasSync/TransferManager.h"
+
 // --- miniupnpc 头文件 ---
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
@@ -52,13 +55,6 @@ struct PeerContext {
     PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
     ~PeerContext();
     void setup_kcp(uint32_t conv);
-};
-
-struct TransferStatus {
-    std::string path;
-    uint32_t total_chunks;
-    uint32_t received_chunks;
-    float progress;  // 0.0 - 100.0
 };
 
 class StateManager;
@@ -99,10 +95,6 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     std::vector<TransferStatus> get_active_downloads();
 
 private:
-    static constexpr size_t CHUNK_DATA_SIZE = 16384;
-
-    std::mutex m_transfer_mutex;
-
     P2PManager();
     void init();
 
@@ -120,12 +112,9 @@ private:
     void handle_file_update(const nlohmann::json& payload, PeerContext* from_peer);
     void handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer);
     void handle_file_request(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_file_chunk(const std::string& payload);
+
     void handle_dir_create(const nlohmann::json& payload);
     void handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer);
-
-    std::string encrypt_gcm(const std::string& plaintext);
-    std::string decrypt_gcm(const std::string& ciphertext);
 
     // --- libjuice 回调 (C 风格) ---
     static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
@@ -158,17 +147,10 @@ private:
     std::mutex m_peers_mutex;
     // -----------------------
 
-    struct ReceivingFile {
-        std::ofstream file_stream;                          // 文件流，直接写硬盘
-        std::string temp_path;                              // 临时文件路径
-        uint32_t total_chunks = 0;                          // 总块数
-        uint32_t received_chunks = 0;                       // 已接收块数
-        std::chrono::steady_clock::time_point last_active;  // 最后活跃时间
-    };
+    CryptoLayer m_crypto;
 
-    std::map<std::string, ReceivingFile> m_receiving_files;
-
-    std::string m_encryption_key;
+    // ---  传输管理器 ---
+    std::shared_ptr<TransferManager> m_transfer_manager;
 
     // --- STUN 服务器配置 ---
     std::string m_stun_host = "stun.l.google.com";  // 默认公共STUN

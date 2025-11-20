@@ -52,6 +52,8 @@ add_executable(veritas_sync
     src/peer/StateManager.cpp
     src/peer/SyncManager.cpp
     src/peer/FileFilter.cpp
+    src/peer/CryptoLayer.cpp
+    src/peer/TransferManager.cpp
 )
 add_custom_command(TARGET veritas_sync POST_BUILD
     # 2. 在 exe 旁边创建一个 web 文件夹
