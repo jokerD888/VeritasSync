@@ -37,6 +37,8 @@ public:
     // 开启/提交事务 (用于批量操作加速)
     void begin_transaction();
     void commit_transaction();
+    void update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash);
+    std::string get_last_sent_hash(const std::string& peer_id, const std::string& path);
 
 private:
     void init_schema();
@@ -45,6 +47,9 @@ private:
 
     sqlite3* m_db = nullptr;
     std::string m_db_path;
+
+    sqlite3_stmt* m_stmt_hist_update = nullptr;
+    sqlite3_stmt* m_stmt_hist_get = nullptr;
 
     // 预编译语句缓存，极大提升性能
     sqlite3_stmt* m_stmt_get = nullptr;

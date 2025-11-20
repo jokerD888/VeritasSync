@@ -40,7 +40,7 @@ public:
 
     // [Destination端] 处理接收到的二进制文件块 (解密在 P2PManager 完成，这里处理：解压 -> 写入 -> 重命名)
     // 注意：为了性能，传入 payload 应该是已经解密后的明文数据（包含头部信息的二进制块）
-    void handle_chunk(const std::string& decrypted_payload);
+    void handle_chunk(const std::string& decrypted_payload, const std::string& peer_id);
 
     // 获取当前活跃的下载任务 (WebUI 用)
     std::vector<TransferStatus> get_active_downloads();

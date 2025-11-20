@@ -8,6 +8,14 @@
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
 
+static std::filesystem::path utf8_to_path_local(const std::string& utf8_str) {
+#ifdef _WIN32
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8_str.c_str())));
+#else
+    return std::filesystem::path(utf8_str);
+#endif
+}
+
 namespace VeritasSync {
 
     // UpdateListener 现在更简单了
@@ -91,7 +99,7 @@ namespace VeritasSync {
     // --- StateManager 实现 ---
 
     StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher)
-        : m_root_path(std::filesystem::absolute(root_path)), m_p2p_manager(&p2p_manager) {
+        : m_root_path(std::filesystem::absolute(utf8_to_path_local(root_path))), m_p2p_manager(&p2p_manager) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", m_root_path.string());
             std::filesystem::create_directory(m_root_path);
@@ -124,7 +132,18 @@ namespace VeritasSync {
             g_logger->info("[StateManager] 正在停止文件监控...");
         }
     }
+    std::string StateManager::get_base_hash(const std::string& peer_id, const std::string& path) {
+        if (!m_db) return "";
+        // 复用上一阶段实现的 get_last_sent_hash，逻辑是一样的：查询 sync_history 表
+        return m_db->get_last_sent_hash(peer_id, path);
+    }
 
+    void StateManager::record_sync_success(const std::string& peer_id, const std::string& path,
+                                           const std::string& hash) {
+        if (m_db) {
+            m_db->update_sync_history(peer_id, path, hash);
+        }
+    }
     std::set<std::string> StateManager::get_local_directories() const {
         std::lock_guard<std::mutex> lock(m_dir_map_mutex);
         return m_dir_map;
@@ -378,5 +397,33 @@ namespace VeritasSync {
             g_logger->info("    Hash: {}...", pair.second.hash.substr(0, 12));
         }
         g_logger->info("-----------------------------");
+    }
+
+    bool StateManager::should_ignore_echo(const std::string& peer_id, const std::string& path,
+                                          const std::string& remote_hash) {
+        if (!m_db) return false;
+        // 查库：我们上次发给这个人这个文件的 Hash 是多少？
+        std::string last_sent = m_db->get_last_sent_hash(peer_id, path);
+
+        // 如果不为空，且等于对方现在声称的 Hash -> 这是回声
+        if (!last_sent.empty() && last_sent == remote_hash) {
+            return true;
+        }
+        return false;
+    }
+
+    void StateManager::record_file_sent(const std::string& peer_id, const std::string& path, const std::string& hash) {
+        if (m_db) {
+            m_db->update_sync_history(peer_id, path, hash);
+        }
+    }
+
+    std::string StateManager::get_file_hash(const std::string& relative_path) const {
+        std::lock_guard<std::mutex> lock(m_file_map_mutex);
+        auto it = m_file_map.find(relative_path);
+        if (it != m_file_map.end()) {
+            return it->second.hash;
+        }
+        return "";
     }
 }  // namespace VeritasSync

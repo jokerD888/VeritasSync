@@ -48,6 +48,22 @@ namespace VeritasSync {
         // (供 P2PManager::handle_file_delete 调用)
         void remove_path_from_map(const std::string& relative_path);
 
+        // 供 P2PManager 检查是否为回声
+        bool should_ignore_echo(const std::string& peer_id, const std::string& path, const std::string& remote_hash);
+
+        // 供 TransferManager 记录发送历史
+        void record_file_sent(const std::string& peer_id, const std::string& path, const std::string& hash);
+
+        // 供 TransferManager 获取当前文件的 Hash (用于记录)
+        std::string get_file_hash(const std::string& relative_path) const;
+
+        // 获取上次同步的哈希 (Base Hash)
+        // 本质上就是复用上一阶段的 get_last_sent_hash，为了保持兼容，我们可以直接增加这个 wrapper
+        std::string get_base_hash(const std::string& peer_id, const std::string& path);
+
+        // 记录同步成功 (更新 Base Hash)
+        void record_sync_success(const std::string& peer_id, const std::string& path, const std::string& hash);
+
     private:
         // --- 供 UpdateListener 调用的内部方法 ---
         friend class UpdateListener;

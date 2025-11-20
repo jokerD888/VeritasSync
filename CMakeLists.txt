@@ -192,8 +192,10 @@ add_executable(unit_tests
     tests/test_sync_logic.cpp 
     tests/test_protocol.cpp
     tests/test_hashing.cpp
+    tests/test_database.cpp
     src/peer/SyncManager.cpp 
     src/peer/Hashing.cpp
+    src/peer/Database.cpp
 )
 
 # 包含头文件路径
@@ -205,7 +207,8 @@ target_link_libraries(unit_tests PRIVATE
     GTest::gtest_main
     nlohmann_json::nlohmann_json
     spdlog::spdlog 
-    OpenSSL::Crypto # Hashing 需要
+    OpenSSL::Crypto
+    unofficial::sqlite3::sqlite3
 )
 
 # 注册测试

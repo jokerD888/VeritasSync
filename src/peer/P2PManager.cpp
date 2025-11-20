@@ -21,6 +21,14 @@
 #include <boost/asio/detail/socket_ops.hpp>
 
 namespace VeritasSync {
+bool can_broadcast(SyncRole role, SyncMode mode) {
+    // 如果是 Source，永远可以广播
+    if (role == SyncRole::Source) return true;
+    // 如果是双向模式，Destination 也可以广播
+    if (mode == SyncMode::BiDirectional) return true;
+    // 否则(单向模式下的 Destination) 禁止广播
+    return false;
+}
 
 uint16_t read_uint16(const char*& data, size_t& len) {
     if (len < sizeof(uint16_t)) return 0;
@@ -66,7 +74,7 @@ static const int GCM_TAG_LEN = 16;
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
 void P2PManager::broadcast_current_state() {
-    if (m_role != SyncRole::Source) return;
+    if (!can_broadcast(m_role, m_mode)) return;
     if (!m_state_manager) return;
 
     // 异步投递任务到线程池，避免阻塞主网络线程
@@ -106,7 +114,7 @@ void P2PManager::broadcast_current_state() {
     });
 }
 void P2PManager::broadcast_file_update(const FileInfo& file_info) {
-    if (m_role != SyncRole::Source) return;
+    if (!can_broadcast(m_role, m_mode)) return;
     g_logger->info("[P2P] (Source) 广播增量更新: {}", file_info.path);
     nlohmann::json msg;
     msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
@@ -114,7 +122,7 @@ void P2PManager::broadcast_file_update(const FileInfo& file_info) {
     send_over_kcp(msg.dump());
 }
 void P2PManager::broadcast_file_delete(const std::string& relative_path) {
-    if (m_role != SyncRole::Source) return;
+    if (!can_broadcast(m_role, m_mode)) return;
     g_logger->info("[P2P] (Source) 广播增量删除: {}", relative_path);
     nlohmann::json msg;
     msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE;
@@ -693,8 +701,11 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
             g_logger->error("[P2P] 处理KCP JSON消息时发生错误: {}", e.what());
         }
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
-        if (m_role == SyncRole::Destination) {
-            m_transfer_manager->handle_chunk(payload);
+        //  允许双向传输 (Destination 或 双向模式 均可接收数据)
+        if (m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional) {
+            // [修改] 传入 peer_id (from_peer 可能为 nullptr，需判空)
+            std::string sender_id = from_peer ? from_peer->peer_id : "";
+            m_transfer_manager->handle_chunk(payload, sender_id);
         }
     } else {
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);
@@ -769,34 +780,108 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
         }
     }
 }
+// src/peer/P2PManager.cpp
+
 void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination) return;
+    //  权限检查：
+    // 1. 如果我是 Destination，我当然要处理更新。
+    // 2. 如果是双向模式 (BiDirectional)，无论我是 Source 还是 Destination，我都要处理更新。
+    // 3. 只有在 单向模式且我是 Source 时，才忽略更新。
+    if (m_role != SyncRole::Source || m_mode == SyncMode::BiDirectional) {
+        // 允许处理
+    } else {
+        // 单向模式的 Source，忽略 update
+        return;
+    }
+
     FileInfo remote_info;
     try {
         remote_info = payload.get<FileInfo>();
     } catch (const std::exception& e) {
-        g_logger->error("[KCP] (Destination) 解析 file_update 失败: {}", e.what());
+        g_logger->error("[KCP] 解析 file_update 失败: {}", e.what());
         return;
     }
-    g_logger->info("[KCP] (Destination) 收到增量更新: {}", remote_info.path);
+
+    std::string peer_id = from_peer ? from_peer->peer_id : "";
+    if (peer_id.empty()) return;
+
+    //  --- 1. 拦截回声 (Echo Check) ---
+    // 检查这是否是我们刚刚发给对方的文件（防止死循环）
+    if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
+        g_logger->debug("[Sync] 拦截回声 (Echo): {} 来自 {}", remote_info.path, peer_id);
+        return;
+    }
+
+    g_logger->info("[P2P] 收到更新请求: {}", remote_info.path);
+
     std::filesystem::path relative_path(
         std::u8string_view(reinterpret_cast<const char8_t*>(remote_info.path.c_str()), remote_info.path.length()));
     std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-    std::error_code ec;
+
     bool should_request = false;
-    if (!std::filesystem::exists(full_path, ec) || ec) {
-        g_logger->info("[Sync] -> 本地不存在, 需要请求。");
+    std::error_code ec;
+
+    //  --- 2. 冲突检测 (Conflict Resolution) ---
+
+    if (!std::filesystem::exists(full_path, ec)) {
+        // 情况 0: 本地没有该文件 -> 直接请求 (Create/New)
+        g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
         should_request = true;
     } else {
-        std::string local_hash = Hashing::CalculateSHA256(full_path);
-        if (local_hash != remote_info.hash) {
-            g_logger->info("[Sync] -> 哈希不匹配 (本地: {} vs 远程: {}), 需要请求。", local_hash.substr(0, 7),
-                           remote_info.hash.substr(0, 7));
+        // 获取三方 Hash 进行比对
+        std::string remote_hash = remote_info.hash;
+        std::string local_hash = Hashing::CalculateSHA256(full_path);                       // 实时计算本地 Hash
+        std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);  // 从数据库获取上次同步状态
+
+        if (local_hash == remote_hash) {
+            // 情况 B: 内容完全一致 (Duplicate/Echo)
+            g_logger->info("[Sync] 内容一致，无需更新: {}", remote_info.path);
+            // 即使不下载，也要更新 Base Hash，确保数据库记录最新状态
+            m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+            return;
+        }
+
+        // 关键：冲突判定逻辑
+        if (base_hash.empty() || local_hash == base_hash) {
+            // 情况 A: 正常更新 (Fast-forward)
+            // Base为空(第一次同步) 或者 Local等于Base(本地没动过)
+            // 说明只有远程变了 -> 安全覆盖
+            g_logger->info("[Sync] 正常更新 (Local==Base): {}", remote_info.path);
             should_request = true;
         } else {
-            g_logger->info("[Sync] -> 哈希匹配, 已是最新。");
+            // 情况 C: 冲突 (Conflict)!!!
+            // Local != Base (本地修改过) 且 Local != Remote (和远程不一样)
+            g_logger->warn("[Sync] ⚠️ 检测到冲突: {}", remote_info.path);
+            g_logger->warn("       Base: {}...", base_hash.substr(0, 6));
+            g_logger->warn("       Local: {}...", local_hash.substr(0, 6));
+            g_logger->warn("       Remote: {}...", remote_hash.substr(0, 6));
+
+            // 执行 “保留冲突文件” 策略 (Rename Local)
+            auto now = std::chrono::system_clock::now();
+            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+            std::string filename = relative_path.stem().string();
+            std::string ext = relative_path.extension().string();
+            // 构造冲突文件名: filename.conflict.12345678.ext
+            std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
+
+            std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
+
+            std::error_code ren_ec;
+            std::filesystem::rename(full_path, conflict_path, ren_ec);
+
+            if (!ren_ec) {
+                g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
+                // 重命名成功后，原路径就“空”了，可以请求远程文件来填补位置
+                should_request = true;
+            } else {
+                g_logger->error("[Sync] 冲突处理失败 (无法重命名): {}", ren_ec.message());
+                // 如果无法重命名，为了保护本地数据，我们拒绝更新
+                return;
+            }
         }
     }
+
     if (should_request) {
         nlohmann::json request_msg;
         request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;

@@ -173,6 +173,13 @@
             background: #e0e7ff;
             color: #3730a3
         }
+        
+        /* 双向模式标签样式 */
+        .role-bi {
+            background: #f3e8ff;
+            color: #6b21a8;
+            border: 1px solid #e9d5ff;
+        }
 
         .task-body {
             padding: 1rem;
@@ -351,6 +358,47 @@
                 transform: rotate(360deg)
             }
         }
+
+        /* --- 新增美化样式 --- */
+
+        /* 1. 状态呼吸灯动画 */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        .dot.online {
+            animation: pulse-green 2s infinite;
+        }
+
+        /* 2. 进度条美化 */
+        .progress-track {
+            background: #e5e7eb;
+            height: 8px;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 6px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(45deg, var(--primary) 25%, #3b82f6 25%, #3b82f6 50%, var(--primary) 50%, var(--primary) 75%, #3b82f6 75%, #3b82f6);
+            background-size: 20px 20px;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+            animation: stripe-move 1s linear infinite;
+        }
+        @keyframes stripe-move {
+            0% { background-position: 0 0; }
+            100% { background-position: 20px 20px; }
+        }
+
+        /* 3. 日志彩色高亮 */
+        .log-line { font-family: 'Consolas', monospace; white-space: pre-wrap; border-bottom: 1px solid #2d2d2d; padding: 2px 0; }
+        .log-info { color: #a7f3d0; }   /* 浅绿 */
+        .log-warn { color: #fcd34d; }   /* 黄色 */
+        .log-error { color: #fca5a5; font-weight: bold; } /* 浅红 */
+        .log-debug { color: #9ca3af; }  /* 灰色 */
+        .log-time { color: #6b7280; margin-right: 8px; }
     </style>
 </head>
 
@@ -375,7 +423,7 @@
                 <div class="card">
                     <div style="color:var(--sub);font-size:0.875rem">Tracker</div>
                     <div class="stat-val">
-                        <div class="dot"></div> 在线
+                        <div class="dot online"></div> 在线
                     </div>
                     <div style="font-size:12px;color:var(--sub);margin-top:4px" id="display-tracker-addr">连接中...</div>
                 </div>
@@ -432,12 +480,18 @@
         <div class="modal-box">
             <h2 style="margin-bottom:1.5rem">新建任务</h2>
             <div class="form-group"><label>Sync Key</label>
-                <div class="input-group"><input id="newKey" class="form-input" placeholder="例如：project-01"><button
-                        class="btn" onclick="genKey()" style="margin-top:4px">🎲 生成</button></div>
+                <div class="input-group">
+                    <input id="newKey" class="form-input" type="text" autocomplete="off" data-lpignore="true" name="veritas_sync_key_field" placeholder="例如：project-01">
+                    <button class="btn" onclick="genKey()" style="margin-top:4px">🎲 生成</button>
+                </div>
             </div>
             <div class="form-group"><label>角色</label><select id="newRole" class="form-input">
                     <option value="source">Source (发送)</option>
                     <option value="destination">Destination (接收)</option>
+                </select></div>
+            <div class="form-group"><label>同步模式</label><select id="newMode" class="form-input">
+                    <option value="oneway">➡ 单向同步 (Source -> Dest)</option>
+                    <option value="bidirectional">🔁 双向同步 (Source <-> Dest)</option>
                 </select></div>
             <div class="form-group"><label>路径</label>
                 <div class="input-group"><input id="newFolder" class="form-input"><button class="btn"
@@ -479,14 +533,30 @@
                 if (c.tracker_host) {
                     id('display-tracker-addr').innerText = `${c.tracker_host}:${c.tracker_port}`;
                 }
-                id('task-container').innerHTML = c.tasks.map((t, i) => `
-        <div class="task-card"><div class="task-header"><span>📁 ${t.sync_folder.split(/[\\/]/).pop() || 'Root'}</span><span class="role ${t.role === 'source' ? 'role-src' : 'role-dst'}">${t.role}</span></div>
-        <div class="task-body"><div class="info-item"><div class="info-label">KEY</div><div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div></div><div class="info-item"><div class="info-label">PATH</div><div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div></div></div>
-        <div class="task-footer"><button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button><button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button><button class="btn btn-danger" onclick="delTask(${i})">🗑</button></div></div>`).join('') || '<div style="padding:2rem;text-align:center;color:#999">暂无任务</div>';
+                id('task-container').innerHTML = c.tasks.map((t, i) => {
+                    // 解析模式并生成标签
+                    const isBi = t.mode === 'bidirectional';
+                    const modeBadge = isBi 
+                        ? `<span class="role role-bi" style="margin-right:4px">🔁 双向</span>` 
+                        : `<span class="role" style="background:#eee;color:#555;margin-right:4px">➡ 单向</span>`;
+                            
+                    return `
+        <div class="task-card">
+            <div class="task-header">
+                <span>📁 ${t.sync_folder.split(/[\/]/).pop() || 'Root'}</span>
+                <div>
+                    ${modeBadge}
+                    <span class="role ${t.role === 'source' ? 'role-src' : 'role-dst'}">${t.role}</span>
+                </div>
+            </div>
+            <div class="task-body"><div class="info-item"><div class="info-label">KEY</div><div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div></div><div class="info-item"><div class="info-label">PATH</div><div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div></div></div>
+            <div class="task-footer"><button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button><button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button><button class="btn btn-danger" onclick="delTask(${i})">🗑</button></div>
+        </div>`;
+                }).join('') || '<div style="padding:2rem;text-align:center;color:#999">暂无任务</div>';
             } catch (e) { console.error(e) }
         }
 
-        // 新增：加载设置数据回填到表单
+        // 加载设置数据回填到表单
         async function loadSettings() {
             try {
                 const r = await fetch('/api/config');
@@ -508,10 +578,58 @@
         function closeLogModal() { id('log-modal').classList.remove('open'); }
         async function openFolder(i) { try { const r = await fetch(`/api/tasks/${i}/open`, { method: 'POST' }); if (!r.ok) alert('打开失败'); } catch (e) { } }
         async function pickFolder() { const b = event.target; b.disabled = true; try { const r = await fetch('/api/utils/pick_folder', { method: 'POST' }); const d = await r.json(); if (d.path) id('newFolder').value = d.path; } catch (e) { } b.disabled = false; }
-        async function addTask() { const k = id('newKey').value, r = id('newRole').value, f = id('newFolder').value; if (!k || !f) return alert('不完整'); await fetch('/api/tasks', { method: 'POST', body: JSON.stringify({ sync_key: k, role: r, sync_folder: f }) }); closeModal(); location.reload(); }
+        async function addTask() { 
+            const k = id('newKey').value;
+            const r = id('newRole').value;
+            const f = id('newFolder').value;
+            const m = id('newMode').value; // 获取模式
+            
+            if (!k || !f) return alert('信息不完整'); 
+            
+            await fetch('/api/tasks', { 
+                method: 'POST', 
+                body: JSON.stringify({ 
+                    sync_key: k, 
+                    role: r, 
+                    sync_folder: f,
+                    mode: m // 发送模式字段
+                }) 
+            }); 
+            
+            closeModal(); 
+            location.reload(); 
+        }
         async function delTask(i) { if (confirm('删除?')) { await fetch(`/api/tasks/${i}`, { method: 'DELETE' }); location.reload(); } }
         async function fetchGlobalLog() { const r = await fetch('/api/log'); rawLog = await r.text(); renderLog(); }
-        function renderLog() { const f = id('logFilter').value.toLowerCase(), e = id('global-log-area'); e.textContent = f ? rawLog.split('\n').filter(l => l.toLowerCase().includes(f)).join('\n') : rawLog; if (id('autoScroll').checked) e.scrollTop = e.scrollHeight; }
+        // 增强版日志渲染
+        function renderLog() {
+            const f = id('logFilter').value.toLowerCase();
+            const e = id('global-log-area');
+            
+            // 简单的 HTML 转义防止 XSS (虽然日志通常是安全的)
+            const escapeHtml = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+            const lines = rawLog.split('\n');
+            let html = '';
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                if (f && !line.toLowerCase().includes(f)) continue;
+
+                let cls = 'log-info';
+                if (line.includes('[error]') || line.includes('Error') || line.includes('critical')) cls = 'log-error';
+                else if (line.includes('[warn]')) cls = 'log-warn';
+                else if (line.includes('[debug]')) cls = 'log-debug';
+
+                // 尝试简单高亮时间戳 (假设格式 [2023-...])
+                const formattedLine = escapeHtml(line).replace(/^\[(.*?)\]/, '<span class="log-time">[$1]</span>');
+                
+                html += `<div class="log-line ${cls}">${formattedLine}</div>`;
+            }
+
+            e.innerHTML = html; // 使用 innerHTML 渲染颜色
+            if (id('autoScroll').checked) e.scrollTop = e.scrollHeight;
+        }
         async function viewTaskLog(i) { const r = await fetch(`/api/tasks/${i}/log`); id('task-log-content').innerText = await r.text(); id('log-modal').classList.add('open'); }
         function copy(t) { navigator.clipboard.writeText(t).then(() => alert('已复制')); }
         function openModal() { id('add-modal').classList.add('open'); }
@@ -528,19 +646,20 @@
                 const data = await r.json();
                 const el = id('transfer-container');
                 if (data.length === 0) {
-                    el.innerHTML = '暂无活跃传输';
+                    el.innerHTML = '<div style="text-align:center;padding:1rem;color:#999">💤 暂无活跃传输</div>';
                 } else {
                     el.innerHTML = data.map(d => `
-                        <div style="margin-bottom:10px">
-                            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-                                <span>${d.path}</span>
+                        <div style="margin-bottom:12px">
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:0.9rem">
+                                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%" title="${d.path}">${d.path}</span>
                                 <span style="font-weight:bold;color:var(--primary)">${d.progress.toFixed(1)}%</span>
                             </div>
-                            <div style="background:#e5e7eb;height:6px;border-radius:3px;overflow:hidden">
-                                <div style="background:var(--primary);height:100%;width:${d.progress}%"></div>
+                            <div class="progress-track">
+                                <div class="progress-fill" style="width:${d.progress}%"></div>
                             </div>
-                            <div style="font-size:12px;color:#999;margin-top:2px">
-                                任务: ${d.key} | 块: ${d.recv}/${d.total}
+                            <div style="font-size:11px;color:#999;margin-top:4px;display:flex;justify-content:space-between">
+                                <span>任务: ${d.key.substring(0, 8)}...</span>
+                                <span>块: ${d.recv}/${d.total}</span>
                             </div>
                         </div>
                     `).join('');

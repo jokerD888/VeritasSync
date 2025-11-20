@@ -8,11 +8,17 @@
 
 namespace VeritasSync {
 
+enum class SyncMode {
+    OneWay,        // 单向：仅 Source -> Destination
+    BiDirectional  // 双向：Source <-> Destination
+};
+
 // 单个同步任务的结构
 struct SyncTask {
     std::string sync_key;
-    std::string role;  // "source" or "destination"
+    std::string role;  // "source" or "destination" (在双向模式下主要决定谁先发起连接，或作为逻辑标识)
     std::string sync_folder;
+    SyncMode mode = SyncMode::OneWay;
 };
 
 // 顶级配置结构
@@ -48,19 +54,22 @@ struct Config {
 };
 
 // --- nlohmann/json 集成 ---
+NLOHMANN_JSON_SERIALIZE_ENUM(SyncMode, {{SyncMode::OneWay, "oneway"}, {SyncMode::BiDirectional, "bidirectional"}})
 
 inline void to_json(nlohmann::json& j, const SyncTask& task) {
-    j = nlohmann::json{{"sync_key", task.sync_key},
-                       {"role", task.role},
-                       //    {"p2p_port", task.p2p_port}, // 移除
-                       {"sync_folder", task.sync_folder}};
+    j = nlohmann::json{
+        {"sync_key", task.sync_key}, {"role", task.role}, {"sync_folder", task.sync_folder}, {"mode", task.mode}};
 }
 
 inline void from_json(const nlohmann::json& j, SyncTask& task) {
     j.at("sync_key").get_to(task.sync_key);
     j.at("role").get_to(task.role);
-    // j.at("p2p_port").get_to(task.p2p_port); // 移除
     j.at("sync_folder").get_to(task.sync_folder);
+    if (j.contains("mode")) {
+        j.at("mode").get_to(task.mode);
+    } else {
+        task.mode = SyncMode::OneWay;
+    }
 }
 
 inline void to_json(nlohmann::json& j, const Config& config) {

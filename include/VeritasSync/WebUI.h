@@ -153,6 +153,13 @@ private:
                 task.role = j.at("role").get<std::string>();
                 task.sync_folder = j.at("sync_folder").get<std::string>();
 
+                // [新增] 解析同步模式 (依赖 Config.h 中的 JSON 序列化宏)
+                if (j.contains("mode")) {
+                    task.mode = j.at("mode").get<SyncMode>();
+                } else {
+                    task.mode = SyncMode::OneWay;  // 默认单向
+                }
+
                 std::lock_guard<std::mutex> lock(m_config_mutex);
                 m_config.tasks.push_back(task);
 
@@ -160,7 +167,8 @@ private:
                     res.set_content("{\"success\":true}", "application/json");
                 else
                     res.status = 500;
-            } catch (...) {
+            } catch (const std::exception& e) {
+                if (g_logger) g_logger->error("[WebUI] Add Task Failed: {}", e.what());
                 res.status = 400;
             }
         });
@@ -303,15 +311,36 @@ private:
     }
 
     static void open_folder_in_os(const std::string& p) {
-        std::string cmd;
+        // 1. 先将 UTF-8 字符串转换为 filesystem::path 对象
+        //    (复用我们之前在 main.cpp 里用过的逻辑，确保中文不乱码)
+        std::filesystem::path path_obj;
+        try {
 #ifdef _WIN32
-        cmd = "explorer \"" + p + "\"";
-#elif defined(__APPLE__)
-        cmd = "open \"" + p + "\"";
+            // Windows: UTF-8 string -> u8string -> path
+            path_obj = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(p.c_str())));
 #else
-        cmd = "xdg-open \"" + p + "\"";
+            path_obj = std::filesystem::path(p);
 #endif
+            // 2. 转换为绝对路径 (解决 explorer 对相对路径支持不佳的问题)
+            path_obj = std::filesystem::absolute(path_obj);
+        } catch (...) {
+            if (g_logger) g_logger->error("[WebUI] 路径解析失败: {}", p);
+            return;
+        }
+
+#ifdef _WIN32
+        // Windows: 使用 ShellExecuteW (Unicode API)
+        // path_obj.c_str() 在 Windows 上返回 const wchar_t*，正是 ShellExecuteW 需要的
+        ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        // macOS
+        std::string cmd = "open \"" + path_obj.string() + "\"";
         system(cmd.c_str());
+#else
+        // Linux
+        std::string cmd = "xdg-open \"" + path_obj.string() + "\"";
+        system(cmd.c_str());
+#endif
     }
 
     static void restart_application() {

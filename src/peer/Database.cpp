@@ -9,6 +9,12 @@
 namespace VeritasSync {
 
 Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.string()) {
+#ifdef _WIN32
+    std::u8string u8 = db_path.u8string();
+    m_db_path = std::string(reinterpret_cast<const char*>(u8.c_str()));
+#else
+    m_db_path = db_path.string();
+#endif
     // 打开数据库 (如果不存在则创建)
     int rc = sqlite3_open(m_db_path.c_str(), &m_db);
     if (rc) {
@@ -34,20 +40,33 @@ Database::~Database() {
 }
 
 void Database::init_schema() {
-    const char* sql =
+    // 1. files 表
+    const char* sql_files =
         "CREATE TABLE IF NOT EXISTS files ("
         "  path TEXT PRIMARY KEY,"
         "  hash TEXT NOT NULL,"
         "  mtime INTEGER NOT NULL"
-        ");"
-        // 创建索引可以加速路径查找 (主键已有默认索引，这里作为演示)
-        // "CREATE INDEX IF NOT EXISTS idx_path ON files(path);"
-        ;
+        ");";
+
+    // 2. sync_history 表
+    // 记录: 我们最后一次成功发送给 peer_id 的 path 文件的 hash
+    const char* sql_history =
+        "CREATE TABLE IF NOT EXISTS sync_history ("
+        "  peer_id TEXT,"
+        "  path TEXT,"
+        "  hash TEXT,"
+        "  ts INTEGER,"
+        "  PRIMARY KEY(peer_id, path)"
+        ");";
 
     char* errMsg = nullptr;
-    int rc = sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg);
-    if (rc != SQLITE_OK) {
-        g_logger->error("[Database] SQL 错误: {}", errMsg);
+
+    // 执行建表
+    sqlite3_exec(m_db, sql_files, nullptr, nullptr, &errMsg);
+    sqlite3_exec(m_db, sql_history, nullptr, nullptr, &errMsg);
+
+    if (errMsg) {
+        g_logger->error("[Database] SQL Error: {}", errMsg);
         sqlite3_free(errMsg);
     }
 }
@@ -61,14 +80,50 @@ void Database::prepare_statements() {
 
     const char* sql_delete = "DELETE FROM files WHERE path = ?;";
     sqlite3_prepare_v2(m_db, sql_delete, -1, &m_stmt_delete, nullptr);
+
+    // 记录发送历史 (Upsert)
+    const char* sql_hist_update = "INSERT OR REPLACE INTO sync_history (peer_id, path, hash, ts) VALUES (?, ?, ?, ?);";
+    sqlite3_prepare_v2(m_db, sql_hist_update, -1, &m_stmt_hist_update, nullptr);
+
+    // 查询发送历史
+    const char* sql_hist_get = "SELECT hash FROM sync_history WHERE peer_id = ? AND path = ?;";
+    sqlite3_prepare_v2(m_db, sql_hist_get, -1, &m_stmt_hist_get, nullptr);
 }
 
 void Database::finalize_statements() {
     if (m_stmt_get) sqlite3_finalize(m_stmt_get);
     if (m_stmt_update) sqlite3_finalize(m_stmt_update);
     if (m_stmt_delete) sqlite3_finalize(m_stmt_delete);
+    if (m_stmt_hist_update) sqlite3_finalize(m_stmt_hist_update);
+    if (m_stmt_hist_get) sqlite3_finalize(m_stmt_hist_get);
 }
 
+void Database::update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_hist_update) return;
+
+    sqlite3_reset(m_stmt_hist_update);
+    sqlite3_bind_text(m_stmt_hist_update, 1, peer_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_hist_update, 2, path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_hist_update, 3, hash.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(m_stmt_hist_update, 4, std::time(nullptr));  // 当前时间戳
+
+    sqlite3_step(m_stmt_hist_update);
+}
+std::string Database::get_last_sent_hash(const std::string& peer_id, const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_hist_get) return "";
+
+    sqlite3_reset(m_stmt_hist_get);
+    sqlite3_bind_text(m_stmt_hist_get, 1, peer_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_hist_get, 2, path.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(m_stmt_hist_get) == SQLITE_ROW) {
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_hist_get, 0));
+        return val ? std::string(val) : "";
+    }
+    return "";
+}
 std::optional<FileMetadata> Database::get_file(const std::string& rel_path) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_db || !m_stmt_get) return std::nullopt;

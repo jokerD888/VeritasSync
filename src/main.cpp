@@ -55,6 +55,16 @@ void init_logger() {
     }
 }
 
+std::filesystem::path utf8_to_path(const std::string& utf8_str) {
+#ifdef _WIN32
+    // Windows: std::string(UTF-8) -> std::u8string -> std::filesystem::path
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8_str.c_str())));
+#else
+    // Linux/macOS: 默认即为 UTF-8
+    return std::filesystem::path(utf8_str);
+#endif
+}
+
 class SyncNode {
 public:
     SyncNode(VeritasSync::SyncTask task, const VeritasSync::Config& global_config)
@@ -68,7 +78,11 @@ public:
     void start() {
         VeritasSync::g_logger->info("--- Starting Sync Task [{}] ---", m_task.sync_key);
         VeritasSync::g_logger->info("[Config] Role: {}", m_task.role);
+        // 这里为了日志输出不乱码，仍然打印原始字符串
         VeritasSync::g_logger->info("[Config] Sync Folder: {}", m_task.sync_folder);
+
+        //  1. 使用 utf8_to_path 转换路径，防止中文路径导致崩溃
+        std::filesystem::path sync_path = utf8_to_path(m_task.sync_folder);
 
         VeritasSync::SyncRole role;
         bool is_source;
@@ -83,12 +97,18 @@ public:
             return;
         }
 
+        // 2. 使用转换后的 sync_path 操作文件系统
         // 确保同步目录存在（不清空已有文件，支持重启后继续工作）
-        if (!std::filesystem::exists(m_task.sync_folder)) {
-            std::filesystem::create_directories(m_task.sync_folder);
-            VeritasSync::g_logger->info("[SyncNode] 创建同步目录: {}", m_task.sync_folder);
+        std::error_code ec;
+        if (!std::filesystem::exists(sync_path, ec)) {
+            std::filesystem::create_directories(sync_path, ec);
+            if (ec) {
+                VeritasSync::g_logger->error("[SyncNode] 创建同步目录失败: {}", ec.message());
+                return;  // 目录创建失败则终止该任务
+            }
+            VeritasSync::g_logger->info("[SyncNode] 创建同步目录成功");
         } else {
-            VeritasSync::g_logger->info("[SyncNode] 使用现有同步目录: {}", m_task.sync_folder);
+            VeritasSync::g_logger->info("[SyncNode] 使用现有同步目录");
         }
 
         // 1. 创建 P2PManager (它有自己的线程)
@@ -105,6 +125,8 @@ public:
         // 4. 配置 P2PManager
         m_p2p_manager->set_role(role);
         m_p2p_manager->set_encryption_key(m_task.sync_key);
+        // [新增] 注入同步模式 (用于支持双向同步广播)
+        m_p2p_manager->set_mode(m_task.mode);
 
         // --- 配置 STUN 服务器 ---
         if (!m_global_config.stun_host.empty()) {
@@ -126,6 +148,7 @@ public:
         }
 
         // 5. 创建 StateManager
+        // 注意：StateManager 内部我们会去修改它的构造函数来处理 UTF-8 转换，这里仍传原始 string
         m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source);
 
         // 6. 注入 StateManager

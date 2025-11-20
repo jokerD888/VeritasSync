@@ -1,4 +1,5 @@
-﻿#pragma once
+﻿
+#pragma once
 #include <ikcp.h>
 #include <juice/juice.h>
 
@@ -16,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "VeritasSync/Config.h"
 #include "VeritasSync/CryptoLayer.h"
 #include "VeritasSync/TransferManager.h"
 
@@ -29,10 +31,10 @@
 namespace VeritasSync {
 
 // --- ICE 连接类型枚举 ---
-enum class ConnectionType { 
-    None,   // 未连接
-    P2P,    // 直连 (host 或 srflx)
-    Relay   // 中继 (relay)
+enum class ConnectionType {
+    None,  // 未连接
+    P2P,   // 直连 (host 或 srflx)
+    Relay  // 中继 (relay)
 };
 // -------------------------
 
@@ -60,7 +62,7 @@ struct PeerContext {
 class StateManager;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
-   public:
+public:
     boost::asio::io_context& get_io_context();
     // --- create 不再需要参数 ---
     static std::shared_ptr<P2PManager> create();
@@ -71,6 +73,7 @@ class P2PManager : public std::enable_shared_from_this<P2PManager> {
     void set_state_manager(StateManager* sm);
     void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
+    void set_mode(SyncMode mode) { m_mode = mode; }
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
@@ -140,6 +143,7 @@ private:
     TrackerClient* m_tracker_client = nullptr;
     StateManager* m_state_manager = nullptr;
     SyncRole m_role = SyncRole::Source;
+    SyncMode m_mode = SyncMode::OneWay;
 
     // --- 关键：双向映射 ---
     std::map<juice_agent_t*, std::shared_ptr<PeerContext>> m_peers_by_agent;
