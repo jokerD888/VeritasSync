@@ -4,17 +4,10 @@
 #include <efsw/efsw.hpp>
 #include <iostream>
 
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
-
-static std::filesystem::path utf8_to_path_local(const std::string& utf8_str) {
-#ifdef _WIN32
-    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8_str.c_str())));
-#else
-    return std::filesystem::path(utf8_str);
-#endif
-}
 
 namespace VeritasSync {
 
@@ -37,44 +30,17 @@ namespace VeritasSync {
             }
 
             if (action == efsw::Actions::Moved && !oldFilename.empty()) {
-                // 这是一个重命名，我们必须把 "oldFilename" 也作为一个变更来通知
-                // StateManager 稍后会检查它，发现它 "不存在"，并将其作为 "Delete" 处理
-                std::filesystem::path old_file_path =
-                    std::filesystem::path(std::u8string_view(
-                        reinterpret_cast<const char8_t*>(dir.c_str()), dir.length())) /
-                    std::u8string_view(
-                        reinterpret_cast<const char8_t*>(oldFilename.c_str()),
-                        oldFilename.length());
+                // 拼接路径：Utf8ToPath 确保 dir(UTF-8) 和 filename(UTF-8) 被正确解析为 path
+                std::filesystem::path old_file_path = Utf8ToPath(dir) / Utf8ToPath(oldFilename);
 
-                std::u8string u8_generic_old_path = old_file_path.generic_u8string();
-                std::string old_path_to_store(
-                    reinterpret_cast<const char*>(u8_generic_old_path.c_str()),
-                    u8_generic_old_path.length());
-
-                m_owner->notify_change_detected(old_path_to_store);
-                // 注意：我们没有 'return'，因为我们紧接着要处理 'filename' (新文件)
+                // 转回 UTF-8 存入 map/数据库
+                m_owner->notify_change_detected(PathToUtf8(old_file_path));
             }
 
-            // 1. 使用 std::u8string_view 构造函数，从 efsw 的 UTF-8 字符串正确构造路径
-            std::filesystem::path file_path =
-                std::filesystem::path(std::u8string_view(
-                    reinterpret_cast<const char8_t*>(dir.c_str()), dir.length())) /
-                std::u8string_view(reinterpret_cast<const char8_t*>(filename.c_str()),
-                    filename.length());
-
-            // 2. 将此正确的路径对象转换为可移植的 UTF-8 字符串 (使用
-            // .generic_u8string())
-            std::u8string u8_generic_path = file_path.generic_u8string();
-
-            // 3. 将 u8string 转换回 std::string (字节保持不变) 以便存储在
-            // m_pending_changes 中
-            std::string path_to_store(
-                reinterpret_cast<const char*>(u8_generic_path.c_str()),
-                u8_generic_path.length());
+            std::filesystem::path file_path = Utf8ToPath(dir) / Utf8ToPath(filename);
 
             // 1. 通知 StateManager 将变化暂存
-            //    使用 generic_string() 来获取一个可移植的、使用 / 分隔符的 UTF-8 路径
-            m_owner->notify_change_detected(path_to_store);
+            m_owner->notify_change_detected(PathToUtf8(file_path));
             // ---------------------------------------------------
 
             // 2. 重置防抖计时器
@@ -99,9 +65,9 @@ namespace VeritasSync {
     // --- StateManager 实现 ---
 
     StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher)
-        : m_root_path(std::filesystem::absolute(utf8_to_path_local(root_path))), m_p2p_manager(&p2p_manager) {
+        : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))), m_p2p_manager(&p2p_manager) {
         if (!std::filesystem::exists(m_root_path)) {
-            g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", m_root_path.string());
+            g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
             std::filesystem::create_directory(m_root_path);
         }
 
@@ -121,7 +87,7 @@ namespace VeritasSync {
             m_listener = std::make_unique<UpdateListener>(this);
             m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
             m_file_watcher->watch();
-            g_logger->info("[StateManager] 已启动对目录 '{}' 的实时监控 (Source 模式)。", m_root_path.string());
+            g_logger->info("[StateManager] 已启动对目录 '{}' 的实时监控 (Source 模式)。", PathToUtf8(m_root_path));
         } else {
             g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用。");
         }
@@ -193,8 +159,7 @@ namespace VeritasSync {
 
         for (const auto& full_path_str : changes_to_process) {
             try {
-                std::filesystem::path full_path(std::u8string_view(
-                    reinterpret_cast<const char8_t*>(full_path_str.c_str()), full_path_str.length()));
+                std::filesystem::path full_path = Utf8ToPath(full_path_str);
 
                 if (full_path == m_root_path) continue;
 
@@ -273,7 +238,7 @@ namespace VeritasSync {
     }
 
     void StateManager::scan_directory() {
-        g_logger->info("[StateManager] Scanning directory: {}", m_root_path.string());
+        g_logger->info("[StateManager] Scanning directory: {}", PathToUtf8(m_root_path));
 
         // 1. 加载忽略规则
         m_file_filter.load_rules(m_root_path);
@@ -304,8 +269,7 @@ namespace VeritasSync {
             std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
             if (ec) continue;
 
-            const std::u8string u8_path_str = relative_path.u8string();
-            std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
+            std::string rel_path_str = PathToUtf8(relative_path);
 
             if (rel_path_str.empty()) continue;
 

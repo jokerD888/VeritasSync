@@ -24,6 +24,8 @@
 #include <thread>
 #include <vector>
 
+#include "VeritasSync/EncodingUtils.h"
+
 // 【移除】不再包含嵌入资源头文件
 // #include "embedded_resources.h"
 
@@ -311,33 +313,30 @@ private:
     }
 
     static void open_folder_in_os(const std::string& p) {
-        // 1. 先将 UTF-8 字符串转换为 filesystem::path 对象
-        //    (复用我们之前在 main.cpp 里用过的逻辑，确保中文不乱码)
-        std::filesystem::path path_obj;
+        // 1. 使用 EncodingUtils 的 Utf8ToPath 将 UTF-8 字符串转为 filesystem::path
+        //    这解决了 Windows 下 std::filesystem::path(std::string) 默认视作 ANSI (GBK) 的问题
+        std::filesystem::path path_obj = Utf8ToPath(p);
+
         try {
-#ifdef _WIN32
-            // Windows: UTF-8 string -> u8string -> path
-            path_obj = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(p.c_str())));
-#else
-            path_obj = std::filesystem::path(p);
-#endif
             // 2. 转换为绝对路径 (解决 explorer 对相对路径支持不佳的问题)
             path_obj = std::filesystem::absolute(path_obj);
-        } catch (...) {
-            if (g_logger) g_logger->error("[WebUI] 路径解析失败: {}", p);
+        } catch (const std::exception& e) {
+            if (g_logger) g_logger->error("[WebUI] 路径解析异常: {} ({})", p, e.what());
             return;
         }
 
 #ifdef _WIN32
         // Windows: 使用 ShellExecuteW (Unicode API)
-        // path_obj.c_str() 在 Windows 上返回 const wchar_t*，正是 ShellExecuteW 需要的
+        // 关键点：C++ filesystem::path 在 Windows 下的 .c_str() 方法直接返回 const wchar_t*
+        // 这样可以直接传递给 ShellExecuteW，完美支持中文路径
         ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-        // macOS
+        // macOS: 使用 open 命令
+        // 注意：path_obj.string() 在 macOS 下返回 UTF-8，加上引号处理空格
         std::string cmd = "open \"" + path_obj.string() + "\"";
         system(cmd.c_str());
 #else
-        // Linux
+        // Linux: 使用 xdg-open
         std::string cmd = "xdg-open \"" + path_obj.string() + "\"";
         system(cmd.c_str());
 #endif
@@ -372,11 +371,8 @@ private:
                 if (SUCCEEDED(pfd->GetResult(&psi))) {
                     PWSTR pszPath;
                     if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
-                        int len = WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, NULL, 0, NULL, NULL);
-                        if (len > 0) {
-                            path.resize(len - 1);
-                            WideCharToMultiByte(CP_UTF8, 0, pszPath, -1, &path[0], len, NULL, NULL);
-                        }
+                        std::wstring wPathStr(pszPath);
+                        path = WideToUtf8(wPathStr);
                         CoTaskMemFree(pszPath);
                     }
                     psi->Release();

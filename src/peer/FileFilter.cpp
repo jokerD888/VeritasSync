@@ -3,19 +3,26 @@
 #include <fstream>
 #include <iostream>
 
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Logger.h"
 
 namespace VeritasSync {
 
 // --- 定义默认忽略规则 ---
-static const std::vector<std::string> kDefaultIgnorePatterns = {
-    ".git",           ".git/",             // Git 仓库
-    ".veritas_tmp",                        // 自身临时文件
-    ".veritasignore",                      // 忽略文件本身
-    "*.part",                              // 下载中间文件
-    ".DS_Store",      "Thumbs.db",         // 系统缩略图
-    "build/",         "bin/",      "out/"  // 常见构建目录
-};
+static const std::vector<std::string> kDefaultIgnorePatterns = {".git",
+                                                                ".git/",           // Git 仓库
+                                                                ".veritas_tmp",    // 自身临时文件
+                                                                ".veritasignore",  // 忽略文件本身
+                                                                "*.part",          // 下载中间文件
+                                                                ".DS_Store",
+                                                                "Thumbs.db",  // 系统缩略图
+                                                                "build/",
+                                                                "bin/",
+                                                                "out/",  // 常见构建目录
+                                                                ".veritas.db",
+                                                                ".veritas.db-journal",
+                                                                ".veritas.db-wal",
+                                                                ".veritas.db-shm"};
 
 FileFilter::FileFilter() {
     // 构造时加载默认规则
@@ -50,7 +57,7 @@ void FileFilter::load_rules(const std::filesystem::path& root_path) {
     std::ifstream f(ignore_file);
     if (!f.is_open()) return;
 
-    g_logger->info("[Filter] 加载忽略规则文件: {}", ignore_file.string());
+    g_logger->info("[Filter] 加载忽略规则文件: {}", PathToUtf8(ignore_file));
 
     std::string line;
     while (std::getline(f, line)) {

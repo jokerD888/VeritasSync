@@ -4,6 +4,7 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
 
@@ -27,9 +28,7 @@ std::string sys_err_to_utf8(const boost::system::error_code& ec) {
     LocalFree(messageBuffer);
 
     // 转换为 UTF-8
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wmsg[0], (int)wmsg.size(), NULL, 0, NULL, NULL);
-    std::string utf8_msg(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wmsg[0], (int)wmsg.size(), &utf8_msg[0], size_needed, NULL, NULL);
+    std::string utf8_msg = WideToUtf8(wmsg);
 
     // 移除末尾可能存在的换行符
     while (!utf8_msg.empty() && (utf8_msg.back() == '\r' || utf8_msg.back() == '\n')) {

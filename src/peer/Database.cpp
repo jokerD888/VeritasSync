@@ -4,19 +4,24 @@
 
 #include <iostream>
 
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Logger.h"
 
 namespace VeritasSync {
 
 Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.string()) {
+    // 注意：成员变量 m_db_path 只是为了存个日志用的 string，转成 UTF-8 存起来
+    m_db_path = PathToUtf8(db_path);
+
+    int rc = 0;
 #ifdef _WIN32
-    std::u8string u8 = db_path.u8string();
-    m_db_path = std::string(reinterpret_cast<const char*>(u8.c_str()));
+    // 【关键】Windows 上使用宽字符接口打开数据库
+    std::wstring w_path = Utf8ToWide(m_db_path);
+    rc = sqlite3_open16(w_path.c_str(), &m_db);
 #else
-    m_db_path = db_path.string();
+    // Linux 上直接用 UTF-8
+    rc = sqlite3_open(m_db_path.c_str(), &m_db);
 #endif
-    // 打开数据库 (如果不存在则创建)
-    int rc = sqlite3_open(m_db_path.c_str(), &m_db);
     if (rc) {
         g_logger->error("[Database] 无法打开数据库 {}: {}", m_db_path, sqlite3_errmsg(m_db));
         sqlite3_close(m_db);

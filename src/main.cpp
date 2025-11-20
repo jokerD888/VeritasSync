@@ -177,7 +177,19 @@ private:
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
+    // 1. 设置控制台输入输出为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    // 2. 【新增】启用虚拟终端处理 (让彩色日志正常显示)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+    }
 #endif
     init_logger();
     VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
