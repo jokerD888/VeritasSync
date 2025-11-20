@@ -9,7 +9,7 @@
 ---
 
 <a name="english"></a>
-# VeritasSync (English)
+# VeritasSync
 
 **VeritasSync** is a high-performance P2P file synchronization tool built with modern C++20.
 
@@ -130,7 +130,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ---
 
 <a name="中文"></a>
-# VeritasSync (中文)
+# VeritasSync
 
 **VeritasSync** 是一个高性能、基于现代 C++20 开发的 P2P 文件同步工具。
 
