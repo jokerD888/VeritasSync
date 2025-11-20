@@ -132,16 +132,11 @@ inline Config load_config_or_create_default(const std::string& config_path = "co
         defaultConfig.turn_username = "user";
         defaultConfig.turn_password = "pass";
         // ----------------------
-
-        // 移除 p2p_port
-        defaultConfig.tasks.push_back({"my-key-1", "source", "./SyncNode_A"});
-        defaultConfig.tasks.push_back({"my-key-1", "destination", "./SyncNode_B"});
+        defaultConfig.tasks = {};
 
         std::ofstream o(config_path);
         o << nlohmann::json(defaultConfig).dump(4) << std::endl;
-
-        throw std::runtime_error(
-            "Config file not found. A default 'config.json' has been created. Please edit it and restart.");
+        return defaultConfig;
     }
 }
 

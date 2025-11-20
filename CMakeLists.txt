@@ -44,8 +44,10 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 # ===========================================================
 # 目标 1: veritas_sync (主程序)
 # ===========================================================
-add_executable(veritas_sync
+add_executable(veritas_sync WIN32
+    veritas.rc
     src/main.cpp
+    src/platform/TrayIcon.cpp
     src/peer/Hashing.cpp
     src/peer/TrackerClient.cpp
     src/peer/P2PManager.cpp
@@ -56,6 +58,10 @@ add_executable(veritas_sync
     src/peer/TransferManager.cpp
     src/peer/Database.cpp
 )
+
+if(WIN32)
+    target_link_options(veritas_sync PRIVATE "/ENTRY:mainCRTStartup")
+endif()
 add_custom_command(TARGET veritas_sync POST_BUILD
     # 2. 在 exe 旁边创建一个 web 文件夹
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:veritas_sync>/web

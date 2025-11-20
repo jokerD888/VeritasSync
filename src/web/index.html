@@ -528,12 +528,37 @@
             try {
                 const r = await fetch('/api/config');
                 const c = await r.json();
+                
+                // 更新顶部的任务计数
                 id('task-count').innerText = c.tasks.length;
+                
                 // 更新 Tracker 显示
                 if (c.tracker_host) {
                     id('display-tracker-addr').innerText = `${c.tracker_host}:${c.tracker_port}`;
                 }
-                id('task-container').innerHTML = c.tasks.map((t, i) => {
+
+                const container = id('task-container');
+                
+                // --- 新增：空状态检测与引导 ---
+                if (c.tasks.length === 0) {
+                    container.innerHTML = `
+                        <div style="grid-column: 1 / -1; text-align: center; padding: 4rem 2rem; background: white; border-radius: 1rem; border: 2px dashed var(--border);">
+                            <div style="font-size: 3rem; margin-bottom: 1rem;">👋</div>
+                            <h2 style="color: var(--text); margin-bottom: 0.5rem;">欢迎使用 VeritasSync</h2>
+                            <p style="color: var(--sub); margin-bottom: 2rem; max-width: 400px; margin-left: auto; margin-right: auto;">
+                                您还没有配置任何同步任务。创建一个任务来开始在设备间同步文件吧！
+                            </p>
+                            <button class="btn btn-primary" style="padding: 0.75rem 1.5rem; font-size: 1rem;" onclick="openModal()">
+                                ✨ 创建我的第一个同步任务
+                            </button>
+                        </div>
+                    `;
+                    return;
+                }
+                // ---------------------------
+
+                // 渲染任务列表
+                container.innerHTML = c.tasks.map((t, i) => {
                     // 解析模式并生成标签
                     const isBi = t.mode === 'bidirectional';
                     const modeBadge = isBi 
@@ -549,10 +574,23 @@
                     <span class="role ${t.role === 'source' ? 'role-src' : 'role-dst'}">${t.role}</span>
                 </div>
             </div>
-            <div class="task-body"><div class="info-item"><div class="info-label">KEY</div><div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div></div><div class="info-item"><div class="info-label">PATH</div><div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div></div></div>
-            <div class="task-footer"><button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button><button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button><button class="btn btn-danger" onclick="delTask(${i})">🗑</button></div>
+            <div class="task-body">
+                <div class="info-item">
+                    <div class="info-label">KEY</div>
+                    <div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">PATH</div>
+                    <div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div>
+                </div>
+            </div>
+            <div class="task-footer">
+                <button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button>
+                <button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button>
+                <button class="btn btn-danger" onclick="delTask(${i})">🗑</button>
+            </div>
         </div>`;
-                }).join('') || '<div style="padding:2rem;text-align:center;color:#999">暂无任务</div>';
+                }).join('');
             } catch (e) { console.error(e) }
         }
 

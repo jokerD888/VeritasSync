@@ -15,16 +15,18 @@
 #include <vector>
 
 #include "VeritasSync/Config.h"
+#include "VeritasSync/EncodingUtils.h"  // 引入编码工具
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
+#include "VeritasSync/TrayIcon.h"  // 引入托盘图标
 #include "VeritasSync/WebUI.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <shellapi.h>
-#include <shlobj.h>  // 文件夹选择对话框
+#include <shlobj.h>
 #include <windows.h>
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -55,16 +57,6 @@ void init_logger() {
     }
 }
 
-std::filesystem::path utf8_to_path(const std::string& utf8_str) {
-#ifdef _WIN32
-    // Windows: std::string(UTF-8) -> std::u8string -> std::filesystem::path
-    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8_str.c_str())));
-#else
-    // Linux/macOS: 默认即为 UTF-8
-    return std::filesystem::path(utf8_str);
-#endif
-}
-
 class SyncNode {
 public:
     SyncNode(VeritasSync::SyncTask task, const VeritasSync::Config& global_config)
@@ -81,8 +73,8 @@ public:
         // 这里为了日志输出不乱码，仍然打印原始字符串
         VeritasSync::g_logger->info("[Config] Sync Folder: {}", m_task.sync_folder);
 
-        //  1. 使用 utf8_to_path 转换路径，防止中文路径导致崩溃
-        std::filesystem::path sync_path = utf8_to_path(m_task.sync_folder);
+        // 1. 使用 EncodingUtils 转换路径，防止中文路径导致崩溃
+        std::filesystem::path sync_path = VeritasSync::Utf8ToPath(m_task.sync_folder);
 
         VeritasSync::SyncRole role;
         bool is_source;
@@ -148,7 +140,7 @@ public:
         }
 
         // 5. 创建 StateManager
-        // 注意：StateManager 内部我们会去修改它的构造函数来处理 UTF-8 转换，这里仍传原始 string
+        // 使用 Utf8ToPath 转换路径
         m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source);
 
         // 6. 注入 StateManager
@@ -177,11 +169,11 @@ private:
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
-    // 1. 设置控制台输入输出为 UTF-8
+    // 1. 设置控制台输入输出代码页为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    // 2. 【新增】启用虚拟终端处理 (让彩色日志正常显示)
+    // 2. 启用 ANSI 转义序列支持 (让 spdlog 的颜色在 Windows 10+ 上正常显示)
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut != INVALID_HANDLE_VALUE) {
         DWORD dwMode = 0;
@@ -191,11 +183,10 @@ int main(int argc, char* argv[]) {
         }
     }
 #endif
+
     init_logger();
     VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
-#if defined(_WIN32)
-    VeritasSync::g_logger->info("[System] Windows console output set to UTF-8.");
-#endif
+
     VeritasSync::Config config;
     try {
         config = VeritasSync::load_config_or_create_default("config.json");
@@ -213,21 +204,6 @@ int main(int argc, char* argv[]) {
 
     // 在后台线程启动阻塞的 listen 循环
     std::thread ui_thread([&web_ui]() { web_ui.start(); });
-
-#if defined(_WIN32)
-    // Windows 下自动打开浏览器
-    ShellExecuteA(nullptr, "open", "http://127.0.0.1:8800", nullptr, nullptr, SW_SHOWNORMAL);
-#endif
-
-    if (config.tasks.empty()) {
-        VeritasSync::g_logger->warn("没有配置同步任务。请通过 Web UI (http://127.0.0.1:8800) 添加任务。");
-        VeritasSync::g_logger->info("\n--- 按 Ctrl+C 退出 ---");
-        std::this_thread::sleep_for(std::chrono::hours(24));
-        web_ui.stop();
-        if (ui_thread.joinable()) ui_thread.join();
-        spdlog::shutdown();
-        return 0;
-    }
 
     // 创建同步任务节点
     std::vector<std::unique_ptr<SyncNode>> nodes;
@@ -261,8 +237,69 @@ int main(int argc, char* argv[]) {
     });
     // -----------------------------------
 
+#if defined(_WIN32)
+    // --- 托盘图标逻辑 (仅 Windows) ---
+    VeritasSync::TrayIcon tray;
+
+    // 1. 初始化图标
+    if (!tray.init("VeritasSync - P2P 同步节点")) {
+        VeritasSync::g_logger->error("无法创建系统托盘图标");
+    }
+
+    // 2. 添加菜单：打开 WebUI
+    tray.add_menu_item("🌐 打开控制台", []() {
+        VeritasSync::WebUIServer::open_url("http://127.0.0.1:8800");  // <--- 使用 open_url
+    });
+
+    // 3. 添加菜单：打开同步目录 (如果有任务)
+    if (!config.tasks.empty()) {
+        tray.add_separator();
+        // 仅展示第一个任务的目录，作为快捷入口
+        std::string first_path = config.tasks[0].sync_folder;
+        tray.add_menu_item("📂 打开文件夹",
+                           [first_path]() { VeritasSync::WebUIServer::open_folder_in_os(first_path); });
+    }
+
+    tray.add_separator();
+
+    // 4. 添加菜单：开机自启
+    bool is_auto = VeritasSync::TrayIcon::is_autostart_enabled();
+    tray.add_menu_item(
+        "🚀 开机自启",
+        [&tray]() {
+            bool current = VeritasSync::TrayIcon::is_autostart_enabled();
+            VeritasSync::TrayIcon::set_autostart(!current);
+
+            // 提示用户
+            std::wstring msg = !current ? L"已开启开机自启" : L"已关闭开机自启";
+            MessageBoxW(NULL, msg.c_str(), L"VeritasSync", MB_OK | MB_ICONINFORMATION);
+
+            // 注意：这里实际上应该动态更新菜单的 checked 状态，
+            // 但为了简化实现，目前我们只在启动时读取一次。
+            // 用户重启程序后菜单状态会更新。
+        },
+        is_auto);
+
+    tray.add_separator();
+
+    // 5. 添加菜单：退出
+    tray.add_menu_item("🛑 退出程序", [&tray, &web_ui]() {
+        if (MessageBoxW(NULL, L"确定要退出同步服务吗？", L"VeritasSync", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            web_ui.stop();
+            tray.quit();
+        }
+    });
+
+    VeritasSync::g_logger->info("系统托盘已启动。程序正在后台运行。");
+
+    // 6. 进入 Windows 消息循环 (阻塞主线程，替代 sleep)
+    tray.run_loop();
+
+#else
+    // Linux/Mac 继续使用原来的 Sleep 循环
     VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---");
-    std::this_thread::sleep_for(std::chrono::hours(24));
+    std::this_thread::sleep_for(std::chrono::hours(24000));  // 无限等待
+#endif
 
     // 清理
     web_ui.stop();

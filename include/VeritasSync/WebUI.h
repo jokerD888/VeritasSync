@@ -76,6 +76,79 @@ public:
         std::lock_guard<std::mutex> lock(m_config_mutex);
         return save_config_internal();
     }
+    static void open_folder_in_os(const std::string& p) {
+        // 1. 使用 EncodingUtils 的 Utf8ToPath 将 UTF-8 字符串转为 filesystem::path
+        //    这解决了 Windows 下 std::filesystem::path(std::string) 默认视作 ANSI (GBK) 的问题
+        std::filesystem::path path_obj = Utf8ToPath(p);
+
+        try {
+            // 2. 转换为绝对路径 (解决 explorer 对相对路径支持不佳的问题)
+            path_obj = std::filesystem::absolute(path_obj);
+        } catch (const std::exception& e) {
+            if (g_logger) g_logger->error("[WebUI] 路径解析异常: {} ({})", p, e.what());
+            return;
+        }
+
+#ifdef _WIN32
+        // Windows: 使用 ShellExecuteW (Unicode API)
+        // 关键点：C++ filesystem::path 在 Windows 下的 .c_str() 方法直接返回 const wchar_t*
+        // 这样可以直接传递给 ShellExecuteW，完美支持中文路径
+        ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        // macOS: 使用 open 命令
+        // 注意：path_obj.string() 在 macOS 下返回 UTF-8，加上引号处理空格
+        std::string cmd = "open \"" + path_obj.string() + "\"";
+        system(cmd.c_str());
+#else
+        // Linux: 使用 xdg-open
+        std::string cmd = "xdg-open \"" + path_obj.string() + "\"";
+        system(cmd.c_str());
+#endif
+    }
+
+    static void open_url(const std::string& url) {
+#ifdef _WIN32
+        // URL 不需要转 filesystem path，直接转宽字符即可
+        std::wstring wUrl = Utf8ToWide(url);
+        ShellExecuteW(NULL, L"open", wUrl.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+        std::string cmd = "open \"" + url + "\"";
+        system(cmd.c_str());
+#else
+        std::string cmd = "xdg-open \"" + url + "\"";
+        system(cmd.c_str());
+#endif
+    }
+
+    static std::string pick_folder_dialog() {
+#ifdef _WIN32
+        std::string path;
+        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        IFileDialog* pfd = NULL;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
+            DWORD dwOptions;
+            if (SUCCEEDED(pfd->GetOptions(&dwOptions)))
+                pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
+            if (SUCCEEDED(pfd->Show(NULL))) {
+                IShellItem* psi;
+                if (SUCCEEDED(pfd->GetResult(&psi))) {
+                    PWSTR pszPath;
+                    if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+                        std::wstring wPathStr(pszPath);
+                        path = WideToUtf8(wPathStr);
+                        CoTaskMemFree(pszPath);
+                    }
+                    psi->Release();
+                }
+            }
+            pfd->Release();
+        }
+        CoUninitialize();
+        return path;
+#else
+        return "";
+#endif
+    }
 
 private:
     httplib::Server m_svr;
@@ -312,36 +385,6 @@ private:
         return content;
     }
 
-    static void open_folder_in_os(const std::string& p) {
-        // 1. 使用 EncodingUtils 的 Utf8ToPath 将 UTF-8 字符串转为 filesystem::path
-        //    这解决了 Windows 下 std::filesystem::path(std::string) 默认视作 ANSI (GBK) 的问题
-        std::filesystem::path path_obj = Utf8ToPath(p);
-
-        try {
-            // 2. 转换为绝对路径 (解决 explorer 对相对路径支持不佳的问题)
-            path_obj = std::filesystem::absolute(path_obj);
-        } catch (const std::exception& e) {
-            if (g_logger) g_logger->error("[WebUI] 路径解析异常: {} ({})", p, e.what());
-            return;
-        }
-
-#ifdef _WIN32
-        // Windows: 使用 ShellExecuteW (Unicode API)
-        // 关键点：C++ filesystem::path 在 Windows 下的 .c_str() 方法直接返回 const wchar_t*
-        // 这样可以直接传递给 ShellExecuteW，完美支持中文路径
-        ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-        // macOS: 使用 open 命令
-        // 注意：path_obj.string() 在 macOS 下返回 UTF-8，加上引号处理空格
-        std::string cmd = "open \"" + path_obj.string() + "\"";
-        system(cmd.c_str());
-#else
-        // Linux: 使用 xdg-open
-        std::string cmd = "xdg-open \"" + path_obj.string() + "\"";
-        system(cmd.c_str());
-#endif
-    }
-
     static void restart_application() {
         if (g_logger) g_logger->info("[WebUI] 正在重启...");
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -354,36 +397,6 @@ private:
 #else
         system("./veritas_sync &");
         std::exit(0);
-#endif
-    }
-
-    static std::string pick_folder_dialog() {
-#ifdef _WIN32
-        std::string path;
-        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        IFileDialog* pfd = NULL;
-        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
-            DWORD dwOptions;
-            if (SUCCEEDED(pfd->GetOptions(&dwOptions)))
-                pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
-            if (SUCCEEDED(pfd->Show(NULL))) {
-                IShellItem* psi;
-                if (SUCCEEDED(pfd->GetResult(&psi))) {
-                    PWSTR pszPath;
-                    if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
-                        std::wstring wPathStr(pszPath);
-                        path = WideToUtf8(wPathStr);
-                        CoTaskMemFree(pszPath);
-                    }
-                    psi->Release();
-                }
-            }
-            pfd->Release();
-        }
-        CoUninitialize();
-        return path;
-#else
-        return "";
 #endif
     }
 };
