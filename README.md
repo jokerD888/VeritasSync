@@ -19,6 +19,7 @@ It is designed to solve file synchronization challenges across LAN/WAN environme
 
 * **Reliable P2P Transmission**: Built on **KCP** (Reliable UDP), providing lower latency and higher throughput than TCP in weak network environments.
 * **Robust NAT Traversal**: Integrated **LibJuice** (ICE/STUN/TURN) enables direct device connection in complex network environments by automatically detecting the best path (P2P direct or Relay).
+* **System Tray Integration**: Native Windows **System Tray** support. Run quietly in the background with Auto-start capability and quick access menu.
 * **UTF-8 Everywhere**: Implements a **UTF-8 Everywhere** strategy, completely resolving garbled characters in paths, console output issues, and cross-platform filename compatibility on Windows.
 * **Bi-directional Sync**: Supports both One-Way (Source -> Destination) and Bi-directional synchronization modes to flexibly meet backup and collaboration needs.
 * **O(1) Memory Usage**: Uses **Streaming Transfer** mechanisms. Memory usage remains in the KB range regardless of file size (e.g., 10GB+ videos), eliminating OOM (Out of Memory) issues.
@@ -38,6 +39,7 @@ It is designed to solve file synchronization challenges across LAN/WAN environme
 * **Transport Protocol**: KCP (ARQ Reliable UDP)
 * **Metadata Storage**: **SQLite3**
 * **File Watching**: efsw (Entangled File System Watcher)
+* **System Interaction**: Win32 API (Tray Icon), Shell API
 * **Serialization**: nlohmann/json
 * **Crypto & Hashing**: OpenSSL
 * **Logging**: spdlog (Async logging with Virtual Terminal support)
@@ -72,12 +74,22 @@ cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<path_to_vcpkg>/scripts/buildsystems/
 cmake --build build --config Release
 ```
 
+### Packaging (Create Installer)
+
+To generate a Windows Installer (`.exe`) and Portable Zip:
+
+```bash
+cd build
+cpack -C Release
+```
+Artifacts will be generated in the `build/` directory.
+
 ### Running
 
-After compilation, the following executables will be generated in the `bin/` directory:
-
-1.  **`veritas_tracker`**: Signaling server (handles peer discovery and SDP exchange).
-2.  **`veritas_sync`**: Synchronization client node.
+* **Developer Mode**: Run `./build/release/veritas_sync.exe`.
+* **User Mode**: Install via the generated `.exe`, then launch from Start Menu/Desktop.
+    * The app runs in the background. Check the **System Tray** (bottom-right corner) for the icon.
+    * Right-click the tray icon to Open WebUI, Configure Auto-start, or Exit.
 
 #### 1. Start Tracker
 
@@ -109,12 +121,15 @@ VeritasSync/
 ├── include/VeritasSync/   # Headers
 │   ├── EncodingUtils.h    # Cross-platform UTF-8 encoding utilities
 │   ├── P2PManager.h       # Core P2P connection & transfer logic
+│   ├── TrayIcon.h         # System Tray Interface
 │   ├── Database.h         # SQLite wrapper
 │   └── ...
 ├── src/
 │   ├── peer/              # Client core implementation
 │   │   ├── StateManager.cpp # State management & file scanning
 │   │   └── ...
+│   ├── platform/          # OS-specific implementations
+│   │   └── TrayIcon.cpp   # Windows System Tray implementation
 │   ├── tracker/           # Signaling server implementation
 │   └── main.cpp           # Client entry point
 ├── web/                   # WebUI assets
@@ -140,6 +155,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 * **可靠的 P2P 传输**: 基于应用层协议封装 **KCP** (Reliable UDP)，在弱网环境下提供比 TCP 更低延迟、更高吞吐的传输体验。
 * **强大的 NAT 穿透**: 集成 **LibJuice** (ICE/STUN/TURN)，支持复杂网络环境下的设备直连，自动探测最佳传输路径（P2P 直连或中继）。
+* **系统托盘集成**: 原生 Windows **系统托盘**支持。程序静默后台运行，支持开机自启、右键快捷菜单。
 * **全链路 UTF-8 支持**: 采用 **UTF-8 Everywhere** 策略，彻底解决了 Windows 平台下的中文路径乱码、控制台显示异常以及跨平台文件名兼容性问题。
 * **双向同步支持**: 支持单向（Source -> Destination）及双向（Bi-directional）同步模式，灵活满足备份与协作需求。
 * **O(1) 内存大文件传输**: 采用 **流式传输 (Streaming Transfer)** 机制，无论文件多大（如 10GB+ 视频），内存占用始终保持在 KB 级别，彻底解决了内存溢出 (OOM) 问题。
@@ -159,6 +175,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 * **传输协议**: KCP (ARQ Reliable UDP)
 * **元数据存储**: **SQLite3**
 * **文件监控**: efsw (Entangled File System Watcher)
+* **系统交互**: Win32 API (托盘图标), Shell API
 * **序列化**: nlohmann/json
 * **加密与哈希**: OpenSSL
 * **日志**: spdlog (支持虚拟终端的异步日志)
@@ -193,12 +210,22 @@ cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<path_to_vcpkg>/scripts/buildsystems/
 cmake --build build --config Release
 ```
 
-### 运行
+### 打包发布 (生成安装程序)
 
-编译完成后，`bin/` 目录下会生成以下可执行文件：
+编译完成后，运行以下命令生成 Windows 安装包 (`.exe`) 和绿色版 (`.zip`)：
 
-1.  **`veritas_tracker`**: 信令服务器（负责节点发现和交换 SDP）。
-2.  **`veritas_sync`**: 同步客户端节点。
+```bash
+cd build
+cpack -C Release
+```
+生成的文件将位于 `build/` 目录下。
+
+### 运行说明
+
+* **开发者模式**: 直接运行 `./build/release/veritas_sync.exe`。
+* **用户模式**: 运行生成的安装包进行安装。
+    * 启动后程序会自动隐藏到**系统托盘**（任务栏右下角）。
+    * **右键点击**托盘图标可进行操作：打开控制台 (WebUI)、打开文件夹、设置开机自启或退出程序。
 
 #### 1. 启动 Tracker
 
@@ -230,12 +257,15 @@ VeritasSync/
 ├── include/VeritasSync/   # 头文件
 │   ├── EncodingUtils.h    # UTF-8 跨平台编码转换工具
 │   ├── P2PManager.h       # P2P 连接与数据传输核心
+│   ├── TrayIcon.h         # 系统托盘接口
 │   ├── Database.h         # SQLite 数据库封装
 │   └── ...
 ├── src/
 │   ├── peer/              # 客户端核心实现
 │   │   ├── StateManager.cpp # 状态管理与文件扫描
 │   │   └── ...
+│   ├── platform/          # 平台相关实现
+│   │   └── TrayIcon.cpp   # Windows 系统托盘实现
 │   ├── tracker/           # 信令服务器实现
 │   └── main.cpp           # 客户端入口
 ├── web/                   # WebUI 资源

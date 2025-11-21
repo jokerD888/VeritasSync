@@ -342,19 +342,41 @@ private:
         }
     }
 
+    // 获取当前可执行文件所在的目录 (绝对路径)
+    static std::filesystem::path get_exe_dir() {
+#ifdef _WIN32
+        wchar_t buffer[MAX_PATH];
+        // GetModuleFileNameW 直接填充宽字符，filesystem::path 构造函数完美兼容
+        if (GetModuleFileNameW(NULL, buffer, MAX_PATH) > 0) {
+            return std::filesystem::path(buffer).parent_path();
+        }
+#endif
+        return std::filesystem::current_path();
+    }
+
     // --- 从磁盘读取 HTML ---
     static std::string get_index_html() {
-        // 尝试多个路径，确保在开发和部署时都能找到
-        std::vector<std::string> try_paths = {
-            "web/index.html",        // 部署模式 (配合 CMake Copy 步骤)
-            "src/web/index.html",    // 开发模式 (源码根目录)
-            "../src/web/index.html"  // 开发模式 (Build 目录)
-        };
+        std::filesystem::path exe_dir = get_exe_dir();
+
+        std::vector<std::filesystem::path> try_paths;
+        // 1. 发布模式: bin/web/index.html
+        try_paths.push_back(exe_dir / "web" / "index.html");
+        // 2. 开发模式: 相对路径
+        try_paths.push_back("web/index.html");
+        try_paths.push_back("src/web/index.html");
+        try_paths.push_back("../src/web/index.html");
 
         for (const auto& path : try_paths) {
-            if (std::filesystem::exists(path)) {
-                std::ifstream t(path);
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec) && !ec) {
+                // 使用 Utf8ToPath 打开文件流
+                std::ifstream t(Utf8ToPath(PathToUtf8(path)));
+                // 上面略显啰嗦是因为 fstream 在 Windows 下需要 wstring (Utf8ToPath返回的 path 包含 wstring)
+                // 或者是直接用 t(path) 也是可以的，因为 MSVC 的 fstream 支持 path 重载
+
                 if (t.is_open()) {
+                    // 【日志打印】这里必须用 PathToUtf8，否则中文路径在控制台乱码
+                    if (g_logger) g_logger->info("[WebUI] Loaded UI from: {}", PathToUtf8(path));
                     std::stringstream buffer;
                     buffer << t.rdbuf();
                     return buffer.str();
@@ -362,15 +384,7 @@ private:
             }
         }
 
-        // 如果找不到文件，返回错误提示
-        return R"(<html>
-            <head><meta charset="UTF-8"><title>Error</title></head>
-            <body style="font-family:sans-serif; text-align:center; padding:50px;">
-                <h1 style="color:#ef4444">404 - Web UI Not Found</h1>
-                <p>Could not find <code>index.html</code> in 'web/' or 'src/web/'.</p>
-                <p>Please ensure the <code>web</code> folder is copied next to the executable.</p>
-            </body>
-        </html>)";
+        return R"(<html><body><h1 style="color:red;text-align:center;margin-top:50px">404 - Web UI Not Found</h1></body></html>)";
     }
 
     static std::string tail_log(const std::string& file, std::size_t max_bytes) {

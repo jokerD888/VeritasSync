@@ -138,6 +138,11 @@ install(TARGETS veritas_sync veritas_tracker efsw_test nat_demo
     COMPONENT Runtime
 )
 
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/web"
+    DESTINATION bin
+    COMPONENT Runtime
+)
+
 # 自动收集并安装所有依赖的DLL文件（仅Windows平台）
 if(WIN32)
     install(CODE [[
@@ -220,3 +225,40 @@ target_link_libraries(unit_tests PRIVATE
 # 注册测试
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
+
+
+
+# ===========================================================
+# CPack 打包配置 (生成 Windows 安装程序)
+# ===========================================================
+
+# 1. 基础信息设置
+set(CPACK_PACKAGE_NAME "VeritasSync")
+set(CPACK_PACKAGE_VENDOR "JokerD888")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "VeritasSync - 高性能 P2P 文件同步工具")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/jokerd888/veritassync")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}") # 读取项目开头的版本号 (1.0)
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "VeritasSync") # 安装路径: C:/Program Files/VeritasSync
+
+# 2. 图标与资源配置
+# 安装包的图标 (左上角图标)
+set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/app.ico") 
+# 控制面板"卸载程序"列表显示的图标
+set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\veritas_sync.exe")
+# 安装向导的侧边栏图片 (可选，需要bmp格式，这里先留空使用默认)
+# set(CPACK_NSIS_MUI_WELCOMEFINISHPAGE_BITMAP "${CMAKE_CURRENT_SOURCE_DIR}/sidebar.bmp")
+
+# 3. 创建快捷方式 (桌面 & 开始菜单)
+# 语法: CreateShortCut "快捷方式路径" "指向的目标exe"
+set(CPACK_NSIS_CREATE_ICONS_EXTRA "
+    CreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\VeritasSync.lnk' '$INSTDIR\\\\bin\\\\veritas_sync.exe'
+    CreateShortCut '$DESKTOP\\\\VeritasSync.lnk' '$INSTDIR\\\\bin\\\\veritas_sync.exe'
+")
+
+# 4. 定义生成器
+# NSIS = 生成 .exe 安装包
+# ZIP  = 生成 .zip 绿色免安装包
+set(CPACK_GENERATOR "NSIS;ZIP") 
+
+# 5. 必须放在最后包含！
+include(CPack)
