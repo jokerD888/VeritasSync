@@ -23,96 +23,6 @@
 
 namespace VeritasSync {
 
-static std::pair<std::string, std::string> get_preferred_ips() {
-    // 1. [性能优化] 静态缓存，避免重复系统调用
-    static std::string cached_v4;
-    static std::string cached_v6;
-    static bool is_cached = false;
-
-    if (is_cached) {
-        return {cached_v4, cached_v6};
-    }
-
-    try {
-        boost::asio::io_context io_context;
-
-        // 2. 探测 IPv4 (连接 Google DNS 8.8.8.8)
-        try {
-            boost::asio::ip::udp::socket socket(io_context);
-            // 【修正】使用 make_address 替代 from_string
-            socket.connect(boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("8.8.8.8"), 53));
-            cached_v4 = socket.local_endpoint().address().to_string();
-        } catch (...) { /* 忽略 IPv4 失败 */
-        }
-
-        // 3. 探测 IPv6 (连接 Google IPv6 DNS)
-        // [协议正确性] 显式打开 v6 协议栈，防止 Windows 下报错 Invalid Argument
-        try {
-            boost::asio::ip::udp::socket socket6(io_context);
-            socket6.open(boost::asio::ip::udp::v6());
-            // 【修正】使用 make_address 替代 from_string
-            socket6.connect(boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("2001:4860:4860::8888"), 53));
-            cached_v6 = socket6.local_endpoint().address().to_string();
-        } catch (...) { /* 忽略 IPv6 失败 */
-        }
-
-        if (g_logger) {
-            if (!cached_v4.empty()) g_logger->info("[Network] 物理网卡 IPv4: {}", cached_v4);
-            if (!cached_v6.empty()) g_logger->info("[Network] 物理网卡 IPv6: {}", cached_v6);
-        }
-
-        is_cached = true;
-    } catch (const std::exception& e) {
-        if (g_logger) g_logger->warn("[Network] 路由探测异常: {}", e.what());
-    }
-
-    return {cached_v4, cached_v6};
-}
-
-// 智能 SDP 过滤器
-// 包含：逻辑安全保护 (srflx/relay)
-static std::string smart_filter_sdp(const std::string& sdp) {
-    auto [pref_v4, pref_v6] = get_preferred_ips();
-
-    std::istringstream iss(sdp);
-    std::string line;
-    std::ostringstream oss;
-
-    while (std::getline(iss, line)) {
-        // 处理换行符，防止干扰判断
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-
-        if (line.find("a=candidate") != std::string::npos) {
-            bool keep = false;
-
-            // [逻辑安全] 绝对保留公网反射(srflx)和中继(relay)地址
-            // 这些是 NAT 穿透的救命稻草，绝对不能删
-            if (line.find("typ srflx") != std::string::npos || line.find("typ relay") != std::string::npos) {
-                keep = true;
-            }
-            // 只对 host (本地网卡) 类型进行过滤
-            else if (line.find("typ host") != std::string::npos) {
-                // 只有当 IP 等于我们探测到的“物理网卡 IP”时才保留
-                // 这样能完美剔除 WSL (172.x), Docker, VPN 等虚拟网卡
-                if (!pref_v4.empty() && line.find(pref_v4) != std::string::npos)
-                    keep = true;
-                else if (!pref_v6.empty() && line.find(pref_v6) != std::string::npos)
-                    keep = true;
-                else {
-                    // 既不是物理 v4 也不是物理 v6，丢弃！
-                }
-            } else {
-                // 其他类型 (如 prflx) 默认保留
-                keep = true;
-            }
-
-            if (!keep) continue;  // 跳过此行 (过滤掉)
-        }
-
-        oss << line << "\r\n";
-    }
-    return oss.str();
-}
 bool can_broadcast(SyncRole role, SyncMode mode) {
     // 如果是 Source，永远可以广播
     if (role == SyncRole::Source) return true;
@@ -279,7 +189,12 @@ P2PManager::P2PManager()
     });
 }
 
-void P2PManager::set_state_manager(StateManager* sm) { m_state_manager = sm; }
+void P2PManager::set_state_manager(StateManager* sm) {
+    m_state_manager = sm;
+    if (m_transfer_manager) {
+        m_transfer_manager->set_state_manager(sm);
+    }
+}
 void P2PManager::set_tracker_client(TrackerClient* tc) { m_tracker_client = tc; }
 void P2PManager::set_role(SyncRole role) { m_role = role; }
 
@@ -583,20 +498,15 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
     std::string sdp_str = sdp ? sdp : "";
     if (sdp_str.empty()) return;
 
-    // 1. 使用智能过滤器清洗 (去除虚拟网卡，保留 IPv6)
-    std::string filtered_candidate = smart_filter_sdp(sdp_str);
+    std::string candidate_to_send = sdp_str;
 
-    // 如果过滤后为空（说明这条 candidate 是垃圾虚拟 IP），直接返回不发送
-    if (filtered_candidate.empty()) return;
-
-    // 2. [字符串健壮性] 移除尾部换行符
-    // 防止 rewrite 函数处理出错，也防止拼接 JSON 时格式错乱
-    while (!filtered_candidate.empty() && (filtered_candidate.back() == '\r' || filtered_candidate.back() == '\n')) {
-        filtered_candidate.pop_back();
+    // 字符串健壮性处理：移除尾部换行符 (这是必要的，防止 JSON 格式错误)
+    while (!candidate_to_send.empty() && (candidate_to_send.back() == '\r' || candidate_to_send.back() == '\n')) {
+        candidate_to_send.pop_back();
     }
 
-    // 3. UPnP 重写
-    std::string final_candidate = rewrite_candidate(filtered_candidate);
+    //  UPnP 重写 (这个是有益的优化，建议保留)
+    std::string final_candidate = rewrite_candidate(candidate_to_send);
 
     g_logger->info("[ICE] 发送候选: {}...", final_candidate.substr(0, 50));
     m_tracker_client->send_signaling_message(peer_id, "ice_candidate", final_candidate);
@@ -618,18 +528,12 @@ void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
     char local_description[4096];
     if (juice_get_local_description(agent, local_description, sizeof(local_description)) == 0) {
         std::string sdp_str(local_description);
-
-        // ---  应用智能过滤器 ---
-        // 这将生成一份干净的、包含 IPv6 但不含虚拟网卡的 SDP
-        std::string clean_sdp = smart_filter_sdp(sdp_str);
-        // ---------------------------
-
         if (self_id < peer_id) {
-            g_logger->info("[ICE] 向 {} 发送 SDP Offer (清洗后 {} 字节)", peer_id, clean_sdp.length());
-            m_tracker_client->send_signaling_message(peer_id, "sdp_offer", clean_sdp);
+            g_logger->info("[ICE] 向 {} 发送 SDP Offer (完整 {} 字节)", peer_id, sdp_str.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_offer", sdp_str);
         } else {
-            g_logger->info("[ICE] 向 {} 发送 SDP Answer (清洗后 {} 字节)", peer_id, clean_sdp.length());
-            m_tracker_client->send_signaling_message(peer_id, "sdp_answer", clean_sdp);
+            g_logger->info("[ICE] 向 {} 发送 SDP Answer (完整 {} 字节)", peer_id, sdp_str.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_answer", sdp_str);
         }
     } else {
         g_logger->error("[ICE] 获取本地 SDP 描述失败 (对等点: {})", peer_id);
@@ -1059,9 +963,9 @@ void P2PManager::schedule_cleanup_task() {
         }
     });
 }
-std::vector<TransferStatus> P2PManager::get_active_downloads() {
+std::vector<TransferStatus> P2PManager::get_active_transfers() {
     if (m_transfer_manager) {
-        return m_transfer_manager->get_active_downloads();
+        return m_transfer_manager->get_active_transfers();
     }
     return {};
 }

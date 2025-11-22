@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -15,12 +16,12 @@
 #include <vector>
 
 #include "VeritasSync/Config.h"
-#include "VeritasSync/EncodingUtils.h"  // 引入编码工具
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/P2PManager.h"
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/TrackerClient.h"
-#include "VeritasSync/TrayIcon.h"  // 引入托盘图标
+#include "VeritasSync/TrayIcon.h"
 #include "VeritasSync/WebUI.h"
 
 #if defined(_WIN32)
@@ -57,23 +58,22 @@ void init_logger() {
     }
 }
 
+// --- 同步节点类 ---
 class SyncNode {
 public:
     SyncNode(VeritasSync::SyncTask task, const VeritasSync::Config& global_config)
         : m_task(std::move(task)), m_global_config(global_config) {}
 
-    // --- Getter 方法，供胶水层获取状态 ---
+    // Getter 方法，供胶水层获取状态
     std::shared_ptr<VeritasSync::P2PManager> get_p2p() { return m_p2p_manager; }
     std::string get_key() const { return m_task.sync_key; }
-    // ----------------------------------------
 
     void start() {
         VeritasSync::g_logger->info("--- Starting Sync Task [{}] ---", m_task.sync_key);
         VeritasSync::g_logger->info("[Config] Role: {}", m_task.role);
-        // 这里为了日志输出不乱码，仍然打印原始字符串
         VeritasSync::g_logger->info("[Config] Sync Folder: {}", m_task.sync_folder);
 
-        // 1. 使用 EncodingUtils 转换路径，防止中文路径导致崩溃
+        // 1. 使用 EncodingUtils 转换路径
         std::filesystem::path sync_path = VeritasSync::Utf8ToPath(m_task.sync_folder);
 
         VeritasSync::SyncRole role;
@@ -89,67 +89,62 @@ public:
             return;
         }
 
-        // 2. 使用转换后的 sync_path 操作文件系统
-        // 确保同步目录存在（不清空已有文件，支持重启后继续工作）
+        // 2. 确保目录存在
         std::error_code ec;
         if (!std::filesystem::exists(sync_path, ec)) {
             std::filesystem::create_directories(sync_path, ec);
             if (ec) {
                 VeritasSync::g_logger->error("[SyncNode] 创建同步目录失败: {}", ec.message());
-                return;  // 目录创建失败则终止该任务
+                return;
             }
             VeritasSync::g_logger->info("[SyncNode] 创建同步目录成功");
         } else {
             VeritasSync::g_logger->info("[SyncNode] 使用现有同步目录");
         }
 
-        // 1. 创建 P2PManager (它有自己的线程)
+        // 3. 创建 P2PManager
         m_p2p_manager = VeritasSync::P2PManager::create();
 
-        // 2. 创建 TrackerClient (它有自己的线程)
+        // 4. 创建 TrackerClient
         m_tracker_client =
             std::make_shared<VeritasSync::TrackerClient>(m_global_config.tracker_host, m_global_config.tracker_port);
 
-        // 3. 互相注入依赖
+        // 5. 互相注入依赖
         m_tracker_client->set_p2p_manager(m_p2p_manager.get());
         m_p2p_manager->set_tracker_client(m_tracker_client.get());
 
-        // 4. 配置 P2PManager
+        // 6. 配置 P2PManager
         m_p2p_manager->set_role(role);
         m_p2p_manager->set_encryption_key(m_task.sync_key);
-        // [新增] 注入同步模式 (用于支持双向同步广播)
         m_p2p_manager->set_mode(m_task.mode);
 
-        // --- 配置 STUN 服务器 ---
+        // 配置 STUN
         if (!m_global_config.stun_host.empty()) {
             VeritasSync::g_logger->info("[Config] Using STUN server at {}:{}", m_global_config.stun_host,
                                         m_global_config.stun_port);
             m_p2p_manager->set_stun_config(m_global_config.stun_host, m_global_config.stun_port);
-        } else {
-            VeritasSync::g_logger->warn("[Config] No STUN server configured. P2P NAT traversal may fail!");
         }
 
-        // --- 配置 TURN 服务器 ---
+        // 配置 TURN
         if (!m_global_config.turn_host.empty()) {
             VeritasSync::g_logger->info("[Config] Using TURN server at {}:{}", m_global_config.turn_host,
                                         m_global_config.turn_port);
             m_p2p_manager->set_turn_config(m_global_config.turn_host, m_global_config.turn_port,
                                            m_global_config.turn_username, m_global_config.turn_password);
-        } else {
-            VeritasSync::g_logger->info("[Config] No TURN server configured.");
         }
 
-        // 5. 创建 StateManager
-        // 使用 Utf8ToPath 转换路径
-        m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source);
+        // 7. 创建 StateManager (传入 sync_key 用于日志)
+        m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source,
+                                                                      m_task.sync_key  // [新增] 传入 Key
+        );
 
-        // 6. 注入 StateManager
+        // 8. 注入 StateManager (这会自动更新 TransferManager 内部的指针)
         m_p2p_manager->set_state_manager(m_state_manager.get());
 
-        // 7. 初始扫描
+        // 9. 初始扫描
         m_state_manager->scan_directory();
 
-        // 9. --- 启动信令连接 ---
+        // 10. 启动信令连接
         VeritasSync::g_logger->info("[{}] --- Phase 1: Contacting Tracker ---", m_task.sync_key);
 
         m_tracker_client->connect(m_task.sync_key, [this](std::vector<std::string> peer_list) {
@@ -167,13 +162,17 @@ private:
     std::unique_ptr<VeritasSync::StateManager> m_state_manager;
 };
 
+// --- 全局变量：管理活跃节点 ---
+std::vector<std::unique_ptr<SyncNode>> g_active_nodes;
+std::mutex g_nodes_mutex;
+
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
     // 1. 设置控制台输入输出代码页为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    // 2. 启用 ANSI 转义序列支持 (让 spdlog 的颜色在 Windows 10+ 上正常显示)
+    // 2. 启用 ANSI 转义序列支持
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hOut != INVALID_HANDLE_VALUE) {
         DWORD dwMode = 0;
@@ -202,59 +201,66 @@ int main(int argc, char* argv[]) {
     // 启动 Web UI
     VeritasSync::WebUIServer web_ui(8800, "config.json");
 
-    // 在后台线程启动阻塞的 listen 循环
-    std::thread ui_thread([&web_ui]() { web_ui.start(); });
+    // --- [新增] 设置动态添加任务回调 ---
+    web_ui.set_on_task_add([](const VeritasSync::SyncTask& new_task, const VeritasSync::Config& current_cfg) {
+        VeritasSync::g_logger->info("[Main] 收到动态添加任务请求: {}", new_task.sync_key);
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
 
-    // 创建同步任务节点
-    std::vector<std::unique_ptr<SyncNode>> nodes;
-    for (const auto& task : config.tasks) {
-        auto node = std::make_unique<SyncNode>(task, config);
+        auto node = std::make_unique<SyncNode>(new_task, current_cfg);
         node->start();
-        nodes.push_back(std::move(node));
+        g_active_nodes.push_back(std::move(node));
+    });
+
+    // --- 启动初始任务 ---
+    {
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
+        for (const auto& task : config.tasks) {
+            auto node = std::make_unique<SyncNode>(task, config);
+            node->start();
+            g_active_nodes.push_back(std::move(node));
+        }
     }
 
     // --- 注入状态提供者给 WebUI ---
-    // 这是一个胶水逻辑：将底层的 P2P 状态适配为 WebUI 需要的 JSON 格式
-    web_ui.set_status_provider([&nodes]() {
+    web_ui.set_status_provider([]() {
         std::vector<nlohmann::json> result;
-        for (const auto& node : nodes) {
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
+
+        for (const auto& node : g_active_nodes) {
             auto p2p = node->get_p2p();
             if (p2p) {
-                // 调用 P2PManager 的线程安全接口获取当前下载列表
-                auto downloads = p2p->get_active_downloads();
-                for (const auto& item : downloads) {
+                //  调用新的 get_active_transfers 接口，支持上传/下载区分
+                auto transfers = p2p->get_active_transfers();
+                for (const auto& item : transfers) {
                     nlohmann::json j;
                     j["key"] = node->get_key();
                     j["path"] = item.path;
                     j["total"] = item.total_chunks;
-                    j["recv"] = item.received_chunks;
+                    j["done"] = item.processed_chunks;  // 改名后的字段
                     j["progress"] = item.progress;
+                    j["type"] = item.is_upload ? "upload" : "download";  // 新增类型字段
                     result.push_back(j);
                 }
             }
         }
         return result;
     });
-    // -----------------------------------
+
+    // 在后台线程启动 WebUI
+    std::thread ui_thread([&web_ui]() { web_ui.start(); });
 
 #if defined(_WIN32)
     // --- 托盘图标逻辑 (仅 Windows) ---
     VeritasSync::TrayIcon tray;
 
-    // 1. 初始化图标
     if (!tray.init("VeritasSync - P2P 同步节点")) {
         VeritasSync::g_logger->error("无法创建系统托盘图标");
     }
 
-    // 2. 添加菜单：打开 WebUI
-    tray.add_menu_item("🌐 打开控制台", []() {
-        VeritasSync::WebUIServer::open_url("http://127.0.0.1:8800");  // <--- 使用 open_url
-    });
+    tray.add_menu_item("🌐 打开控制台", []() { VeritasSync::WebUIServer::open_url("http://127.0.0.1:8800"); });
 
-    // 3. 添加菜单：打开同步目录 (如果有任务)
     if (!config.tasks.empty()) {
         tray.add_separator();
-        // 仅展示第一个任务的目录，作为快捷入口
         std::string first_path = config.tasks[0].sync_folder;
         tray.add_menu_item("📂 打开文件夹",
                            [first_path]() { VeritasSync::WebUIServer::open_folder_in_os(first_path); });
@@ -262,27 +268,19 @@ int main(int argc, char* argv[]) {
 
     tray.add_separator();
 
-    // 4. 添加菜单：开机自启
     bool is_auto = VeritasSync::TrayIcon::is_autostart_enabled();
     tray.add_menu_item(
         "🚀 开机自启",
         [&tray]() {
             bool current = VeritasSync::TrayIcon::is_autostart_enabled();
             VeritasSync::TrayIcon::set_autostart(!current);
-
-            // 提示用户
             std::wstring msg = !current ? L"已开启开机自启" : L"已关闭开机自启";
             MessageBoxW(NULL, msg.c_str(), L"VeritasSync", MB_OK | MB_ICONINFORMATION);
-
-            // 注意：这里实际上应该动态更新菜单的 checked 状态，
-            // 但为了简化实现，目前我们只在启动时读取一次。
-            // 用户重启程序后菜单状态会更新。
         },
         is_auto);
 
     tray.add_separator();
 
-    // 5. 添加菜单：退出
     tray.add_menu_item("🛑 退出程序", [&tray, &web_ui]() {
         if (MessageBoxW(NULL, L"确定要退出同步服务吗？", L"VeritasSync", MB_YESNO | MB_ICONQUESTION) == IDYES) {
             web_ui.stop();
@@ -291,14 +289,11 @@ int main(int argc, char* argv[]) {
     });
 
     VeritasSync::g_logger->info("系统托盘已启动。程序正在后台运行。");
-
-    // 6. 进入 Windows 消息循环 (阻塞主线程，替代 sleep)
     tray.run_loop();
 
 #else
-    // Linux/Mac 继续使用原来的 Sleep 循环
     VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---");
-    std::this_thread::sleep_for(std::chrono::hours(24000));  // 无限等待
+    std::this_thread::sleep_for(std::chrono::hours(24000));
 #endif
 
     // 清理

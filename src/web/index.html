@@ -126,6 +126,16 @@
             box-shadow: 0 0 0 2px #d1fae5
         }
 
+        /* 呼吸灯动画 */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        .dot.online {
+            animation: pulse-green 2s infinite;
+        }
+
         .task-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -174,7 +184,6 @@
             color: #3730a3
         }
         
-        /* 双向模式标签样式 */
         .role-bi {
             background: #f3e8ff;
             color: #6b21a8;
@@ -280,18 +289,25 @@
             gap: 8px
         }
 
+        /* 增强版日志样式 */
         .log-container {
             background: #1e1e1e;
             color: #e5e7eb;
             padding: 1rem;
             border-radius: 0.5rem;
-            font-family: monospace;
+            font-family: 'Consolas', monospace;
             font-size: 13px;
             height: 65vh;
             overflow-y: auto;
             border: 1px solid #374151;
             white-space: pre-wrap
         }
+        .log-line { padding: 2px 0; border-bottom: 1px solid #2d2d2d; }
+        .log-info { color: #a7f3d0; }
+        .log-warn { color: #fcd34d; }
+        .log-error { color: #fca5a5; font-weight: bold; }
+        .log-debug { color: #9ca3af; }
+        .log-time { color: #6b7280; margin-right: 8px; }
 
         .log-toolbar {
             display: flex;
@@ -350,55 +366,78 @@
         }
 
         @keyframes spin {
-            0% {
-                transform: rotate(0deg)
-            }
-
-            100% {
-                transform: rotate(360deg)
-            }
+            0% { transform: rotate(0deg) }
+            100% { transform: rotate(360deg) }
         }
 
-        /* --- 新增美化样式 --- */
-
-        /* 1. 状态呼吸灯动画 */
-        @keyframes pulse-green {
-            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
-            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        /* --- 传输列表美化样式 --- */
+        .transfer-item {
+            margin-bottom: 1rem;
+            background: #f9fafb;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+            transition: 0.2s;
         }
-        .dot.online {
-            animation: pulse-green 2s infinite;
+        .transfer-item:hover {
+            background: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
-
-        /* 2. 进度条美化 */
+        .transfer-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+        .transfer-badge {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-right: 8px;
+            display: inline-block;
+            min-width: 70px;
+            text-align: center;
+        }
+        .badge-up { background: #dbeafe; color: #1e40af; }   /* 蓝色 Upload */
+        .badge-down { background: #d1fae5; color: #065f46; } /* 绿色 Download */
+        
         .progress-track {
             background: #e5e7eb;
             height: 8px;
             border-radius: 4px;
             overflow: hidden;
-            margin-top: 6px;
+            position: relative;
         }
+        
+        /* 动态条纹动画 */
         .progress-fill {
             height: 100%;
-            background: linear-gradient(45deg, var(--primary) 25%, #3b82f6 25%, #3b82f6 50%, var(--primary) 50%, var(--primary) 75%, #3b82f6 75%, #3b82f6);
-            background-size: 20px 20px;
             border-radius: 4px;
             transition: width 0.3s ease;
-            animation: stripe-move 1s linear infinite;
+            /* 条纹背景 */
+            background-image: linear-gradient(45deg,rgba(255,255,255,.2) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.2) 50%,rgba(255,255,255,.2) 75%,transparent 75%,transparent);
+            background-size: 1rem 1rem;
+            animation: progress-stripes 1s linear infinite;
         }
-        @keyframes stripe-move {
-            0% { background-position: 0 0; }
-            100% { background-position: 20px 20px; }
-        }
+        .fill-up { background-color: #3b82f6; }   /* 蓝色 */
+        .fill-down { background-color: #10b981; } /* 绿色 */
 
-        /* 3. 日志彩色高亮 */
-        .log-line { font-family: 'Consolas', monospace; white-space: pre-wrap; border-bottom: 1px solid #2d2d2d; padding: 2px 0; }
-        .log-info { color: #a7f3d0; }   /* 浅绿 */
-        .log-warn { color: #fcd34d; }   /* 黄色 */
-        .log-error { color: #fca5a5; font-weight: bold; } /* 浅红 */
-        .log-debug { color: #9ca3af; }  /* 灰色 */
-        .log-time { color: #6b7280; margin-right: 8px; }
+        @keyframes progress-stripes {
+            0% { background-position: 1rem 0; }
+            100% { background-position: 0 0; }
+        }
+        
+        .transfer-meta {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 6px;
+            display: flex;
+            justify-content: space-between;
+            font-family: monospace;
+        }
     </style>
 </head>
 
@@ -433,8 +472,13 @@
                 </div>
             </div>
             <div class="card">
-                <h3 style="margin-bottom:1rem">🚀 正在传输</h3>
-                <div id="transfer-container" style="color:#666;font-size:0.9rem">暂无活跃传输</div>
+                <h3 style="margin-bottom:1rem;display:flex;align-items:center;gap:8px">
+                    🚀 正在传输 
+                    <span id="transfer-count" style="font-size:0.8rem;background:#f3f4f6;padding:2px 8px;border-radius:12px;color:#666">0</span>
+                </h3>
+                <div id="transfer-container" style="min-height:60px">
+                    <div style="text-align:center;padding:1.5rem;color:#9ca3af;font-size:0.9rem">✨ 暂无活跃传输</div>
+                </div>
             </div>
             <h3 style="margin-bottom:1rem">我的同步目录</h3>
             <div class="task-grid" id="task-container"></div>
@@ -458,26 +502,26 @@
                 <hr style="margin:1.5rem 0;border:0;border-top:1px solid var(--border)">
             
                 <h3 style="margin-bottom:1.5rem">NAT 穿透 (STUN/TURN)</h3>
-            <div class="form-group">
-                <label>STUN 服务器 (Host : Port)</label>
-                <div class="input-group">
-                    <input id="cfgStunHost" class="form-input" placeholder="stun.l.google.com" style="flex: 3;">
-                    <input id="cfgStunPort" class="form-input" type="number" placeholder="19302" style="flex: 1;">
-                </div>
+                <div class="form-group">
+                    <label>STUN 服务器 (Host : Port)</label>
+                    <div class="input-group">
+                        <input id="cfgStunHost" class="form-input" placeholder="stun.l.google.com" style="flex: 3;">
+                        <input id="cfgStunPort" class="form-input" type="number" placeholder="19302" style="flex: 1;">
+                    </div>
                     <div style="font-size:0.8rem;color:var(--sub);margin-top:4px">
                         备选推荐: stun.l.google.com:19302
                     </div>
                 </div>
-            <div class="form-group">
-                <label>TURN 服务器 (可选) (Host : Port)</label>
-                <div class="input-group">
-                    <input id="cfgTurnHost" class="form-input" placeholder="留空以禁用" style="flex: 3;">
-                    <input id="cfgTurnPort" class="form-input" type="number" placeholder="3478" style="flex: 1;">
+                <div class="form-group">
+                    <label>TURN 服务器 (可选) (Host : Port)</label>
+                    <div class="input-group">
+                        <input id="cfgTurnHost" class="form-input" placeholder="留空以禁用" style="flex: 3;">
+                        <input id="cfgTurnPort" class="form-input" type="number" placeholder="3478" style="flex: 1;">
+                    </div>
                 </div>
-            </div>
-            <div class="form-group"><label>TURN 用户名</label><input id="cfgTurnUser" class="form-input" value=""></div>
-            <div class="form-group"><label>TURN 密码</label><input id="cfgTurnPass" class="form-input" type="password" value="">
-            </div>
+                <div class="form-group"><label>TURN 用户名</label><input id="cfgTurnUser" class="form-input" value=""></div>
+                <div class="form-group"><label>TURN 密码</label><input id="cfgTurnPass" class="form-input" type="password" value="">
+                </div>
             </div>
         </div>
         <div id="view-logs" class="view-section section-hidden">
@@ -536,7 +580,7 @@
             document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
             e.classList.add('active');
             if (i === 'dashboard') loadTasks();
-            if (i === 'settings') loadSettings(); // 切换到设置时加载配置
+            if (i === 'settings') loadSettings();
             if (i === 'logs') fetchGlobalLog();
         }
 
@@ -545,17 +589,14 @@
                 const r = await fetch('/api/config');
                 const c = await r.json();
                 
-                // 更新顶部的任务计数
                 id('task-count').innerText = c.tasks.length;
                 
-                // 更新 Tracker 显示
                 if (c.tracker_host) {
                     id('display-tracker-addr').innerText = `${c.tracker_host}:${c.tracker_port}`;
                 }
 
                 const container = id('task-container');
                 
-                // --- 新增：空状态检测与引导 ---
                 if (c.tasks.length === 0) {
                     container.innerHTML = `
                         <div style="grid-column: 1 / -1; text-align: center; padding: 4rem 2rem; background: white; border-radius: 1rem; border: 2px dashed var(--border);">
@@ -571,11 +612,8 @@
                     `;
                     return;
                 }
-                // ---------------------------
 
-                // 渲染任务列表
                 container.innerHTML = c.tasks.map((t, i) => {
-                    // 解析模式并生成标签
                     const isBi = t.mode === 'bidirectional';
                     const modeBadge = isBi 
                         ? `<span class="role role-bi" style="margin-right:4px">🔁 双向</span>` 
@@ -610,26 +648,20 @@
             } catch (e) { console.error(e) }
         }
 
-        // 加载设置数据回填到表单
         async function loadSettings() {
             try {
                 const r = await fetch('/api/config');
                 const c = await r.json();
                 id('cfgTrackerHost').value = c.tracker_host || "";
                 id('cfgTrackerPort').value = c.tracker_port || 9988;
-                
-                //  加载 STUN/TURN 端口
                 id('cfgStunHost').value = c.stun_host || "stun.l.google.com";
                 id('cfgStunPort').value = c.stun_port || 19302;
-                
-                id('cfgTurnHost').value = c.turn_host || ""; // 默认为空
+                id('cfgTurnHost').value = c.turn_host || "";
                 id('cfgTurnPort').value = c.turn_port || 3478;
-                
                 id('cfgTurnUser').value = c.turn_username || "";
                 id('cfgTurnPass').value = c.turn_password || "";
             } catch (e) {
                 console.error("加载配置失败", e);
-                alert("加载配置失败，请刷新重试");
             }
         }
 
@@ -638,22 +670,17 @@
             b.disabled = true; 
             b.innerText = "保存中..."; 
             
-            //  获取并转换端口值为整数
             const d = { 
                 tracker_host: id('cfgTrackerHost').value, 
                 tracker_port: parseInt(id('cfgTrackerPort').value || 0), 
-                
                 stun_host: id('cfgStunHost').value,
                 stun_port: parseInt(id('cfgStunPort').value || 0),
-                
                 turn_host: id('cfgTurnHost').value,
                 turn_port: parseInt(id('cfgTurnPort').value || 0),
-                
                 turn_username: id('cfgTurnUser').value, 
                 turn_password: id('cfgTurnPass').value 
             }; 
             
-            //  前端简单校验
             if (d.tracker_port < 1 || d.stun_port < 1 || (d.turn_host && d.turn_port < 1)) {
                  alert("端口号无效，请输入 1-65535 之间的数字");
                  b.disabled = false;
@@ -675,42 +702,61 @@
             b.disabled = false; 
             b.innerText = "💾 保存设置"; 
         }
+
         async function restartApp() { if (!confirm("确定要重启吗？")) return; id('restart-overlay').classList.add('active'); try { fetch('/api/restart', { method: 'POST' }); } catch (e) { } let c = 0; const t = setInterval(async () => { c++; try { const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); const r = await fetch('/api/config', { signal: ctl.signal }); if (r.ok) { clearInterval(t); location.reload(); } } catch (e) { if (c > 30) { clearInterval(t); location.reload(); } } }, 2000); }
         function genKey() { const c = 'abcdefghijklmnopqrstuvwxyz0123456789', l = c.length; let k = 'sync-'; for (let i = 0; i < 8; i++)k += c.charAt(Math.floor(Math.random() * l)); id('newKey').value = k; }
         function closeLogModal() { id('log-modal').classList.remove('open'); }
         async function openFolder(i) { try { const r = await fetch(`/api/tasks/${i}/open`, { method: 'POST' }); if (!r.ok) alert('打开失败'); } catch (e) { } }
         async function pickFolder() { const b = event.target; b.disabled = true; try { const r = await fetch('/api/utils/pick_folder', { method: 'POST' }); const d = await r.json(); if (d.path) id('newFolder').value = d.path; } catch (e) { } b.disabled = false; }
+        
         async function addTask() { 
             const k = id('newKey').value;
             const r = id('newRole').value;
             const f = id('newFolder').value;
-            const m = id('newMode').value; // 获取模式
+            const m = id('newMode').value;
             
             if (!k || !f) return alert('信息不完整'); 
             
-            await fetch('/api/tasks', { 
-                method: 'POST', 
-                body: JSON.stringify({ 
-                    sync_key: k, 
-                    role: r, 
-                    sync_folder: f,
-                    mode: m // 发送模式字段
-                }) 
-            }); 
-            
-            closeModal(); 
-            location.reload(); 
+            try {
+                const resp = await fetch('/api/tasks', { 
+                    method: 'POST', 
+                    body: JSON.stringify({ 
+                        sync_key: k, 
+                        role: r, 
+                        sync_folder: f,
+                        mode: m 
+                    }) 
+                }); 
+                
+                if (resp.ok) {
+                    closeModal(); 
+                    // 稍微等待一下后端启动任务
+                    setTimeout(() => {
+                        location.reload(); 
+                    }, 500);
+                } else {
+                    alert('添加失败');
+                }
+            } catch(e) {
+                console.error(e);
+                alert('网络错误');
+            }
         }
+
         async function delTask(i) { if (confirm('删除?')) { await fetch(`/api/tasks/${i}`, { method: 'DELETE' }); location.reload(); } }
-        async function fetchGlobalLog() { const r = await fetch('/api/log'); rawLog = await r.text(); renderLog(); }
-        // 增强版日志渲染
+        
+        async function fetchGlobalLog() { 
+            try {
+                const r = await fetch('/api/log'); 
+                rawLog = await r.text(); 
+                renderLog(); 
+            } catch(e) {}
+        }
+
         function renderLog() {
             const f = id('logFilter').value.toLowerCase();
             const e = id('global-log-area');
-            
-            // 简单的 HTML 转义防止 XSS (虽然日志通常是安全的)
             const escapeHtml = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
             const lines = rawLog.split('\n');
             let html = '';
 
@@ -723,48 +769,71 @@
                 else if (line.includes('[warn]')) cls = 'log-warn';
                 else if (line.includes('[debug]')) cls = 'log-debug';
 
-                // 尝试简单高亮时间戳 (假设格式 [2023-...])
                 const formattedLine = escapeHtml(line).replace(/^\[(.*?)\]/, '<span class="log-time">[$1]</span>');
-                
                 html += `<div class="log-line ${cls}">${formattedLine}</div>`;
             }
 
-            e.innerHTML = html; // 使用 innerHTML 渲染颜色
+            e.innerHTML = html; 
             if (id('autoScroll').checked) e.scrollTop = e.scrollHeight;
         }
-        async function viewTaskLog(i) { const r = await fetch(`/api/tasks/${i}/log`); id('task-log-content').innerText = await r.text(); id('log-modal').classList.add('open'); }
+
+        async function viewTaskLog(i) { 
+            try {
+                const r = await fetch(`/api/tasks/${i}/log`); 
+                id('task-log-content').innerText = await r.text(); 
+                id('log-modal').classList.add('open'); 
+            } catch(e) {}
+        }
+
         function copy(t) { navigator.clipboard.writeText(t).then(() => alert('已复制')); }
         function openModal() { id('add-modal').classList.add('open'); }
         function closeModal() { id('add-modal').classList.remove('open'); }
-        const fi = id('newFolder'); fi.addEventListener('dragover', e => e.preventDefault()); fi.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) fi.value = (e.dataTransfer.files[0].path || e.dataTransfer.files[0].name).replace(/\\/g, '/'); });
+        
+        const fi = id('newFolder'); 
+        fi.addEventListener('dragover', e => e.preventDefault()); 
+        fi.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) fi.value = (e.dataTransfer.files[0].path || e.dataTransfer.files[0].name).replace(/\\/g, '/'); });
+        
         setInterval(() => { if (!id('view-logs').classList.contains('section-hidden') && id('autoScroll').checked) fetchGlobalLog() }, 3000);
 
         // 初始加载
         loadTasks();
 
+        // 传输状态轮询 (修改后支持上传/下载类型)
         setInterval(async () => {
             try {
                 const r = await fetch('/api/status');
                 const data = await r.json();
                 const el = id('transfer-container');
+                id('transfer-count').innerText = data.length;
+                
                 if (data.length === 0) {
-                    el.innerHTML = '<div style="text-align:center;padding:1rem;color:#999">💤 暂无活跃传输</div>';
+                    el.innerHTML = '<div style="text-align:center;padding:1.5rem;color:#9ca3af;font-size:0.9rem">✨ 暂无活跃传输</div>';
                 } else {
-                    el.innerHTML = data.map(d => `
-                        <div style="margin-bottom:12px">
-                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:0.9rem">
-                                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%" title="${d.path}">${d.path}</span>
-                                <span style="font-weight:bold;color:var(--primary)">${d.progress.toFixed(1)}%</span>
+                    el.innerHTML = data.map(d => {
+                        // 根据 d.type 决定样式
+                        const isUp = (d.type === 'upload');
+                        const badgeClass = isUp ? 'badge-up' : 'badge-down';
+                        const fillClass = isUp ? 'fill-up' : 'fill-down';
+                        const typeText = isUp ? 'UPLOADING' : 'DOWNLOADING';
+                        
+                        return `
+                        <div class="transfer-item">
+                            <div class="transfer-header">
+                                <div style="display:flex;align-items:center;gap:4px;overflow:hidden;flex:1">
+                                    <span class="transfer-badge ${badgeClass}">${typeText}</span>
+                                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500" title="${d.path}">${d.path}</span>
+                                </div>
+                                <div style="font-weight:bold;font-family:monospace;margin-left:10px">${d.progress.toFixed(1)}%</div>
                             </div>
                             <div class="progress-track">
-                                <div class="progress-fill" style="width:${d.progress}%"></div>
+                                <div class="progress-fill ${fillClass}" style="width:${d.progress}%"></div>
                             </div>
-                            <div style="font-size:11px;color:#999;margin-top:4px;display:flex;justify-content:space-between">
-                                <span>任务: ${d.key.substring(0, 8)}...</span>
-                                <span>块: ${d.recv}/${d.total}</span>
+                            <div class="transfer-meta">
+                                <span>Task: ${d.key ? d.key.substring(0, 8) + '...' : 'Unknown'}</span>
+                                <span>Chunks: ${d.done}/${d.total}</span>
                             </div>
                         </div>
-                    `).join('');
+                    `}).join('');
                 }
             } catch (e) { }
         }, 1000);

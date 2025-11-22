@@ -19,6 +19,7 @@
 
 #include "VeritasSync/Config.h"
 #include "VeritasSync/CryptoLayer.h"
+#include "VeritasSync/Protocol.h"
 #include "VeritasSync/TransferManager.h"
 
 // --- miniupnpc 头文件 ---
@@ -95,7 +96,7 @@ public:
                                   const std::string& payload);
     void handle_peer_leave(const std::string& peer_id);
 
-    std::vector<TransferStatus> get_active_downloads();
+    std::vector<TransferStatus> get_active_transfers();
 
 private:
     P2PManager();

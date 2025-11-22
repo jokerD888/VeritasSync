@@ -102,6 +102,6 @@
         "variant": "cpp"
     },
     "[html]": {
-        "editor.defaultFormatter": "vscode.html-language-features"
+        "editor.defaultFormatter": "NikolaosGeorgiou.html-fmt-vscode"
     }
 }

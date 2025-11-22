@@ -25,7 +25,8 @@ namespace VeritasSync {
     class StateManager {
     public:
         // 构造函数接收一个 P2PManager 的引用
-        StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher);
+        StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher,
+                     const std::string& sync_key = "unknown");
         ~StateManager();
 
         // 扫描同步目录，生成当前所有文件的状态快照
@@ -71,6 +72,7 @@ namespace VeritasSync {
         void process_debounced_changes();
 
         // --- 成员变量 ---
+        std::string m_sync_key;
         std::filesystem::path m_root_path;
         P2PManager* m_p2p_manager;  // 保存 P2PManager 的指针
 

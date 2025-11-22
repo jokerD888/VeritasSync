@@ -64,8 +64,11 @@ namespace VeritasSync {
 
     // --- StateManager 实现 ---
 
-    StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher)
-        : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))), m_p2p_manager(&p2p_manager) {
+    StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher,
+                               const std::string& sync_key)
+        : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
+          m_p2p_manager(&p2p_manager),
+          m_sync_key(sync_key) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
             std::filesystem::create_directory(m_root_path);
@@ -135,7 +138,7 @@ namespace VeritasSync {
         std::lock_guard<std::mutex> lock(m_changes_mutex);
         m_pending_changes.insert(full_path);
         // 使用 Debug 级别，因为这个日志非常频繁
-        g_logger->debug("[Watcher] 检测到变化: {}", full_path);
+        g_logger->debug("[{}] [Watcher] 检测到变化: {}", m_sync_key, full_path);
     }
 
     // --- 由 UpdateListener 定时器调用 ---
@@ -171,7 +174,7 @@ namespace VeritasSync {
                 std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
 
                 if (m_file_filter.should_ignore(rel_path_str)) {
-                    g_logger->debug("[Watcher] 忽略变更: {}", rel_path_str);
+                    g_logger->debug("[{}] [Watcher] 忽略变更: {}", m_sync_key, rel_path_str);
                     continue;
                 }
 
@@ -195,13 +198,13 @@ namespace VeritasSync {
                         // 更新数据库
                         if (m_db) m_db->update_file(info.path, info.hash, info.modified_time);
 
-                        g_logger->info("[StateManager] 广播文件更新: {}", info.path);
+                        g_logger->info("[{}] [StateManager] 广播文件更新: {}", m_sync_key, info.path);
                         m_p2p_manager->broadcast_file_update(info);
 
                     } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
                         if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
                             m_dir_map.insert(rel_path_str);
-                            g_logger->info("[StateManager] 广播目录创建: {}", rel_path_str);
+                            g_logger->info("[{}] [StateManager] 广播目录创建: {}", m_sync_key, rel_path_str);
                             m_p2p_manager->broadcast_dir_create(rel_path_str);
                         }
                     }
@@ -211,15 +214,15 @@ namespace VeritasSync {
                         // 从数据库删除
                         if (m_db) m_db->remove_file(rel_path_str);
 
-                        g_logger->info("[StateManager] 广播文件删除: {}", rel_path_str);
+                        g_logger->info("[{}] [StateManager] 广播文件删除: {}", m_sync_key, rel_path_str);
                         m_p2p_manager->broadcast_file_delete(rel_path_str);
                     } else if (m_dir_map.erase(rel_path_str) > 0) {
-                        g_logger->info("[StateManager] 广播目录删除: {}", rel_path_str);
+                        g_logger->info("[{}] [StateManager] 广播目录删除: {}", m_sync_key, rel_path_str);
                         m_p2p_manager->broadcast_dir_delete(rel_path_str);
                     }
                 }
             } catch (const std::exception& e) {
-                g_logger->error("[StateManager] 处理变更异常: {} ({})", full_path_str, e.what());
+                g_logger->error("[{}] [StateManager] 处理变更异常: {} ({})", m_sync_key, full_path_str, e.what());
             }
         }
 

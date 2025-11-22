@@ -5,6 +5,7 @@
 #include <boost/asio/detail/socket_ops.hpp>  // for host_to_network/network_to_host
 
 #include "VeritasSync/CryptoLayer.h"
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/Protocol.h"
@@ -51,24 +52,37 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     std::string requested_path_str = request_payload.at("path").get<std::string>();
     g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", requested_path_str, peer_id);
 
+    // 提前在 Map 中占位，初始块数未知 (0,0)，防止 UI 闪烁
+    {
+        std::lock_guard<std::mutex> lock(m_transfer_mutex);
+        m_sending_files[requested_path_str] = {0, 0};
+    }
+
     // 异步投递到线程池
     boost::asio::post(m_worker_pool, [self = shared_from_this(), requested_path_str, peer_id]() {
-        // [Worker线程] 1. 获取 Hash 用于记录 (需确保 StateManager::get_file_hash 是线程安全的)
+        if (!self->m_state_manager) return;  // 再次检查空指针，以防万一
+
+        // [Worker线程] 1. 获取 Hash
         std::string file_hash = self->m_state_manager->get_file_hash(requested_path_str);
 
         // [Worker线程] 2. 准备路径
-        std::filesystem::path relative_path(std::u8string_view(
-            reinterpret_cast<const char8_t*>(requested_path_str.c_str()), requested_path_str.length()));
+        std::filesystem::path relative_path = Utf8ToPath(requested_path_str);
         std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
 
         if (!std::filesystem::exists(full_path)) {
             g_logger->error("[Transfer] 文件不存在: {}", full_path.string());
+            // 异常退出前清理状态
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+            self->m_sending_files.erase(requested_path_str);
             return;
         }
 
         std::ifstream file(full_path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
             g_logger->error("[Transfer] 无法打开文件: {}", full_path.string());
+            // 异常退出前清理状态
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+            self->m_sending_files.erase(requested_path_str);
             return;
         }
 
@@ -76,11 +90,16 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         file.seekg(0, std::ios::beg);
         int total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
 
+        // 更新真实的总块数
+        {
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+            self->m_sending_files[requested_path_str].total_chunks = static_cast<uint32_t>(total_chunks);
+        }
+
         // 发送单个块的 Lambda
         auto send_chunk = [&](int index, const std::string& chunk_data) {
             // 组装协议头 (PathLen + Path + ChunkIdx + TotalChunks + Data)
             std::string packet_payload;
-            // 预分配大致空间以减少重分配 (Header约 4+N+4+4 = 12+N bytes)
             packet_payload.reserve(12 + requested_path_str.length() + chunk_data.length());
 
             append_uint16(packet_payload, static_cast<uint16_t>(requested_path_str.length()));
@@ -101,53 +120,62 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
             // 回调 P2PManager 发送
             self->m_send_callback(peer_id, encrypted_msg);
+
+            //  更新已发送块数进度
+            {
+                std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                if (self->m_sending_files.count(requested_path_str)) {
+                    self->m_sending_files[requested_path_str].sent_chunks++;
+                }
+            }
         };
 
         // 处理空文件
         if (size == 0) {
             send_chunk(0, "");
-            // [新增] 记录空文件发送历史
             self->m_state_manager->record_file_sent(peer_id, requested_path_str, file_hash);
+            // 清理状态
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+            self->m_sending_files.erase(requested_path_str);
             return;
         }
 
-        // [Worker线程] 3. 循环处理 (Lite Optimization: 内存复用)
-        // 预分配 buffer 和 compressed_data，避免循环内反复 malloc/free
+        // [Worker线程] 3. 循环处理
         std::vector<char> buffer(CHUNK_DATA_SIZE);
         std::string compressed_data;
-        compressed_data.reserve(CHUNK_DATA_SIZE * 2);  // 预留足够的压缩空间
+        compressed_data.reserve(CHUNK_DATA_SIZE * 2);
 
         for (int i = 0; i < total_chunks; ++i) {
             file.read(buffer.data(), CHUNK_DATA_SIZE);
             std::streamsize bytes_read = file.gcount();
 
-            // Snappy Compress 会重用 compressed_data 的容量，而不是每次都重新分配
             snappy::Compress(buffer.data(), bytes_read, &compressed_data);
-
             send_chunk(i, compressed_data);
         }
 
         // 4. 发送完成后，记录到 sync_history
         if (!file_hash.empty()) {
             self->m_state_manager->record_file_sent(peer_id, requested_path_str, file_hash);
-            // g_logger->debug("[Transfer] 已记录发送历史: {} -> {}", requested_path_str, peer_id);
+        }
+
+        // 传输全部完成，移除状态
+        {
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+            self->m_sending_files.erase(requested_path_str);
         }
 
         g_logger->debug("[Transfer] 文件发送完成: {}", requested_path_str);
     });
 }
 void TransferManager::handle_chunk(const std::string& payload, const std::string& peer_id) {
-    // 此函数在主线程被调用 (从 P2PManager 收到数据后)
-    // 为了不阻塞主线程解压和写盘，我们把它 throw 到 Worker 线程
-    // 注意：payload 是 const ref，我们需要拷贝一份扔进 lambda
-    // [修改] 将 peer_id 捕获进 lambda
+    // 此函数在主线程被调用，Throw 到 Worker 线程
     boost::asio::post(m_worker_pool, [self = shared_from_this(), payload, peer_id]() {
         const char* data_ptr = payload.c_str();
         size_t data_len = payload.length();
 
         // 1. 解析头部
         uint16_t path_len = read_uint16(data_ptr, data_len);
-        if (path_len == 0 || data_len < path_len) return;  // 格式错误
+        if (path_len == 0 || data_len < path_len) return;
 
         std::string file_path_str(data_ptr, path_len);
         data_ptr += path_len;
@@ -156,7 +184,7 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         uint32_t chunk_index = read_uint32(data_ptr, data_len);
         uint32_t total_chunks = read_uint32(data_ptr, data_len);
 
-        // 2. 解压 (CPU 密集)
+        // 2. 解压
         std::string uncompressed_data;
         if (data_len > 0) {
             if (!snappy::Uncompress(data_ptr, data_len, &uncompressed_data)) {
@@ -165,14 +193,13 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             }
         }
 
-        // 3. 写入文件 (IO 密集) - 需要加锁保护 map
+        // 3. 写入文件 - 需要加锁保护 map
         std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
 
         auto it = self->m_receiving_files.find(file_path_str);
         if (it == self->m_receiving_files.end()) {
             // 新下载任务
-            std::filesystem::path relative_path(
-                std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
+            std::filesystem::path relative_path = Utf8ToPath(file_path_str);
             std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
 
             if (full_path.has_parent_path()) {
@@ -211,8 +238,7 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         if (recv_file.received_chunks >= recv_file.total_chunks) {
             recv_file.file_stream.close();
 
-            std::filesystem::path relative_path(
-                std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
+            std::filesystem::path relative_path = Utf8ToPath(file_path_str);
             std::filesystem::path final_path = self->m_state_manager->get_root_path() / relative_path;
 
             std::error_code ec;
@@ -220,13 +246,8 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
 
             if (!ec) {
                 g_logger->info("[Transfer] ✅ 下载完成: {}", file_path_str);
-
-                // [新增] 核心逻辑：更新 Base Hash (Sync History)
-                // 只有记录了这一次同步的状态，下次发生修改时，我们才能正确判断是“冲突”还是“正常更新”
                 if (!peer_id.empty()) {
-                    // 重新计算落地文件的 Hash，确保数据一致性
                     std::string new_hash = Hashing::CalculateSHA256(final_path);
-                    // 记录到数据库: "我和 peer_id 在 file_path_str 上达成了一致，hash 是 new_hash"
                     self->m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
                 }
             } else {
@@ -238,14 +259,24 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
     });
 }
 
-std::vector<TransferStatus> TransferManager::get_active_downloads() {
+std::vector<TransferStatus> TransferManager::get_active_transfers() {
     std::lock_guard<std::mutex> lock(m_transfer_mutex);
     std::vector<TransferStatus> list;
+
+    // 1. 收集下载任务
     for (const auto& [path, recv] : m_receiving_files) {
         float prog =
             (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
-        list.push_back({path, recv.total_chunks, recv.received_chunks, prog});
+        list.push_back({path, recv.total_chunks, recv.received_chunks, prog, false});  // is_upload = false
     }
+
+    // 2. 收集上传任务
+    for (const auto& [path, send] : m_sending_files) {
+        float prog =
+            (send.total_chunks > 0) ? (static_cast<float>(send.sent_chunks) / send.total_chunks * 100.0f) : 0.0f;
+        list.push_back({path, send.total_chunks, send.sent_chunks, prog, true});  // is_upload = true
+    }
+
     return list;
 }
 

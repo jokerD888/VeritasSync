@@ -47,7 +47,10 @@ public:
     }
 
     using StatusProvider = std::function<std::vector<nlohmann::json>()>;
+    // 定义添加任务的回调类型
+    using OnTaskAddCallback = std::function<void(const SyncTask&, const Config&)>;
     void set_status_provider(StatusProvider provider) { m_status_provider = provider; }
+    void set_on_task_add(OnTaskAddCallback cb) { m_on_task_add = cb; }
 
     void start() {
         if (g_logger) g_logger->info("[WebUI] 服务启动于 http://127.0.0.1:{}", m_port);
@@ -158,6 +161,7 @@ private:
     Config m_config;
     std::mutex m_config_mutex;
     StatusProvider m_status_provider;
+    OnTaskAddCallback m_on_task_add;
 
     void setup_routes() {
         // 1. 首页
@@ -256,20 +260,29 @@ private:
                 task.role = j.at("role").get<std::string>();
                 task.sync_folder = j.at("sync_folder").get<std::string>();
 
-                // [新增] 解析同步模式 (依赖 Config.h 中的 JSON 序列化宏)
                 if (j.contains("mode")) {
                     task.mode = j.at("mode").get<SyncMode>();
                 } else {
-                    task.mode = SyncMode::OneWay;  // 默认单向
+                    task.mode = SyncMode::OneWay;
                 }
 
-                std::lock_guard<std::mutex> lock(m_config_mutex);
-                m_config.tasks.push_back(task);
+                // 1. 保存到配置
+                {
+                    std::lock_guard<std::mutex> lock(m_config_mutex);
+                    m_config.tasks.push_back(task);
+                    if (!save_config_internal()) {
+                        res.status = 500;
+                        return;
+                    }
 
-                if (save_config_internal())
-                    res.set_content("{\"success\":true}", "application/json");
-                else
-                    res.status = 500;
+                    // 2. [新增] 触发回调，通知主程序立即启动新任务
+                    if (m_on_task_add) {
+                        // 传入当前的配置副本（包含Tracker信息等）
+                        m_on_task_add(task, m_config);
+                    }
+                }
+
+                res.set_content("{\"success\":true}", "application/json");
             } catch (const std::exception& e) {
                 if (g_logger) g_logger->error("[WebUI] Add Task Failed: {}", e.what());
                 res.status = 400;

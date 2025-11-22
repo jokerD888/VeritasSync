@@ -22,8 +22,9 @@ class CryptoLayer;
 struct TransferStatus {
     std::string path;
     uint32_t total_chunks;
-    uint32_t received_chunks;
+    uint32_t processed_chunks;  // 已处理块数 (发送或接收)
     float progress;
+    bool is_upload;  // true=上传, false=下载
 };
 
 // 定义发送回调：(目标PeerID, 加密后的数据)
@@ -35,6 +36,8 @@ public:
     // 构造函数注入所有依赖
     TransferManager(StateManager* sm, boost::asio::thread_pool& pool, CryptoLayer& crypto, SendCallback send_cb);
 
+    void set_state_manager(StateManager* sm) { m_state_manager = sm; }
+
     // [Source端] 处理文件请求 (异步读盘 -> 压缩 -> 加密 -> 回调发送)
     void queue_upload(const std::string& peer_id, const nlohmann::json& request_payload);
 
@@ -43,7 +46,7 @@ public:
     void handle_chunk(const std::string& decrypted_payload, const std::string& peer_id);
 
     // 获取当前活跃的下载任务 (WebUI 用)
-    std::vector<TransferStatus> get_active_downloads();
+    std::vector<TransferStatus> get_active_transfers();
 
     // 清理超时的接收任务 (需外部定时调用)
     void cleanup_stale_buffers();
@@ -63,10 +66,15 @@ private:
         uint32_t received_chunks = 0;
         std::chrono::steady_clock::time_point last_active;
     };
+    struct SendingFile {
+        uint32_t total_chunks = 0;
+        uint32_t sent_chunks = 0;
+    };
 
     // 正在接收的文件映射 (Path -> State)
     std::map<std::string, ReceivingFile> m_receiving_files;
     std::mutex m_transfer_mutex;
+    std::map<std::string, SendingFile> m_sending_files;  // 追踪上传
 };
 
 }  // namespace VeritasSync
