@@ -4,6 +4,7 @@
 #include <functional>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <regex>
 
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/Logger.h"
@@ -21,6 +22,97 @@
 #include <boost/asio/detail/socket_ops.hpp>
 
 namespace VeritasSync {
+
+static std::pair<std::string, std::string> get_preferred_ips() {
+    // 1. [性能优化] 静态缓存，避免重复系统调用
+    static std::string cached_v4;
+    static std::string cached_v6;
+    static bool is_cached = false;
+
+    if (is_cached) {
+        return {cached_v4, cached_v6};
+    }
+
+    try {
+        boost::asio::io_context io_context;
+
+        // 2. 探测 IPv4 (连接 Google DNS 8.8.8.8)
+        try {
+            boost::asio::ip::udp::socket socket(io_context);
+            // 【修正】使用 make_address 替代 from_string
+            socket.connect(boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("8.8.8.8"), 53));
+            cached_v4 = socket.local_endpoint().address().to_string();
+        } catch (...) { /* 忽略 IPv4 失败 */
+        }
+
+        // 3. 探测 IPv6 (连接 Google IPv6 DNS)
+        // [协议正确性] 显式打开 v6 协议栈，防止 Windows 下报错 Invalid Argument
+        try {
+            boost::asio::ip::udp::socket socket6(io_context);
+            socket6.open(boost::asio::ip::udp::v6());
+            // 【修正】使用 make_address 替代 from_string
+            socket6.connect(boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("2001:4860:4860::8888"), 53));
+            cached_v6 = socket6.local_endpoint().address().to_string();
+        } catch (...) { /* 忽略 IPv6 失败 */
+        }
+
+        if (g_logger) {
+            if (!cached_v4.empty()) g_logger->info("[Network] 物理网卡 IPv4: {}", cached_v4);
+            if (!cached_v6.empty()) g_logger->info("[Network] 物理网卡 IPv6: {}", cached_v6);
+        }
+
+        is_cached = true;
+    } catch (const std::exception& e) {
+        if (g_logger) g_logger->warn("[Network] 路由探测异常: {}", e.what());
+    }
+
+    return {cached_v4, cached_v6};
+}
+
+// 智能 SDP 过滤器
+// 包含：逻辑安全保护 (srflx/relay)
+static std::string smart_filter_sdp(const std::string& sdp) {
+    auto [pref_v4, pref_v6] = get_preferred_ips();
+
+    std::istringstream iss(sdp);
+    std::string line;
+    std::ostringstream oss;
+
+    while (std::getline(iss, line)) {
+        // 处理换行符，防止干扰判断
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (line.find("a=candidate") != std::string::npos) {
+            bool keep = false;
+
+            // [逻辑安全] 绝对保留公网反射(srflx)和中继(relay)地址
+            // 这些是 NAT 穿透的救命稻草，绝对不能删
+            if (line.find("typ srflx") != std::string::npos || line.find("typ relay") != std::string::npos) {
+                keep = true;
+            }
+            // 只对 host (本地网卡) 类型进行过滤
+            else if (line.find("typ host") != std::string::npos) {
+                // 只有当 IP 等于我们探测到的“物理网卡 IP”时才保留
+                // 这样能完美剔除 WSL (172.x), Docker, VPN 等虚拟网卡
+                if (!pref_v4.empty() && line.find(pref_v4) != std::string::npos)
+                    keep = true;
+                else if (!pref_v6.empty() && line.find(pref_v6) != std::string::npos)
+                    keep = true;
+                else {
+                    // 既不是物理 v4 也不是物理 v6，丢弃！
+                }
+            } else {
+                // 其他类型 (如 prflx) 默认保留
+                keep = true;
+            }
+
+            if (!keep) continue;  // 跳过此行 (过滤掉)
+        }
+
+        oss << line << "\r\n";
+    }
+    return oss.str();
+}
 bool can_broadcast(SyncRole role, SyncMode mode) {
     // 如果是 Source，永远可以广播
     if (role == SyncRole::Source) return true;
@@ -231,7 +323,7 @@ void P2PManager::init() {
     });
     schedule_kcp_update();
     schedule_cleanup_task();  // 启动清理任务
-    init_upnp();  // 启动 UPnP 发现
+    init_upnp();              // 启动 UPnP 发现
 }
 P2PManager::~P2PManager() {
     m_io_context.stop();
@@ -326,7 +418,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
 
         g_logger->info("[ICE] 正在为对等点 {} 创建ICE Agent...", peer_id);
         juice_config_t config = {};
-                
+
         // --- 配置STUN服务器 (关键！) ---
         if (!m_stun_host.empty()) {
             config.stun_server_host = m_stun_host.c_str();
@@ -334,7 +426,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
             g_logger->debug("[ICE] 对等点 {} 使用 STUN: {}:{}", peer_id, m_stun_host, m_stun_port);
         }
         // ----------------------------------
-                
+
         // --- 配置TURN服务器 ---
         if (!m_turn_host.empty()) {
             config.turn_servers = &m_turn_server_config;
@@ -342,7 +434,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
             g_logger->debug("[ICE] 对等点 {} 使用 TURN: {}:{}", peer_id, m_turn_host, m_turn_port);
         }
         // ----------------------------------
-                
+
         config.user_ptr = this;
         config.cb_state_changed = &P2PManager::on_juice_state_changed;
         config.cb_candidate = &P2PManager::on_juice_candidate;
@@ -404,45 +496,36 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
         context = it->second;
     }
     std::string peer_id = context->peer_id;
-    
+
     g_logger->info("[ICE] 对等点 {} 状态改变: {}", peer_id, juice_state_to_string(state));
-    
+
     if (state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED) {
-        
         // --- 查询当前的连接类型 ---
         char local_sdp[1024];
         char remote_sdp[1024];
         ConnectionType new_type = ConnectionType::None;
 
         // 获取当前选定的候选地址对
-        if (juice_get_selected_candidates(agent, local_sdp, sizeof(local_sdp), 
-                                         remote_sdp, sizeof(remote_sdp)) == 0) 
-        {
+        if (juice_get_selected_candidates(agent, local_sdp, sizeof(local_sdp), remote_sdp, sizeof(remote_sdp)) == 0) {
             std::string local_str(local_sdp);
             // 检查本地候选地址的类型
-            if (local_str.find(" typ host") != std::string::npos || 
-                local_str.find(" typ srflx") != std::string::npos) 
-            {
+            if (local_str.find(" typ host") != std::string::npos || local_str.find(" typ srflx") != std::string::npos) {
                 new_type = ConnectionType::P2P;
-            } 
-            else if (local_str.find(" typ relay") != std::string::npos) 
-            {
+            } else if (local_str.find(" typ relay") != std::string::npos) {
                 new_type = ConnectionType::Relay;
             }
-            
+
             g_logger->debug("[ICE] 候选地址: {}", local_str);
         }
         // -----------------------------------
 
         // --- 检查连接类型是否发生变化 ---
         if (new_type != ConnectionType::None && new_type != context->current_type) {
-            
             if (new_type == ConnectionType::Relay) {
                 // Relay 中继连接建立
                 g_logger->warn("[ICE] 连接已建立：当前使用 UDP Relay (中继服务器) -> {}", peer_id);
                 g_logger->warn("[ICE] 正在后台尝试 P2P 直连优化...");
-            } 
-            else if (new_type == ConnectionType::P2P) {
+            } else if (new_type == ConnectionType::P2P) {
                 if (context->current_type == ConnectionType::Relay) {
                     // 从 Relay 升级到 P2P
                     g_logger->info("[ICE] ✨ P2P升级成功！连接已自动切换到 UDP P2P (直连) -> {}", peer_id);
@@ -455,23 +538,23 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
             context->current_type = new_type;
         }
         // -----------------------------------
-        
+
         // --- 只在 KCP 未设置时才设置 KCP ---
         if (!context->kcp) {
-            std::string conn_type_str = (new_type == ConnectionType::P2P) ? "P2P" : 
-                                       (new_type == ConnectionType::Relay) ? "Relay" : "Unknown";
-            g_logger->info("[KCP] ICE 连接建立 ({})，为 {} 设置 KCP 上下文。", 
-                           conn_type_str, peer_id);
+            std::string conn_type_str = (new_type == ConnectionType::P2P)     ? "P2P"
+                                        : (new_type == ConnectionType::Relay) ? "Relay"
+                                                                              : "Unknown";
+            g_logger->info("[KCP] ICE 连接建立 ({})，为 {} 设置 KCP 上下文。", conn_type_str, peer_id);
 
             // --- 使用确定性的 conv ID ---
             // 将 self_id 和 peer_id 排序后组合，确保双方生成相同的 conv
             std::string self_id = m_tracker_client ? m_tracker_client->get_self_id() : "";
             std::string id_pair = (self_id < peer_id) ? (self_id + peer_id) : (peer_id + self_id);
             uint32_t conv = static_cast<uint32_t>(std::hash<std::string>{}(id_pair));
-            
+
             g_logger->info("[KCP] 使用 conv ID: {} (基于: {} <-> {})", conv, self_id, peer_id);
             context->setup_kcp(conv);
-            
+
             if (m_role == SyncRole::Source) {
                 g_logger->info("[P2P] (Source) KCP 就绪，向新对等点 {} 发送全量状态...", peer_id);
                 m_state_manager->scan_directory();
@@ -480,7 +563,7 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
             }
         }
         // -----------------------------------
-        
+
     } else if (state == JUICE_STATE_FAILED) {
         // 【重要】只保留日志，不重试
         // libjuice 将会自动尝试 Relay 升级
@@ -498,28 +581,25 @@ void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
     if (!m_tracker_client) return;
 
     std::string sdp_str = sdp ? sdp : "";
-    if (sdp_str.empty()) {
-        g_logger->warn("[ICE] handle_juice_candidate 收到空 sdp。");
-        return;
+    if (sdp_str.empty()) return;
+
+    // 1. 使用智能过滤器清洗 (去除虚拟网卡，保留 IPv6)
+    std::string filtered_candidate = smart_filter_sdp(sdp_str);
+
+    // 如果过滤后为空（说明这条 candidate 是垃圾虚拟 IP），直接返回不发送
+    if (filtered_candidate.empty()) return;
+
+    // 2. [字符串健壮性] 移除尾部换行符
+    // 防止 rewrite 函数处理出错，也防止拼接 JSON 时格式错乱
+    while (!filtered_candidate.empty() && (filtered_candidate.back() == '\r' || filtered_candidate.back() == '\n')) {
+        filtered_candidate.pop_back();
     }
 
-    // --- libjuice 的 cb_candidate 回调只用于发送单个 ICE candidate ---
-    // 完整的 SDP Offer/Answer 应该在 gathering_done 后通过 juice_get_local_description 获取
+    // 3. UPnP 重写
+    std::string final_candidate = rewrite_candidate(filtered_candidate);
 
-    if (sdp_str.find("a=candidate") != std::string::npos) {
-        // 这是一个 ICE candidate
-
-        // --- UPnP 重写逻辑 ---
-        std::string final_candidate = rewrite_candidate(sdp_str);
-        // --------------------------
-        
-        g_logger->info("[ICE] 为 {} (发送给 {}) 生成 ICE candidate: {}...", 
-                       m_tracker_client->get_self_id(), peer_id, final_candidate.substr(0, 40));
-        m_tracker_client->send_signaling_message(peer_id, "ice_candidate", final_candidate);
-    } else {
-        g_logger->warn("[ICE] handle_juice_candidate 收到非 candidate 数据 (已忽略): {}...", 
-                       sdp_str.substr(0, 40));
-    }
+    g_logger->info("[ICE] 发送候选: {}...", final_candidate.substr(0, 50));
+    m_tracker_client->send_signaling_message(peer_id, "ice_candidate", final_candidate);
 }
 void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
     std::string peer_id;
@@ -531,31 +611,30 @@ void P2PManager::handle_juice_gathering_done(juice_agent_t* agent) {
         peer_id = it->second->peer_id;
     }
     if (!m_tracker_client) return;
-    
+
     self_id = m_tracker_client->get_self_id();
     g_logger->info("[ICE] 对等点 {} 的候选地址收集完成。", peer_id);
-
-    // --- 在 gathering 完成后，获取并发送完整的 SDP ---
 
     char local_description[4096];
     if (juice_get_local_description(agent, local_description, sizeof(local_description)) == 0) {
         std::string sdp_str(local_description);
-        
-        // 判断我们的角色，决定发送 Offer 还是 Answer
+
+        // ---  应用智能过滤器 ---
+        // 这将生成一份干净的、包含 IPv6 但不含虚拟网卡的 SDP
+        std::string clean_sdp = smart_filter_sdp(sdp_str);
+        // ---------------------------
+
         if (self_id < peer_id) {
-            // 我们是 Controlling (Offer 方)
-            g_logger->info("[ICE] 向 {} 发送 SDP Offer ({} 字节)", peer_id, sdp_str.length());
-            m_tracker_client->send_signaling_message(peer_id, "sdp_offer", sdp_str);
+            g_logger->info("[ICE] 向 {} 发送 SDP Offer (清洗后 {} 字节)", peer_id, clean_sdp.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_offer", clean_sdp);
         } else {
-            // 我们是 Controlled (Answer 方)
-            g_logger->info("[ICE] 向 {} 发送 SDP Answer ({} 字节)", peer_id, sdp_str.length());
-            m_tracker_client->send_signaling_message(peer_id, "sdp_answer", sdp_str);
+            g_logger->info("[ICE] 向 {} 发送 SDP Answer (清洗后 {} 字节)", peer_id, clean_sdp.length());
+            m_tracker_client->send_signaling_message(peer_id, "sdp_answer", clean_sdp);
         }
     } else {
         g_logger->error("[ICE] 获取本地 SDP 描述失败 (对等点: {})", peer_id);
     }
-    
-    // 仍然发送 gathering_done 通知
+
     m_tracker_client->send_signaling_message(peer_id, "ice_gathering_done", "");
 }
 void P2PManager::handle_juice_recv(juice_agent_t* agent, const char* data, size_t size) {
@@ -997,7 +1076,7 @@ void P2PManager::init_upnp() {
     // 在 P2P 的 IO 线程中执行,避免阻塞
     boost::asio::post(m_io_context, [this]() {
         std::lock_guard<std::mutex> lock(m_upnp_mutex);
-        
+
         int error = 0;
         // 发现路由器 (2000ms 超时)
         struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
@@ -1006,20 +1085,17 @@ void P2PManager::init_upnp() {
             // 获取有效的 IGD (互联网网关设备)
             // API: UPNP_GetValidIGD(devlist, urls, data, lanaddr, lanaddrlen, wanaddr, wanaddrlen)
             char wanaddr[64] = {0};
-            int r = UPNP_GetValidIGD(devlist, &m_upnp_urls, &m_upnp_data, 
-                                     m_upnp_lan_addr, sizeof(m_upnp_lan_addr),
+            int r = UPNP_GetValidIGD(devlist, &m_upnp_urls, &m_upnp_data, m_upnp_lan_addr, sizeof(m_upnp_lan_addr),
                                      wanaddr, sizeof(wanaddr));
-            
+
             if (r == 1) {
                 g_logger->info("[UPnP] 成功连接到路由器: {}", m_upnp_urls.controlURL);
                 g_logger->info("[UPnP] 我们的局域网 IP: {}", m_upnp_lan_addr);
 
                 // 获取公网 IP
                 char public_ip[40];
-                r = UPNP_GetExternalIPAddress(m_upnp_urls.controlURL, 
-                                            m_upnp_data.first.servicetype, 
-                                            public_ip);
-                
+                r = UPNP_GetExternalIPAddress(m_upnp_urls.controlURL, m_upnp_data.first.servicetype, public_ip);
+
                 if (r == UPNPCOMMAND_SUCCESS) {
                     m_upnp_public_ip = public_ip;
                     m_upnp_available = true;
@@ -1041,7 +1117,7 @@ void P2PManager::init_upnp() {
 static std::string get_sdp_field(const std::string& sdp, int index) {
     std::istringstream iss(sdp);
     std::string field;
-    for(int i = 0; i <= index; ++i) {
+    for (int i = 0; i <= index; ++i) {
         iss >> field;
         if (iss.fail()) return "";
     }
@@ -1060,7 +1136,7 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
     // 我们只关心 "host" 类型的候选地址，它们包含局域网IP
     std::string cand_type = get_sdp_field(sdp_candidate, 7);
     if (cand_type != "host") {
-        return sdp_candidate; // 不是 "host"，可能是 "srflx" 或 "relay"，直接返回
+        return sdp_candidate;  // 不是 "host"，可能是 "srflx" 或 "relay"，直接返回
     }
 
     // "a=candidate:..." 字段: 4=ip, 5=port
@@ -1069,26 +1145,23 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
 
     // 确保是我们自己的局域网 IP
     if (local_ip != m_upnp_lan_addr) {
-        g_logger->debug("[UPnP] 候选 IP {} 与 UPnP 局域网 IP {} 不匹配，跳过。", 
-                       local_ip, m_upnp_lan_addr);
+        g_logger->debug("[UPnP] 候选 IP {} 与 UPnP 局域网 IP {} 不匹配，跳过。", local_ip, m_upnp_lan_addr);
         return sdp_candidate;
     }
 
     // 尝试在路由器上添加这个端口映射
     // (将 公网端口 映射到 局域网IP:局域网端口)
-    int r = UPNP_AddPortMapping(m_upnp_urls.controlURL, 
-                                m_upnp_data.first.servicetype,
-                                local_port.c_str(), // external_port (使用与内部相同的端口)
-                                local_port.c_str(), // internal_port
-                                m_upnp_lan_addr, // internal_client
-                                "VeritasSync P2P",  // description
-                                "UDP",              // protocol
-                                nullptr, "0");      // remote_host, duration
+    int r = UPNP_AddPortMapping(m_upnp_urls.controlURL, m_upnp_data.first.servicetype,
+                                local_port.c_str(),  // external_port (使用与内部相同的端口)
+                                local_port.c_str(),  // internal_port
+                                m_upnp_lan_addr,     // internal_client
+                                "VeritasSync P2P",   // description
+                                "UDP",               // protocol
+                                nullptr, "0");       // remote_host, duration
 
     if (r == UPNPCOMMAND_SUCCESS) {
-        g_logger->info("[UPnP] 成功为候选地址 {}:{} 映射公网端口 {}", 
-                       local_ip, local_port, local_port);
-        
+        g_logger->info("[UPnP] 成功为候选地址 {}:{} 映射公网端口 {}", local_ip, local_port, local_port);
+
         // 成功！现在重写候选地址，用公网IP替换局域网IP
         std::string rewritten_candidate = sdp_candidate;
         size_t pos = rewritten_candidate.find(local_ip);
@@ -1098,8 +1171,7 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
             return rewritten_candidate;
         }
     } else {
-        g_logger->warn("[UPnP] 无法为 {}:{} 映射端口 (错误码: {}).", 
-                       local_ip, local_port, r);
+        g_logger->warn("[UPnP] 无法为 {}:{} 映射端口 (错误码: {}).", local_ip, local_port, r);
     }
 
     // 映射失败，返回原始候选地址

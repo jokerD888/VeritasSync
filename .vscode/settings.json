@@ -100,5 +100,8 @@
         "typeindex": "cpp",
         "valarray": "cpp",
         "variant": "cpp"
+    },
+    "[html]": {
+        "editor.defaultFormatter": "vscode.html-language-features"
     }
 }

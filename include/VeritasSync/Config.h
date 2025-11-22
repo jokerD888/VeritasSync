@@ -8,6 +8,11 @@
 
 namespace VeritasSync {
 
+static const std::vector<std::pair<std::string, unsigned short>> kBackupStunServers = {
+    {"stun.l.google.com", 19302},
+    {"47.121.187.240", 3478},
+};
+
 enum class SyncMode {
     OneWay,        // 单向：仅 Source -> Destination
     BiDirectional  // 双向：Source <-> Destination
@@ -23,17 +28,14 @@ struct SyncTask {
 
 // 顶级配置结构
 struct Config {
-    std::string tracker_host = "127.0.0.1";
+    std::string tracker_host = "47.121.187.240";
     unsigned short tracker_port = 9988;
 
-    // --- STUN 服务器配置 ---
-    std::string stun_host = "stun.l.google.com";  // 默认公共STUN
-    unsigned short stun_port = 19302;  // STUN标准端口
-    // ----------------------------
+    std::string stun_host = "stun.l.google.com";
+    unsigned short stun_port = 19302;
 
-    // --- TURN 服务器配置 ---
     std::string turn_host;
-    unsigned short turn_port = 3478;  // 默认
+    unsigned short turn_port = 3478;
     std::string turn_username;
     std::string turn_password;
     // ----------------------------
@@ -124,14 +126,21 @@ inline Config load_config_or_create_default(const std::string& config_path = "co
     if (f.good()) {
         nlohmann::json j;
         f >> j;
+        // 增加容错：如果配置文件里缺少某些字段，由 from_json 处理或使用结构体默认值
         return j.get<Config>();
     } else {
         Config defaultConfig;
-        // --- 示例 TURN ---
-        defaultConfig.turn_host = "your_turn_server.com";
-        defaultConfig.turn_username = "user";
-        defaultConfig.turn_password = "pass";
-        // ----------------------
+
+        // TURN 默认留空，防止连接无效地址导致延迟
+        defaultConfig.turn_host = "";
+        defaultConfig.turn_port = 3478;
+        defaultConfig.turn_username = "";
+        defaultConfig.turn_password = "";
+
+        // STUN 默认使用 Google 的，比较稳定
+        defaultConfig.stun_host = "stun.l.google.com";
+        defaultConfig.stun_port = 19302;
+
         defaultConfig.tasks = {};
 
         std::ofstream o(config_path);

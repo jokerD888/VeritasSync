@@ -143,49 +143,46 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/web"
     COMPONENT Runtime
 )
 
-# 自动收集并安装所有依赖的DLL文件（仅Windows平台）
 if(WIN32)
-    install(CODE [[
-        file(GET_RUNTIME_DEPENDENCIES
-            EXECUTABLES 
-                "${CMAKE_INSTALL_PREFIX}/bin/veritas_sync.exe"
-                "${CMAKE_INSTALL_PREFIX}/bin/veritas_tracker.exe"
-                "${CMAKE_INSTALL_PREFIX}/bin/efsw_test.exe"
-                "${CMAKE_INSTALL_PREFIX}/bin/nat_demo.exe"
-            RESOLVED_DEPENDENCIES_VAR _r_deps
-            UNRESOLVED_DEPENDENCIES_VAR _u_deps
-            DIRECTORIES
-                "$ENV{VCPKG_ROOT}/installed/x64-windows/bin"
-            PRE_EXCLUDE_REGEXES
-                "api-ms-.*" "ext-ms-.*"
-            POST_EXCLUDE_REGEXES
-                ".*[Ss]ystem32/.*\\.dll"
-        )
-        foreach(_file ${_r_deps})
-            # 只复制vcpkg目录下的DLL
-            string(TOLOWER "${_file}" _file_lower)
-            if(_file_lower MATCHES "vcpkg")
-                file(INSTALL
-                    DESTINATION "${CMAKE_INSTALL_PREFIX}/bin"
-                    TYPE SHARED_LIBRARY
-                    FOLLOW_SYMLINK_CHAIN
-                    FILES "${_file}"
-                )
-            endif()
-        endforeach()
-        list(LENGTH _u_deps _u_length)
-        if("${_u_length}" GREATER 0)
-            message(STATUS "已过滤的系统依赖项数量: ${_u_length}")
-        endif()
-    ]] COMPONENT Runtime)
-endif()
-
-# 可选：添加配置文件示例到发行版
-if(EXISTS "${CMAKE_SOURCE_DIR}/config.example.json")
-    install(FILES "${CMAKE_SOURCE_DIR}/config.example.json"
-        DESTINATION .
-        COMPONENT Runtime
+    # 1. 尝试定位 vcpkg 的 bin 目录 (Manifest 模式下，通常在构建目录的 vcpkg_installed 中)
+    # 我们通过查找一个已知的 DLL (如 brotlienc.dll) 来定位目录
+    find_path(VCPKG_BIN_DIR "brotlienc.dll"
+        PATHS
+            "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin"
+            "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
+            "$ENV{VCPKG_ROOT}/installed/x64-windows/bin"
+        NO_DEFAULT_PATH
     )
+
+    if(VCPKG_BIN_DIR)
+        message(STATUS "✅ 成功定位依赖 DLL 目录: ${VCPKG_BIN_DIR}")
+        
+        # 将该目录下的所有 .dll 文件复制到安装包的 bin 目录
+        # [修复] COMPONENT 必须放在 FILES_MATCHING 之前
+        install(DIRECTORY "${VCPKG_BIN_DIR}/"
+            DESTINATION bin
+            COMPONENT Runtime
+            FILES_MATCHING PATTERN "*.dll"
+        )
+    else()
+        message(WARNING "⚠️ 无法自动找到 vcpkg 的 bin 目录。尝试使用依赖扫描作为后备方案...")
+        
+        # 备用方案：自动扫描依赖 (可能不完整，但在找不到路径时聊胜于无)
+        install(CODE [[
+            file(GET_RUNTIME_DEPENDENCIES
+                EXECUTABLES "${CMAKE_INSTALL_PREFIX}/bin/veritas_sync.exe"
+                RESOLVED_DEPENDENCIES_VAR _r_deps
+                UNRESOLVED_DEPENDENCIES_VAR _u_deps
+                DIRECTORIES "$ENV{VCPKG_ROOT}/installed/x64-windows/bin"
+            )
+            foreach(_file ${_r_deps})
+                string(TOLOWER "${_file}" _file_lower)
+                if(_file_lower MATCHES "vcpkg")
+                    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin" TYPE SHARED_LIBRARY FILES "${_file}")
+                endif()
+            endforeach()
+        ]] COMPONENT Runtime)
+    endif()
 endif()
 
 
@@ -255,10 +252,21 @@ set(CPACK_NSIS_CREATE_ICONS_EXTRA "
     CreateShortCut '$DESKTOP\\\\VeritasSync.lnk' '$INSTDIR\\\\bin\\\\veritas_sync.exe'
 ")
 
-# 4. 定义生成器
+# --- [新增] 4. 自动配置防火墙规则 (安装时添加，卸载时删除) ---
+# 使用 netsh 命令，在安装结束时执行
+set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+    ExecWait 'netsh advfirewall firewall add rule name=\"VeritasSync\" dir=in action=allow program=\"$INSTDIR\\\\bin\\\\veritas_sync.exe\" enable=yes'
+")
+
+# 在卸载时删除规则
+set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS "
+    ExecWait 'netsh advfirewall firewall delete rule name=\"VeritasSync\" program=\"$INSTDIR\\\\bin\\\\veritas_sync.exe\"'
+")
+
+# 5. 定义生成器
 # NSIS = 生成 .exe 安装包
 # ZIP  = 生成 .zip 绿色免安装包
 set(CPACK_GENERATOR "NSIS;ZIP") 
 
-# 5. 必须放在最后包含！
+# 6. 必须放在最后包含！
 include(CPack)

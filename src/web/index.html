@@ -448,20 +448,36 @@
             </div>
             <div class="card" style="max-width:600px">
                 <h3 style="margin-bottom:1.5rem">连接设置</h3>
-                <div class="form-group"><label>Tracker IP 地址</label><input id="cfgTrackerHost" class="form-input"
-                        value=""></div>
-                <div class="form-group"><label>Tracker 端口</label><input id="cfgTrackerPort" class="form-input"
-                        type="number" value=""></div>
+                <div class="form-group">
+                    <label>Tracker 地址 (Host : Port)</label>
+                    <div class="input-group">
+                        <input id="cfgTrackerHost" class="form-input" placeholder="IP 或域名" style="flex: 3;">
+                        <input id="cfgTrackerPort" class="form-input" type="number" placeholder="端口" style="flex: 1;">
+                    </div>
+                </div>
                 <hr style="margin:1.5rem 0;border:0;border-top:1px solid var(--border)">
+            
                 <h3 style="margin-bottom:1.5rem">NAT 穿透 (STUN/TURN)</h3>
-                <div class="form-group"><label>STUN 服务器</label><input id="cfgStunHost" class="form-input" value="">
+            <div class="form-group">
+                <label>STUN 服务器 (Host : Port)</label>
+                <div class="input-group">
+                    <input id="cfgStunHost" class="form-input" placeholder="stun.l.google.com" style="flex: 3;">
+                    <input id="cfgStunPort" class="form-input" type="number" placeholder="19302" style="flex: 1;">
                 </div>
-                <div class="form-group"><label>TURN 服务器 (可选)</label><input id="cfgTurnHost" class="form-input" value="">
+                    <div style="font-size:0.8rem;color:var(--sub);margin-top:4px">
+                        备选推荐: stun.l.google.com:19302
+                    </div>
                 </div>
-                <div class="form-group"><label>TURN 用户名</label><input id="cfgTurnUser" class="form-input" value="">
+            <div class="form-group">
+                <label>TURN 服务器 (可选) (Host : Port)</label>
+                <div class="input-group">
+                    <input id="cfgTurnHost" class="form-input" placeholder="留空以禁用" style="flex: 3;">
+                    <input id="cfgTurnPort" class="form-input" type="number" placeholder="3478" style="flex: 1;">
                 </div>
-                <div class="form-group"><label>TURN 密码</label><input id="cfgTurnPass" class="form-input" type="password"
-                        value=""></div>
+            </div>
+            <div class="form-group"><label>TURN 用户名</label><input id="cfgTurnUser" class="form-input" value=""></div>
+            <div class="form-group"><label>TURN 密码</label><input id="cfgTurnPass" class="form-input" type="password" value="">
+            </div>
             </div>
         </div>
         <div id="view-logs" class="view-section section-hidden">
@@ -601,16 +617,64 @@
                 const c = await r.json();
                 id('cfgTrackerHost').value = c.tracker_host || "";
                 id('cfgTrackerPort').value = c.tracker_port || 9988;
-                id('cfgStunHost').value = c.stun_host || "";
-                id('cfgTurnHost').value = c.turn_host || "";
+                
+                //  加载 STUN/TURN 端口
+                id('cfgStunHost').value = c.stun_host || "stun.l.google.com";
+                id('cfgStunPort').value = c.stun_port || 19302;
+                
+                id('cfgTurnHost').value = c.turn_host || ""; // 默认为空
+                id('cfgTurnPort').value = c.turn_port || 3478;
+                
                 id('cfgTurnUser').value = c.turn_username || "";
                 id('cfgTurnPass').value = c.turn_password || "";
             } catch (e) {
                 console.error("加载配置失败", e);
+                alert("加载配置失败，请刷新重试");
             }
         }
 
-        async function saveSettings() { const b = id('btnSave'); b.disabled = true; b.innerText = "保存中..."; const d = { tracker_host: id('cfgTrackerHost').value, tracker_port: parseInt(id('cfgTrackerPort').value || 9988), stun_host: id('cfgStunHost').value, turn_host: id('cfgTurnHost').value, turn_username: id('cfgTurnUser').value, turn_password: id('cfgTurnPass').value }; try { const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(d) }); if (r.ok) alert("已保存，请重启"); else alert("保存失败"); } catch (e) { alert("网络错误"); } b.disabled = false; b.innerText = "💾 保存设置"; }
+        async function saveSettings() { 
+            const b = id('btnSave'); 
+            b.disabled = true; 
+            b.innerText = "保存中..."; 
+            
+            //  获取并转换端口值为整数
+            const d = { 
+                tracker_host: id('cfgTrackerHost').value, 
+                tracker_port: parseInt(id('cfgTrackerPort').value || 0), 
+                
+                stun_host: id('cfgStunHost').value,
+                stun_port: parseInt(id('cfgStunPort').value || 0),
+                
+                turn_host: id('cfgTurnHost').value,
+                turn_port: parseInt(id('cfgTurnPort').value || 0),
+                
+                turn_username: id('cfgTurnUser').value, 
+                turn_password: id('cfgTurnPass').value 
+            }; 
+            
+            //  前端简单校验
+            if (d.tracker_port < 1 || d.stun_port < 1 || (d.turn_host && d.turn_port < 1)) {
+                 alert("端口号无效，请输入 1-65535 之间的数字");
+                 b.disabled = false;
+                 b.innerText = "💾 保存设置";
+                 return;
+            }
+
+            try { 
+                const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(d) }); 
+                const res = await r.json();
+                if (r.ok) {
+                    alert("已保存，请重启应用以生效"); 
+                } else {
+                    alert("保存失败: " + (res.error || "未知错误")); 
+                }
+            } catch (e) { 
+                alert("网络错误"); 
+            } 
+            b.disabled = false; 
+            b.innerText = "💾 保存设置"; 
+        }
         async function restartApp() { if (!confirm("确定要重启吗？")) return; id('restart-overlay').classList.add('active'); try { fetch('/api/restart', { method: 'POST' }); } catch (e) { } let c = 0; const t = setInterval(async () => { c++; try { const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); const r = await fetch('/api/config', { signal: ctl.signal }); if (r.ok) { clearInterval(t); location.reload(); } } catch (e) { if (c > 30) { clearInterval(t); location.reload(); } } }, 2000); }
         function genKey() { const c = 'abcdefghijklmnopqrstuvwxyz0123456789', l = c.length; let k = 'sync-'; for (let i = 0; i < 8; i++)k += c.charAt(Math.floor(Math.random() * l)); id('newKey').value = k; }
         function closeLogModal() { id('log-modal').classList.remove('open'); }

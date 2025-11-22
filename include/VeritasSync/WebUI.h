@@ -191,25 +191,53 @@ private:
             std::lock_guard<std::mutex> lock(m_config_mutex);
             try {
                 auto j = nlohmann::json::parse(req.body);
-                if (j.contains("tracker_host")) m_config.tracker_host = j.value("tracker_host", m_config.tracker_host);
-                if (j.contains("tracker_port")) m_config.tracker_port = j.value("tracker_port", m_config.tracker_port);
-                if (j.contains("stun_host")) m_config.stun_host = j.value("stun_host", m_config.stun_host);
-                if (j.contains("stun_port")) m_config.stun_port = j.value("stun_port", m_config.stun_port);
-                if (j.contains("turn_host")) m_config.turn_host = j.value("turn_host", m_config.turn_host);
-                if (j.contains("turn_port")) m_config.turn_port = j.value("turn_port", m_config.turn_port);
+
+                // --- [新增] 临时变量用于校验，防止直接污染 m_config ---
+                std::string new_tracker_host = j.value("tracker_host", m_config.tracker_host);
+                int new_tracker_port = j.value("tracker_port", (int)m_config.tracker_port);
+
+                std::string new_stun_host = j.value("stun_host", m_config.stun_host);
+                int new_stun_port = j.value("stun_port", (int)m_config.stun_port);
+
+                std::string new_turn_host = j.value("turn_host", m_config.turn_host);
+                int new_turn_port = j.value("turn_port", (int)m_config.turn_port);
+
+                // --- [新增] 校验逻辑 ---
+                if (new_tracker_port < 1 || new_tracker_port > 65535 || new_stun_port < 1 || new_stun_port > 65535 ||
+                    new_turn_port < 1 || new_turn_port > 65535) {
+                    if (g_logger) g_logger->warn("[WebUI] 配置保存失败: 端口号必须在 1-65535 之间");
+                    res.status = 400;
+                    res.set_content("{\"error\":\"端口号无效，请输入 1-65535 之间的整数\"}",
+                                    "application/json; charset=utf-8");
+                    return;
+                }
+
+                // --- 校验通过，应用配置 ---
+                m_config.tracker_host = new_tracker_host;
+                m_config.tracker_port = (unsigned short)new_tracker_port;
+
+                m_config.stun_host = new_stun_host;
+                m_config.stun_port = (unsigned short)new_stun_port;  // 保存 STUN 端口
+
+                m_config.turn_host = new_turn_host;
+                m_config.turn_port = (unsigned short)new_turn_port;  // 保存 TURN 端口
+
                 if (j.contains("turn_username"))
                     m_config.turn_username = j.value("turn_username", m_config.turn_username);
                 if (j.contains("turn_password"))
                     m_config.turn_password = j.value("turn_password", m_config.turn_password);
 
-                if (save_config_internal())
+                // 保存到磁盘
+                if (save_config_internal()) {
                     res.set_content("{\"success\":true}", "application/json");
-                else
+                } else {
                     res.status = 500;
+                    res.set_content("{\"error\":\"无法写入配置文件\"}", "application/json");
+                }
             } catch (const std::exception& e) {
                 if (g_logger) g_logger->error("[WebUI] Config POST Error: {}", e.what());
                 res.status = 400;
-                res.set_content("{\"error\":\"Invalid JSON\"}", "application/json");
+                res.set_content("{\"error\":\"无效的 JSON 格式或参数错误\"}", "application/json");
             }
         });
 
