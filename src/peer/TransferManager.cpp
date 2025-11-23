@@ -3,6 +3,7 @@
 #include <snappy.h>
 
 #include <boost/asio/detail/socket_ops.hpp>  // for host_to_network/network_to_host
+#include <thread>
 
 #include "VeritasSync/CryptoLayer.h"
 #include "VeritasSync/EncodingUtils.h"
@@ -52,26 +53,23 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     std::string requested_path_str = request_payload.at("path").get<std::string>();
     g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", requested_path_str, peer_id);
 
-    // 提前在 Map 中占位，初始块数未知 (0,0)，防止 UI 闪烁
+    // 1. 提前在 Map 中占位 (防止 UI 闪烁，先置为 0/0)
     {
         std::lock_guard<std::mutex> lock(m_transfer_mutex);
         m_sending_files[requested_path_str] = {0, 0};
     }
 
-    // 异步投递到线程池
+    // 2. 异步投递到 Worker 线程池
     boost::asio::post(m_worker_pool, [self = shared_from_this(), requested_path_str, peer_id]() {
-        if (!self->m_state_manager) return;  // 再次检查空指针，以防万一
+        if (!self->m_state_manager) return;
 
-        // [Worker线程] 1. 获取 Hash
+        // --- 准备阶段 ---
         std::string file_hash = self->m_state_manager->get_file_hash(requested_path_str);
-
-        // [Worker线程] 2. 准备路径
         std::filesystem::path relative_path = Utf8ToPath(requested_path_str);
         std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
 
         if (!std::filesystem::exists(full_path)) {
             g_logger->error("[Transfer] 文件不存在: {}", full_path.string());
-            // 异常退出前清理状态
             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
             self->m_sending_files.erase(requested_path_str);
             return;
@@ -80,7 +78,6 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         std::ifstream file(full_path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
             g_logger->error("[Transfer] 无法打开文件: {}", full_path.string());
-            // 异常退出前清理状态
             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
             self->m_sending_files.erase(requested_path_str);
             return;
@@ -88,17 +85,19 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
+
+        // 计算总块数
         int total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
 
-        // 更新真实的总块数
+        // 更新 UI 显示用的总块数
         {
             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
             self->m_sending_files[requested_path_str].total_chunks = static_cast<uint32_t>(total_chunks);
         }
 
-        // 发送单个块的 Lambda
-        auto send_chunk = [&](int index, const std::string& chunk_data) {
-            // 组装协议头 (PathLen + Path + ChunkIdx + TotalChunks + Data)
+        // --- 定义发送单个块的 Lambda ---
+        auto send_chunk = [&](int index, const std::string& chunk_data) -> int {
+            // 组装协议包 (PathLen + Path + ChunkIdx + TotalChunks + Data)
             std::string packet_payload;
             packet_payload.reserve(12 + requested_path_str.length() + chunk_data.length());
 
@@ -108,63 +107,80 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
             append_uint32(packet_payload, total_chunks);
             packet_payload.append(chunk_data);
 
-            // 加上类型前缀
+            // 加上 MSG_TYPE 前缀
             std::string binary_packet;
             binary_packet.reserve(1 + packet_payload.length());
             binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
             binary_packet.append(std::move(packet_payload));
 
-            // [Worker线程] 加密
+            // 加密
             std::string encrypted_msg = self->m_crypto.encrypt(binary_packet);
-            if (encrypted_msg.empty()) return;
+            if (encrypted_msg.empty()) return 0;
 
-            // 回调 P2PManager 发送
-            self->m_send_callback(peer_id, encrypted_msg);
+            // [关键] 调用回调发送，并获取当前 KCP 积压量
+            // 因为 P2PManager 改为了同步发送，这里返回的 pending 是实时的
+            int pending = self->m_send_callback(peer_id, encrypted_msg);
 
-            //  更新已发送块数进度
+            // 更新 UI 进度
             {
                 std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                 if (self->m_sending_files.count(requested_path_str)) {
                     self->m_sending_files[requested_path_str].sent_chunks++;
                 }
             }
+
+            return pending;
         };
 
-        // 处理空文件
+        // 处理 0 字节空文件
         if (size == 0) {
             send_chunk(0, "");
             self->m_state_manager->record_file_sent(peer_id, requested_path_str, file_hash);
-            // 清理状态
             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
             self->m_sending_files.erase(requested_path_str);
             return;
         }
 
-        // [Worker线程] 3. 循环处理
+        // --- 循环发送阶段 (带智能流控) ---
         std::vector<char> buffer(CHUNK_DATA_SIZE);
         std::string compressed_data;
         compressed_data.reserve(CHUNK_DATA_SIZE * 2);
+
+        // 既然 snd_wnd 设为了 4096，我们的阈值必须 >= 4096。
+        // 设置为 4096，允许 KCP 发送队列填满整个窗口，跑满带宽。
+        const int CONGESTION_THRESHOLD = 4096;
 
         for (int i = 0; i < total_chunks; ++i) {
             file.read(buffer.data(), CHUNK_DATA_SIZE);
             std::streamsize bytes_read = file.gcount();
 
+            // 压缩
             snappy::Compress(buffer.data(), bytes_read, &compressed_data);
-            send_chunk(i, compressed_data);
+
+            // 发送并获取积压量
+            int pending_packets = send_chunk(i, compressed_data);
+
+            // [背压逻辑] 如果积压过多，主动休眠，让 IO 线程有机会把数据发出去
+            if (pending_packets > CONGESTION_THRESHOLD) {
+                // 积压严重 -> 睡 10ms (稍微温和一点，避免睡太死)
+                int sleep_ms = (pending_packets > CONGESTION_THRESHOLD * 1.5) ? 10 : 2;
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            }
+            // 如果 pending_packets 很小，说明网络通畅，循环全速运行，不 sleep
         }
 
-        // 4. 发送完成后，记录到 sync_history
+        // 4. 结束处理
         if (!file_hash.empty()) {
             self->m_state_manager->record_file_sent(peer_id, requested_path_str, file_hash);
         }
 
-        // 传输全部完成，移除状态
+        // 从 UI 列表中移除
         {
             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
             self->m_sending_files.erase(requested_path_str);
         }
 
-        g_logger->debug("[Transfer] 文件发送完成: {}", requested_path_str);
+        g_logger->info("[Transfer] 文件发送完成: {} (共 {} 块)", requested_path_str, total_chunks);
     });
 }
 void TransferManager::handle_chunk(const std::string& payload, const std::string& peer_id) {
@@ -262,19 +278,46 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
 std::vector<TransferStatus> TransferManager::get_active_transfers() {
     std::lock_guard<std::mutex> lock(m_transfer_mutex);
     std::vector<TransferStatus> list;
+    auto now = std::chrono::steady_clock::now();
 
-    // 1. 收集下载任务
-    for (const auto& [path, recv] : m_receiving_files) {
+    // 1. 处理下载任务 (Receiving)
+    for (auto& [path, recv] : m_receiving_files) {
+        // --- 速度计算逻辑 ---
+        std::chrono::duration<double> elapsed = now - recv.last_tick_time;
+        if (elapsed.count() >= 0.5) {  // 每 500ms 更新一次速度，避免抖动
+            uint32_t delta_chunks = recv.received_chunks - recv.last_tick_chunks;
+            // 速度 = (新增块数 * 块大小) / 经过时间
+            recv.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
+
+            // 更新快照
+            recv.last_tick_chunks = recv.received_chunks;
+            recv.last_tick_time = now;
+        }
+
         float prog =
             (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
-        list.push_back({path, recv.total_chunks, recv.received_chunks, prog, false});  // is_upload = false
+
+        // 将 recv.current_speed 填入 TransferStatus
+        list.push_back({path, recv.total_chunks, recv.received_chunks, prog, false, recv.current_speed});
     }
 
-    // 2. 收集上传任务
-    for (const auto& [path, send] : m_sending_files) {
+    // 2. 处理上传任务 (Sending)
+    for (auto& [path, send] : m_sending_files) {
+        // --- 速度计算逻辑 ---
+        std::chrono::duration<double> elapsed = now - send.last_tick_time;
+        if (elapsed.count() >= 0.5) {
+            uint32_t delta_chunks = send.sent_chunks - send.last_tick_chunks;
+            send.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
+
+            send.last_tick_chunks = send.sent_chunks;
+            send.last_tick_time = now;
+        }
+
         float prog =
             (send.total_chunks > 0) ? (static_cast<float>(send.sent_chunks) / send.total_chunks * 100.0f) : 0.0f;
-        list.push_back({path, send.total_chunks, send.sent_chunks, prog, true});  // is_upload = true
+
+        // 将 send.current_speed 填入 TransferStatus
+        list.push_back({path, send.total_chunks, send.sent_chunks, prog, true, send.current_speed});
     }
 
     return list;

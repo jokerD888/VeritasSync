@@ -68,6 +68,8 @@ public:
     std::shared_ptr<VeritasSync::P2PManager> get_p2p() { return m_p2p_manager; }
     std::string get_key() const { return m_task.sync_key; }
 
+    std::string get_root_path() const { return m_task.sync_folder; }
+
     void start() {
         VeritasSync::g_logger->info("--- Starting Sync Task [{}] ---", m_task.sync_key);
         VeritasSync::g_logger->info("[Config] Role: {}", m_task.role);
@@ -77,17 +79,19 @@ public:
         std::filesystem::path sync_path = VeritasSync::Utf8ToPath(m_task.sync_folder);
 
         VeritasSync::SyncRole role;
-        bool is_source;
         if (m_task.role == "source") {
             role = VeritasSync::SyncRole::Source;
-            is_source = true;
         } else if (m_task.role == "destination") {
             role = VeritasSync::SyncRole::Destination;
-            is_source = false;
         } else {
             VeritasSync::g_logger->error("Invalid role: '{}' for task '{}'.", m_task.role, m_task.sync_key);
             return;
         }
+
+        // [核心修正] 开启文件监控的条件：我是 Source 或者 任务是双向同步
+        // 即使是 Destination，在双向模式下也需要监控文件变化以便发送给对方
+        bool enable_watcher =
+            (role == VeritasSync::SyncRole::Source) || (m_task.mode == VeritasSync::SyncMode::BiDirectional);
 
         // 2. 确保目录存在
         std::error_code ec;
@@ -134,9 +138,9 @@ public:
         }
 
         // 7. 创建 StateManager (传入 sync_key 用于日志)
-        m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager, is_source,
-                                                                      m_task.sync_key  // [新增] 传入 Key
-        );
+        // [修改] 第三个参数传入计算好的 enable_watcher，确保双向模式下两端都监控文件
+        m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager,
+                                                                      enable_watcher, m_task.sync_key);
 
         // 8. 注入 StateManager (这会自动更新 TransferManager 内部的指针)
         m_p2p_manager->set_state_manager(m_state_manager.get());
@@ -234,11 +238,13 @@ int main(int argc, char* argv[]) {
                 for (const auto& item : transfers) {
                     nlohmann::json j;
                     j["key"] = node->get_key();
+                    j["root"] = node->get_root_path();
                     j["path"] = item.path;
                     j["total"] = item.total_chunks;
                     j["done"] = item.processed_chunks;  // 改名后的字段
                     j["progress"] = item.progress;
                     j["type"] = item.is_upload ? "upload" : "download";  // 新增类型字段
+                    j["speed"] = item.speed;
                     result.push_back(j);
                 }
             }

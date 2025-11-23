@@ -25,11 +25,12 @@ struct TransferStatus {
     uint32_t processed_chunks;  // 已处理块数 (发送或接收)
     float progress;
     bool is_upload;  // true=上传, false=下载
+    double speed;
 };
 
 // 定义发送回调：(目标PeerID, 加密后的数据)
 // TransferManager 在 Worker 线程完成处理后，会调用此回调
-using SendCallback = std::function<void(const std::string& peer_id, const std::string& encrypted_data)>;
+using SendCallback = std::function<int(const std::string& peer_id, const std::string& encrypted_data)>;
 
 class TransferManager : public std::enable_shared_from_this<TransferManager> {
 public:
@@ -65,10 +66,18 @@ private:
         uint32_t total_chunks = 0;
         uint32_t received_chunks = 0;
         std::chrono::steady_clock::time_point last_active;
+
+        uint32_t last_tick_chunks = 0;
+        std::chrono::steady_clock::time_point last_tick_time = std::chrono::steady_clock::now();
+        double current_speed = 0.0;
     };
     struct SendingFile {
         uint32_t total_chunks = 0;
         uint32_t sent_chunks = 0;
+
+        uint32_t last_tick_chunks = 0;
+        std::chrono::steady_clock::time_point last_tick_time = std::chrono::steady_clock::now();
+        double current_speed = 0.0;
     };
 
     // 正在接收的文件映射 (Path -> State)

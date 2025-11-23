@@ -12,7 +12,7 @@
 #include "VeritasSync/StateManager.h"
 #include "VeritasSync/SyncManager.h"
 #include "VeritasSync/TrackerClient.h"
-#define BUFFERSIZE 8192
+#define BUFFERSIZE 32768
 #include <b64/decode.h>
 #include <b64/encode.h>
 #include <openssl/evp.h>
@@ -64,8 +64,25 @@ PeerContext::~PeerContext() {
 void PeerContext::setup_kcp(uint32_t conv) {
     kcp = ikcp_create(conv, this);
     kcp->output = &P2PManager::kcp_output_callback;
-    ikcp_nodelay(kcp, 1, 10, 2, 1);
-    ikcp_wndsize(kcp, 256, 256);
+
+    // --- [优化 1] 极速模式配置 ---
+    // 参考文档：协议配置 -> 工作模式
+    // nodelay: 1 (启用)
+    // interval: 5 (内部时钟 5ms，比默认 10ms 更激进，响应更快)
+    // resend: 2 (快速重传，2次跨越即重传)
+    // nc: 1 (关闭流控，这对跑满带宽至关重要)
+    ikcp_nodelay(kcp, 1, 5, 2, 1);
+
+    // --- [优化 2] 扩大收发窗口 ---
+    // 参考文档：重设窗口大小 -> kcptun默认1024
+    // 我们设为 4096，约允许 5.6MB 数据在途。
+    // 理论速度：5.6MB / 0.2s RTT = 28MB/s
+    ikcp_wndsize(kcp, 4096, 4096);
+
+    // --- [优化 3] 降低最小 RTO ---
+    // 参考文档：如果你还想更激进 -> 确认 minrto
+    // 默认 30ms-100ms，改为 10ms，在网络抖动时恢复更快
+    kcp->rx_minrto = 10;
 }
 
 void P2PManager::set_encryption_key(const std::string& key_string) { m_crypto.set_key(key_string); }
@@ -215,18 +232,25 @@ void P2PManager::set_turn_config(std::string host, uint16_t port, std::string us
     m_turn_server_config.password = m_turn_password.c_str();
 }
 void P2PManager::init() {
-    auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id, const std::string& encrypted_data) {
-        // 切回 IO 线程发送
+    auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id,
+                                                  const std::string& encrypted_data) -> int {
         auto self = weak_self.lock();
-        if (!self) return;
+        if (!self) return 0;
 
-        boost::asio::post(self->m_io_context, [self, peer_id, encrypted_data]() {
-            std::lock_guard<std::mutex> lock(self->m_peers_mutex);
-            auto it = self->m_peers_by_id.find(peer_id);
-            if (it != self->m_peers_by_id.end() && it->second->kcp) {
-                ikcp_send(it->second->kcp, encrypted_data.c_str(), encrypted_data.length());
-            }
-        });
+        // 加锁：保护 KCP 结构体，防止与 IO 线程的 ikcp_update 冲突
+        std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+
+        auto it = self->m_peers_by_id.find(peer_id);
+        if (it != self->m_peers_by_id.end() && it->second->kcp) {
+            // 1. 同步发送：直接将数据放入 KCP 发送队列 (内存操作，非常快)
+            // 这一步必须同步，否则 waitsnd 无法立即反映积压量
+            ikcp_send(it->second->kcp, encrypted_data.c_str(), encrypted_data.length());
+
+            // 2. 立即获取最新的积压量 (包括刚刚放入的包)
+            // 这将作为返回值告诉 TransferManager 是否需要减速
+            return ikcp_waitsnd(it->second->kcp);
+        }
+        return 0;
     };
 
     // 创建实例
@@ -292,15 +316,14 @@ void P2PManager::update_all_kcps() {
     // 动态调整更新频率
     if (!received_messages.empty()) {
         m_last_data_time = std::chrono::steady_clock::now();
-        m_kcp_update_interval_ms = 10;  // 有数据时高频更新
+        // 有数据传输时，全力驱动 KCP，间隔设为 5ms
+        m_kcp_update_interval_ms = 5;
     } else {
         auto idle_duration = std::chrono::steady_clock::now() - m_last_data_time;
         if (idle_duration > std::chrono::seconds(5)) {
-            m_kcp_update_interval_ms = 100;  // 空闲5秒后降低频率
-        } else if (idle_duration > std::chrono::seconds(1)) {
-            m_kcp_update_interval_ms = 50;  // 空闲1秒后中等频率
+            m_kcp_update_interval_ms = 100;
         } else {
-            m_kcp_update_interval_ms = 20;  // 默认频率
+            m_kcp_update_interval_ms = 10;
         }
     }
 
@@ -551,7 +574,7 @@ void P2PManager::handle_juice_recv(juice_agent_t* agent, const char* data, size_
             return;
         }
         if (!it->second->kcp) {
-            g_logger->warn("[P2P] 收到数据但 KCP 未就绪 (对等点: {}, {} bytes)。", it->second->peer_id, size);
+            g_logger->debug("[P2P] 收到数据但 KCP 未就绪 (对等点: {}, {} bytes) - 忽略。", it->second->peer_id, size);
             return;
         }
         context = it->second;
@@ -571,7 +594,11 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id, const
         }
         context = it->second;
     }
-    g_logger->info("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
+    if (message_type == "ice_candidate") {
+        g_logger->debug("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
+    } else {
+        g_logger->info("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
+    }
     if (message_type == "ice_candidate") {
         juice_add_remote_candidate(context->agent, payload.c_str());
     } else if (message_type == "ice_gathering_done") {
@@ -644,14 +671,10 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
         g_logger->warn("[KCP] 解密失败 ({} bytes 原始数据)", msg.size());
         return;
     }
-
-    if (decrypted_msg.empty()) {
-        g_logger->warn("[KCP] 收到空解密包。");
-        return;
-    }
     uint8_t msg_type = decrypted_msg[0];
     std::string payload(decrypted_msg.begin() + 1, decrypted_msg.end());
 
+    bool can_receive = m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional;
     if (msg_type == MSG_TYPE_JSON) {
         try {
             auto json = nlohmann::json::parse(payload);
@@ -662,19 +685,20 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
             g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", json_msg_type,
                            from_peer ? from_peer->peer_id : "<unknown>");
 
-            if (json_msg_type == Protocol::TYPE_SHARE_STATE && m_role == SyncRole::Destination) {
+            if (json_msg_type == Protocol::TYPE_SHARE_STATE && can_receive) {
                 handle_share_state(json_payload, from_peer);
-            } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE && m_role == SyncRole::Destination) {
+            } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE && can_receive) {
                 handle_file_update(json_payload, from_peer);
-            } else if (json_msg_type == Protocol::TYPE_FILE_DELETE && m_role == SyncRole::Destination) {
+            } else if (json_msg_type == Protocol::TYPE_FILE_DELETE && can_receive) {
                 handle_file_delete(json_payload, from_peer);
-            } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE && m_role == SyncRole::Source) {
-                if (from_peer) {
+            } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE) {
+                bool can_serve = (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional);
+                if (can_serve && from_peer) {
                     m_transfer_manager->queue_upload(from_peer->peer_id, json_payload);
                 }
-            } else if (json_msg_type == Protocol::TYPE_DIR_CREATE && m_role == SyncRole::Destination) {
+            } else if (json_msg_type == Protocol::TYPE_DIR_CREATE && can_receive) {
                 handle_dir_create(json_payload);
-            } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && m_role == SyncRole::Destination) {
+            } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && can_receive) {
                 handle_dir_delete(json_payload, from_peer);
             } else {
                 g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
@@ -696,7 +720,7 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
 }
 
 void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination) return;
+    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
     g_logger->info("[KCP] (Destination) 收到来自 {} (Source) 的 'share_state' 消息。",
                    from_peer ? from_peer->peer_id : std::string("<unknown>"));
     std::vector<FileInfo> remote_files = payload.at("files").get<std::vector<FileInfo>>();
@@ -766,16 +790,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
 // src/peer/P2PManager.cpp
 
 void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
-    //  权限检查：
-    // 1. 如果我是 Destination，我当然要处理更新。
-    // 2. 如果是双向模式 (BiDirectional)，无论我是 Source 还是 Destination，我都要处理更新。
-    // 3. 只有在 单向模式且我是 Source 时，才忽略更新。
-    if (m_role != SyncRole::Source || m_mode == SyncMode::BiDirectional) {
-        // 允许处理
-    } else {
-        // 单向模式的 Source，忽略 update
-        return;
-    }
+    if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
 
     FileInfo remote_info;
     try {
@@ -873,7 +888,7 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* 
     }
 }
 void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination) return;
+    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
     std::string relative_path_str;
     try {
         relative_path_str = payload.at("path").get<std::string>();
@@ -899,7 +914,7 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* 
     }
 }
 void P2PManager::handle_dir_create(const nlohmann::json& payload) {
-    if (m_role != SyncRole::Destination) return;
+    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
     std::string relative_path_str;
     try {
         relative_path_str = payload.at("path").get<std::string>();
@@ -926,7 +941,7 @@ void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext*
     }
 }
 void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination) return;
+    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
     std::string relative_path_str;
     try {
         relative_path_str = payload.at("path").get<std::string>();

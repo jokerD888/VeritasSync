@@ -29,6 +29,14 @@ namespace VeritasSync {
                 return;
             }
 
+            if (filename.find(".veritas.db") != std::string::npos) return;
+
+            // 3. 忽略下载临时文件
+            if (filename.find(".veritas_tmp") != std::string::npos) return;
+
+            // 4. (可选) 忽略常见的系统垃圾文件，减少噪音
+            if (filename == ".DS_Store" || filename == "Thumbs.db") return;
+
             if (action == efsw::Actions::Moved && !oldFilename.empty()) {
                 // 拼接路径：Utf8ToPath 确保 dir(UTF-8) 和 filename(UTF-8) 被正确解析为 path
                 std::filesystem::path old_file_path = Utf8ToPath(dir) / Utf8ToPath(oldFilename);
@@ -136,9 +144,12 @@ namespace VeritasSync {
     // --- 实现 notify_change_detected (由 UpdateListener 调用) ---
     void StateManager::notify_change_detected(const std::string& full_path) {
         std::lock_guard<std::mutex> lock(m_changes_mutex);
-        m_pending_changes.insert(full_path);
-        // 使用 Debug 级别，因为这个日志非常频繁
-        g_logger->debug("[{}] [Watcher] 检测到变化: {}", m_sync_key, full_path);
+        // insert 返回一个 pair<iterator, bool>，第二个值为 true 表示插入成功（即之前不存在）
+        auto result = m_pending_changes.insert(full_path);
+
+        if (result.second) {
+            g_logger->debug("[{}] [Watcher] 检测到变化: {}", m_sync_key, full_path);
+        }
     }
 
     // --- 由 UpdateListener 定时器调用 ---

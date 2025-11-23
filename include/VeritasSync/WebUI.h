@@ -126,13 +126,25 @@ public:
     static std::string pick_folder_dialog() {
 #ifdef _WIN32
         std::string path;
-        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        // 确保单线程单元初始化
+        HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(hr)) {
+            // 如果已经初始化过，也是 OK 的
+        }
+
         IFileDialog* pfd = NULL;
         if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
             DWORD dwOptions;
             if (SUCCEEDED(pfd->GetOptions(&dwOptions)))
                 pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
-            if (SUCCEEDED(pfd->Show(NULL))) {
+
+            // 获取当前控制台窗口句柄，作为父窗口
+            // 如果没有控制台 (GUI应用)，GetConsoleWindow 返回 NULL，效果和传 NULL 一样
+            // 但如果有控制台，这能确保弹窗在控制台之上
+            HWND hParent = GetConsoleWindow();
+
+            // 显示对话框
+            if (SUCCEEDED(pfd->Show(hParent))) {
                 IShellItem* psi;
                 if (SUCCEEDED(pfd->GetResult(&psi))) {
                     PWSTR pszPath;
