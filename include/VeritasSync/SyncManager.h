@@ -1,8 +1,11 @@
 ﻿#pragma once
 
+#include <functional>
+#include <set>
 #include <string>
 #include <vector>
-#include <set>
+
+#include "VeritasSync/Config.h"
 #include "VeritasSync/Protocol.h"  // 需要引入以使用 FileInfo 结构体
 
 namespace VeritasSync {
@@ -18,15 +21,19 @@ namespace VeritasSync {
 
     class SyncManager {
     public:
+        using HistoryQueryFunc = std::function<std::string(const std::string& path)>;
+
         // 比较本地和远程的状态，并确定需要执行的同步操作。
         // @return 一个 SyncActions 结构体，包含要请求的和要删除的文件列表。
-        static SyncActions compare_states_and_get_requests(
-            const std::vector<FileInfo>& local_files,
-            const std::vector<FileInfo>& remote_files);
 
-        static DirSyncActions compare_dir_states(
-            const std::set<std::string>& local_dirs,
-            const std::set<std::string>& remote_dirs);
+        static SyncActions compare_states_and_get_requests(const std::vector<FileInfo>& local_files,
+                                                           const std::vector<FileInfo>& remote_files,
+                                                           HistoryQueryFunc get_history_hash,
+                                                           SyncMode mode = SyncMode::OneWay);
+
+        static DirSyncActions compare_dir_states(const std::set<std::string>& local_dirs,
+                                                 const std::set<std::string>& remote_dirs,
+                                                 SyncMode mode = SyncMode::OneWay);
     };
 
 }  // namespace VeritasSync

@@ -12,6 +12,7 @@
 #include <regex>
 #include <sstream>
 
+#include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Hashing.h"
 #include "VeritasSync/Logger.h"
 #include "VeritasSync/Protocol.h"
@@ -567,7 +568,7 @@ void P2PManager::update_all_kcps() {
     auto current_time_ms = (IUINT32)std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch())
                                .count();
-    std::vector<std::pair<std::string, PeerContext*>> received_messages;
+    std::vector<std::pair<std::string, std::shared_ptr<PeerContext>>> received_messages;
     {
         std::lock_guard<std::mutex> lock(m_peers_mutex);
         for (auto const& [agent, context] : m_peers_by_agent) {
@@ -576,7 +577,8 @@ void P2PManager::update_all_kcps() {
             char buffer[BUFFERSIZE];
             int size;
             while ((size = ikcp_recv(context->kcp, buffer, sizeof(buffer))) > 0) {
-                received_messages.emplace_back(std::string(buffer, size), context.get());
+                // 存入 shared_ptr (context 本身就是 shared_ptr)
+                received_messages.emplace_back(std::string(buffer, size), context);
             }
         }
     }
@@ -596,7 +598,8 @@ void P2PManager::update_all_kcps() {
     }
 
     for (const auto& msg_pair : received_messages) {
-        handle_kcp_message(msg_pair.first, msg_pair.second);
+        // 调用处理函数时使用 .get()，但在后续异步化步骤中，我们会捕获这个 shared_ptr
+        handle_kcp_message(msg_pair.first, msg_pair.second.get());
     }
     schedule_kcp_update();
 }
@@ -996,74 +999,159 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
 }
 
 void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* from_peer) {
+    // 1. 角色检查
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
-    g_logger->info("[KCP] (Destination) 收到来自 {} (Source) 的 'share_state' 消息。",
-                   from_peer ? from_peer->peer_id : std::string("<unknown>"));
-    std::vector<FileInfo> remote_files = payload.at("files").get<std::vector<FileInfo>>();
-    std::set<std::string> remote_dirs = payload.at("directories").get<std::set<std::string>>();
-    m_state_manager->scan_directory();
-    nlohmann::json temp_json = nlohmann::json::parse(m_state_manager->get_state_as_json_string());
-    std::vector<FileInfo> local_files = temp_json.at(Protocol::MSG_PAYLOAD).at("files").get<std::vector<FileInfo>>();
-    std::set<std::string> local_dirs = m_state_manager->get_local_directories();
-    g_logger->info("[SyncManager] 正在比较本地目录 ({} 个) 与远程目录 ({} 个).", local_dirs.size(), remote_dirs.size());
-    SyncActions file_actions = SyncManager::compare_states_and_get_requests(local_files, remote_files);
-    DirSyncActions dir_actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
-    if (!file_actions.files_to_delete.empty()) {
-        g_logger->info("[Sync] 计划删除 {} 个本地多余的文件。", file_actions.files_to_delete.size());
-        for (const auto& file_path_str : file_actions.files_to_delete) {
-            std::filesystem::path relative_path(
-                std::u8string_view(reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
-            std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-            std::error_code ec;
-            if (std::filesystem::remove(full_path, ec)) {
-                g_logger->info("[Sync] -> 已删除 (相对路径): {}", file_path_str);
-            } else if (ec != std::errc::no_such_file_or_directory) {
-                g_logger->error("[Sync] -> 删除失败 (相对路径): {} Error: {}", file_path_str, ec.message());
+
+    // 2. 获取 PeerID (深拷贝，防止异步执行时指针失效)
+    std::string peer_id = from_peer ? from_peer->peer_id : "";
+    if (peer_id.empty()) return;
+
+    g_logger->info("[KCP] (Destination) 收到来自 {} (Source) 的 'share_state' 消息。", peer_id);
+
+    // 3. 【核心优化】投递到 Worker 线程池
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload, peer_id]() {
+        // --- 以下所有逻辑都在后台线程执行，不会卡死心跳 ---
+
+        // A. 解析远程状态
+        std::vector<FileInfo> remote_files;
+        std::set<std::string> remote_dirs;
+        try {
+            remote_files = payload.at("files").get<std::vector<FileInfo>>();
+            remote_dirs = payload.at("directories").get<std::set<std::string>>();
+        } catch (const std::exception& e) {
+            g_logger->error("[Sync] 解析 share_state 失败: {}", e.what());
+            return;
+        }
+
+        // B. 扫描本地状态 (IO 密集型，最耗时的一步)
+        self->m_state_manager->scan_directory();
+
+        // C. 获取本地状态数据
+        // 注意：这里涉及 JSON 序列化/反序列化，虽然有点绕，但沿用了原逻辑以保证正确性
+        nlohmann::json temp_json = nlohmann::json::parse(self->m_state_manager->get_state_as_json_string());
+        std::vector<FileInfo> local_files =
+            temp_json.at(Protocol::MSG_PAYLOAD).at("files").get<std::vector<FileInfo>>();
+        std::set<std::string> local_dirs = self->m_state_manager->get_local_directories();
+
+        g_logger->info("[SyncManager] 正在比较本地目录 ({} 个) 与远程目录 ({} 个).", local_files.size(),
+                       remote_files.size());
+
+        // D. 执行比较算法 (CPU 密集型)
+        auto history_func = [self, peer_id](const std::string& path) -> std::string {
+            return self->m_state_manager->get_base_hash(peer_id, path);
+        };
+        SyncActions file_actions =
+            SyncManager::compare_states_and_get_requests(local_files, remote_files, history_func,  // 传入回调
+                                                         self->m_mode);
+        DirSyncActions dir_actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, self->m_mode);
+
+        // E. 执行批量 IO 操作 (删除/创建) - 直接在 Worker 线程完成
+
+        // E1. 删除多余文件
+        if (!file_actions.files_to_delete.empty()) {
+            g_logger->info("[Sync] 计划删除 {} 个本地多余的文件。", file_actions.files_to_delete.size());
+            for (const auto& file_path_str : file_actions.files_to_delete) {
+                std::filesystem::path relative_path(std::u8string_view(
+                    reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+                std::error_code ec;
+                if (std::filesystem::remove(full_path, ec)) {
+                    g_logger->info("[Sync] -> 已删除 (相对路径): {}", file_path_str);
+                } else if (ec != std::errc::no_such_file_or_directory) {
+                    g_logger->error("[Sync] -> 删除失败 (相对路径): {} Error: {}", file_path_str, ec.message());
+                }
             }
         }
-    }
-    if (!dir_actions.dirs_to_delete.empty()) {
-        g_logger->info("[Sync] 计划删除 {} 个本地多余的目录。", dir_actions.dirs_to_delete.size());
-        for (const auto& dir_path_str : dir_actions.dirs_to_delete) {
-            std::filesystem::path relative_path(
-                std::u8string_view(reinterpret_cast<const char8_t*>(dir_path_str.c_str()), dir_path_str.length()));
-            std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-            std::error_code ec;
-            std::filesystem::remove_all(full_path, ec);
-            if (!ec) {
-                g_logger->info("[Sync] -> 已删除目录 (相对路径): {}", dir_path_str);
-            } else if (ec != std::errc::no_such_file_or_directory) {
-                g_logger->error("[Sync] -> 删除目录失败 (相对路径): {} Error: {}", dir_path_str, ec.message());
+
+        // E2. 删除多余目录
+        if (!dir_actions.dirs_to_delete.empty()) {
+            // [关键步骤 1] 排序优化：由深到浅删除
+            // 长度降序足以保证子目录 (A/B) 排在父目录 (A) 之前
+            std::sort(dir_actions.dirs_to_delete.begin(), dir_actions.dirs_to_delete.end(),
+                      [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
+
+            g_logger->info("[Sync] 计划清理 {} 个本地目录。", dir_actions.dirs_to_delete.size());
+
+            for (const auto& dir_path_str : dir_actions.dirs_to_delete) {
+                // 使用统一的路径转换工具，确保 Windows/Linux 兼容性
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
+                std::error_code ec;
+                bool deleted = false;
+
+                if (self->m_mode == SyncMode::OneWay) {
+                    // [单向模式] 暴力镜像：递归删除
+                    // remove_all 返回删除的文件/目录数量，uintmax_t(-1) 表示出错
+                    if (std::filesystem::remove_all(full_path, ec) != static_cast<std::uintmax_t>(-1)) {
+                        deleted = true;
+                        g_logger->info("[Sync] (OneWay) 强制删除目录: {}", dir_path_str);
+                    }
+                } else {
+                    // [双向模式] 安全模式：只删除空目录
+                    // remove 只在目录为空时成功，这天然防止了误删 "保留文件"
+                    if (std::filesystem::remove(full_path, ec)) {
+                        deleted = true;
+                        g_logger->info("[Sync] (BiDi) 已清理空目录: {}", dir_path_str);
+                    } else {
+                        // 这是一个“良性失败”，说明目录里还有我们决定保留的文件
+                        g_logger->debug("[Sync] (BiDi) 跳过非空目录: {} (内含保留文件)", dir_path_str);
+                    }
+                }
+
+                // 保持内存状态一致性
+                // 只有物理删除成功了，才从内存 Map 中移除
+                if (deleted || (!deleted && !std::filesystem::exists(full_path))) {
+                    // 1. 删除成功 -> 移除
+                    // 2. 删除失败但文件已不存在 (并发情况) -> 移除
+                    self->m_state_manager->remove_dir_from_map(dir_path_str);
+                }
             }
         }
-    }
-    if (!dir_actions.dirs_to_create.empty()) {
-        g_logger->info("[Sync] 计划创建 {} 个缺失的目录。", dir_actions.dirs_to_create.size());
-        for (const auto& dir_path_str : dir_actions.dirs_to_create) {
-            std::filesystem::path relative_path(
-                std::u8string_view(reinterpret_cast<const char8_t*>(dir_path_str.c_str()), dir_path_str.length()));
-            std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-            std::error_code ec;
-            std::filesystem::create_directories(full_path, ec);
-            if (!ec) {
-                g_logger->info("[Sync] -> 已创建目录 (相对路径): {}", dir_path_str);
-            } else {
-                g_logger->error("[Sync] -> 创建目录失败 (相对路径): {} Error: {}", dir_path_str, ec.message());
+
+        // E3. 创建缺失目录
+        if (!dir_actions.dirs_to_create.empty()) {
+            g_logger->info("[Sync] 计划创建 {} 个缺失的目录。", dir_actions.dirs_to_create.size());
+            for (const auto& dir_path_str : dir_actions.dirs_to_create) {
+                std::filesystem::path relative_path(
+                    std::u8string_view(reinterpret_cast<const char8_t*>(dir_path_str.c_str()), dir_path_str.length()));
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+                std::error_code ec;
+                std::filesystem::create_directories(full_path, ec);
+                if (!ec) {
+                    g_logger->info("[Sync] -> 已创建目录 (相对路径): {}", dir_path_str);
+                } else {
+                    g_logger->error("[Sync] -> 创建目录失败 (相对路径): {} Error: {}", dir_path_str, ec.message());
+                }
             }
         }
-    }
-    if (!file_actions.files_to_request.empty()) {
-        g_logger->info("[KCP] 计划向 {} (Source) 请求 {} 个缺失/过期的文件。",
-                       from_peer ? from_peer->peer_id : std::string("<unknown>"), file_actions.files_to_request.size());
-        for (const auto& file_path : file_actions.files_to_request) {
-            nlohmann::json request_msg;
-            request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-            request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
-            send_over_kcp_peer(request_msg.dump(), from_peer);
+
+        // F. 发送文件请求 (涉及 KCP 发送，必须切回 IO 线程)
+        if (!file_actions.files_to_request.empty()) {
+            g_logger->info("[KCP] 计划向 {} (Source) 请求 {} 个缺失/过期的文件。", peer_id,
+                           file_actions.files_to_request.size());
+
+            // 投递回 IO Context
+            boost::asio::post(self->m_io_context, [self, peer_id, reqs = std::move(file_actions.files_to_request)]() {
+                // 加锁查找 Peer
+                std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+                auto it = self->m_peers_by_id.find(peer_id);
+                if (it == self->m_peers_by_id.end()) {
+                    g_logger->warn("[Sync] 无法发送请求: 对等点 {} 已断开。", peer_id);
+                    return;
+                }
+
+                // 获取裸指针用于发送
+                auto peer_ctx = it->second.get();
+
+                for (const auto& file_path : reqs) {
+                    nlohmann::json request_msg;
+                    request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
+                    request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
+                    self->send_over_kcp_peer(request_msg.dump(), peer_ctx);
+                }
+            });
         }
-    }
+    });
 }
-// src/peer/P2PManager.cpp
 
 void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
@@ -1165,50 +1253,67 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* 
 }
 void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
-    std::string relative_path_str;
-    try {
-        relative_path_str = payload.at("path").get<std::string>();
-    } catch (const std::exception& e) {
-        g_logger->error("[KCP] (Destination) 解析 file_delete 失败: {}", e.what());
-        return;
-    }
-    g_logger->info("[KCP] (Destination) 收到增量删除: {} 从 {}", relative_path_str,
-                   from_peer ? from_peer->peer_id : std::string("<unknown>"));
-    std::filesystem::path relative_path(
-        std::u8string_view(reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-    std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-    std::error_code ec;
-    if (std::filesystem::remove(full_path, ec)) {
-        g_logger->info("[Sync] -> 已删除本地文件 (相对路径): {}", relative_path_str);
-        m_state_manager->remove_path_from_map(relative_path_str);
-    } else {
-        if (ec != std::errc::no_such_file_or_directory) {
-            g_logger->error("[Sync] -> 删除本地文件失败 (相对路径): {} Error: {}", relative_path_str, ec.message());
-        } else {
-            g_logger->info("[Sync] -> 本地文件已不存在, 无需操作。");
+
+    // 直接扔到 Worker 线程，不阻塞网络
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+        std::string relative_path_str;
+        try {
+            relative_path_str = payload.at("path").get<std::string>();
+        } catch (const std::exception& e) {
+            g_logger->error("[KCP] (Destination) 解析 file_delete 失败: {}", e.what());
+            return;
         }
-    }
+
+        g_logger->info("[KCP] (Destination) 收到增量删除: {}", relative_path_str);
+
+        std::filesystem::path relative_path(std::u8string_view(
+            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+        std::error_code ec;
+        // 执行磁盘 IO (在 Worker 线程)
+        if (std::filesystem::remove(full_path, ec)) {
+            g_logger->info("[Sync] -> 已删除本地文件: {}", relative_path_str);
+            // StateManager 内部有锁，线程安全
+            self->m_state_manager->remove_path_from_map(relative_path_str);
+        } else {
+            // 如果文件本来就不存在，当作成功处理
+            if (ec != std::errc::no_such_file_or_directory) {
+                g_logger->error("[Sync] -> 删除失败: {} Error: {}", relative_path_str, ec.message());
+            } else {
+                g_logger->info("[Sync] -> 本地文件已不存在, 无需操作: {}", relative_path_str);
+                self->m_state_manager->remove_path_from_map(relative_path_str);
+            }
+        }
+    });
 }
 void P2PManager::handle_dir_create(const nlohmann::json& payload) {
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
-    std::string relative_path_str;
-    try {
-        relative_path_str = payload.at("path").get<std::string>();
-    } catch (const std::exception& e) {
-        g_logger->error("[KCP] (Destination) 解析 dir_create 失败: {}", e.what());
-        return;
-    }
-    g_logger->info("[KCP] (Destination) 收到增量目录创建: {}", relative_path_str);
-    std::filesystem::path relative_path(
-        std::u8string_view(reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-    std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-    std::error_code ec;
-    if (std::filesystem::create_directories(full_path, ec)) {
-        g_logger->info("[Sync] -> 已创建目录: {}", relative_path_str);
-        m_state_manager->add_dir_to_map(relative_path_str);
-    } else if (ec) {
-        g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
-    }
+
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+        std::string relative_path_str;
+        try {
+            relative_path_str = payload.at("path").get<std::string>();
+        } catch (...) {
+            return;
+        }
+
+        g_logger->info("[KCP] (Destination) 收到增量目录创建: {}", relative_path_str);
+
+        std::filesystem::path relative_path(std::u8string_view(
+            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+        std::error_code ec;
+        // 执行磁盘 IO
+        if (std::filesystem::create_directories(full_path, ec)) {
+            g_logger->info("[Sync] -> 已创建目录: {}", relative_path_str);
+            // StateManager 内部有锁，线程安全
+            self->m_state_manager->add_dir_to_map(relative_path_str);
+        } else if (ec) {
+            g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
+        }
+    });
 }
 void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext* from_peer) {
     // 此函数现在可能不再被直接调用，或者仅仅作为 wrapper
@@ -1218,30 +1323,38 @@ void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext*
 }
 void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
-    std::string relative_path_str;
-    try {
-        relative_path_str = payload.at("path").get<std::string>();
-    } catch (const std::exception& e) {
-        g_logger->error("[KCP] (Destination) 解析 dir_delete 失败: {}", e.what());
-        return;
-    }
-    g_logger->info("[KCP] (Destination) 收到增量目录删除: {} 来自 {}", relative_path_str,
-                   from_peer ? from_peer->peer_id : std::string("<unknown>"));
-    std::filesystem::path relative_path(
-        std::u8string_view(reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-    std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-    std::error_code ec;
-    std::filesystem::remove_all(full_path, ec);
-    if (!ec) {
-        g_logger->info("[Sync] -> 已删除目录 (相对路径): {}", relative_path_str);
-        m_state_manager->remove_dir_from_map(relative_path_str);
-    } else {
-        if (ec != std::errc::no_such_file_or_directory) {
-            g_logger->error("[Sync] -> 删除目录失败 (相对路径): {} Error: {}", relative_path_str, ec.message());
-        } else {
-            g_logger->info("[Sync] -> 本地目录已不存在, 无需操作。");
+
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+        std::string relative_path_str;
+        try {
+            relative_path_str = payload.at("path").get<std::string>();
+        } catch (...) {
+            return;
         }
-    }
+
+        g_logger->info("[KCP] (Destination) 收到增量目录删除: {}", relative_path_str);
+
+        std::filesystem::path relative_path(std::u8string_view(
+            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+        std::error_code ec;
+        // 执行磁盘 IO
+        std::filesystem::remove_all(full_path, ec);
+
+        if (!ec) {
+            g_logger->info("[Sync] -> 已删除目录: {}", relative_path_str);
+            // StateManager 内部有锁，线程安全
+            self->m_state_manager->remove_dir_from_map(relative_path_str);
+        } else {
+            if (ec != std::errc::no_such_file_or_directory) {
+                g_logger->error("[Sync] -> 删除目录失败: {} Error: {}", relative_path_str, ec.message());
+            } else {
+                // 如果目录已不存在，也要清理 map
+                self->m_state_manager->remove_dir_from_map(relative_path_str);
+            }
+        }
+    });
 }
 
 // --- 清理停滞的文件组装缓冲区 ---
@@ -1269,12 +1382,11 @@ void P2PManager::cleanup_stale_buffers() {
 
 void P2PManager::init_upnp() {
     // 在 P2P 的 IO 线程中执行,避免阻塞
-    boost::asio::post(m_io_context, [this]() {
-        std::lock_guard<std::mutex> lock(m_upnp_mutex);
-
+    boost::asio::post(m_worker_pool, [this]() {
         int error = 0;
         // 发现路由器 (2000ms 超时)
         struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
+        std::lock_guard<std::mutex> lock(m_upnp_mutex);
         if (devlist) {
             g_logger->info("[UPnP] 发现 UPnP 设备列表。");
             // 获取有效的 IGD (互联网网关设备)

@@ -46,9 +46,28 @@ std::string sys_err_to_utf8(const boost::system::error_code& ec) { return ec.mes
 TrackerClient::TrackerClient(std::string host, unsigned short port)
     : m_io_context(),                                            // 初始化自己的 io_context
       m_work_guard(boost::asio::make_work_guard(m_io_context)),  // 保持 io_context 运行
-      m_socket(m_io_context),                                    // socket 使用自己的 io_context
+      m_socket(m_io_context),
+      m_retry_timer(m_io_context),  // socket 使用自己的 io_context
       m_host(std::move(host)),
       m_port(port) {}
+
+void TrackerClient::schedule_reconnect() {
+    // 立即关闭，确保 socket 状态重置
+    if (m_socket.is_open()) {
+        boost::system::error_code ignored_ec;
+        m_socket.close(ignored_ec);
+    }
+
+    g_logger->warn("[TrackerClient] 连接断开，5秒后尝试重连...");
+
+    m_retry_timer.expires_after(std::chrono::seconds(5));
+    //  捕获 self = shared_from_this() 而不是 this
+    m_retry_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
+        if (!ec) {  // ec == operation_aborted 说明定时器被取消了
+            self->do_connect();
+        }
+    });
+}
 
 TrackerClient::~TrackerClient() {
     // 请求 io_context 停止，并等待线程结束
@@ -87,6 +106,7 @@ void TrackerClient::do_connect() {
                                [self = shared_from_this()](const boost::system::error_code& ec, const tcp::endpoint&) {
                                    if (ec) {
                                        g_logger->error("[TrackerClient] 连接 Tracker 失败: {}", sys_err_to_utf8(ec));
+                                       self->schedule_reconnect();
                                        return;
                                    }
                                    g_logger->info("[TrackerClient] 已连接到 Tracker {}:{}", self->m_host, self->m_port);
@@ -128,7 +148,7 @@ void TrackerClient::do_read_header() {
                                     } else {
                                         g_logger->warn("[TrackerClient] Tracker 已断开连接。");
                                     }
-                                    self->close_socket();
+                                    self->schedule_reconnect();
                                     return;
                                 }
                                 std::istream is(&self->m_read_buffer);
@@ -138,7 +158,7 @@ void TrackerClient::do_read_header() {
                                     boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
                                 if (msg_len > 65536) {
                                     g_logger->error("[TrackerClient] 消息体过长 ({} bytes)。断开连接。", msg_len);
-                                    self->close_socket();
+                                    self->schedule_reconnect();
                                     return;
                                 }
                                 self->do_read_body(msg_len);
@@ -150,7 +170,7 @@ void TrackerClient::do_read_body(unsigned int msg_len) {
                             [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
                                 if (ec) {
                                     g_logger->error("[TrackerClient] 读取消息体失败: {}", ec.message());
-                                    self->close_socket();
+                                    self->schedule_reconnect();
                                     return;
                                 }
                                 std::istream is(&self->m_read_buffer);
@@ -217,7 +237,7 @@ void TrackerClient::do_write(const std::string& msg) {
                              [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
                                  if (ec) {
                                      g_logger->error("[TrackerClient] 写入失败: {}", ec.message());
-                                     self->close_socket();
+                                     self->schedule_reconnect();
                                  }
                              });
 }

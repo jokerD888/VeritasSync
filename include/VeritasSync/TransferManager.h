@@ -52,9 +52,9 @@ public:
     // 清理超时的接收任务 (需外部定时调用)
     void cleanup_stale_buffers();
 
-private:
     static constexpr size_t CHUNK_DATA_SIZE = 16384;
 
+private:
     StateManager* m_state_manager;
     boost::asio::thread_pool& m_worker_pool;
     CryptoLayer& m_crypto;

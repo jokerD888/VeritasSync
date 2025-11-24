@@ -260,7 +260,6 @@ namespace VeritasSync {
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
 
-        // 旧的 m_previous_file_map 逻辑已删除
         m_file_map.clear();
         m_dir_map.clear();
 
@@ -272,9 +271,28 @@ namespace VeritasSync {
             return;
         }
 
-        // --- 开启事务 (极大提升批量写入性能) ---
-        if (m_db) m_db->begin_transaction();
-        // -----------------------------------
+        // --- 优化改动 START ---
+        // 移除全局的大事务开启： if (m_db) m_db->begin_transaction();
+
+        // 准备一个批量更新的缓冲区
+        std::vector<FileInfo> db_batch_updates;
+        const size_t BATCH_SIZE = 50;  // 每处理 50 个变动文件提交一次事务
+
+        // 定义一个辅助 Lambda 来提交当前批次
+        auto flush_batch = [&]() {
+            if (!m_db || db_batch_updates.empty()) return;
+            try {
+                m_db->begin_transaction();
+                for (const auto& f : db_batch_updates) {
+                    m_db->update_file(f.path, f.hash, f.modified_time);
+                }
+                m_db->commit_transaction();
+                db_batch_updates.clear();
+            } catch (const std::exception& e) {
+                g_logger->error("[StateManager] 批量提交事务失败: {}", e.what());
+            }
+        };
+        // --- 优化改动 END ---
 
         int cache_hit_count = 0;
         int calc_count = 0;
@@ -304,11 +322,11 @@ namespace VeritasSync {
                 auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                 info.modified_time = sctp.time_since_epoch().count();
 
-                // --- 【核心】数据库查询逻辑 ---
+                // --- 数据库查询逻辑 (读操作，通常很快) ---
                 bool need_calc = true;
                 if (m_db) {
+                    // get_file 是读操作，只要没有写事务持有锁，这里很快
                     auto cached_meta = m_db->get_file(rel_path_str);
-                    // 如果数据库有记录，且修改时间一致 -> Cache Hit
                     if (cached_meta && cached_meta->mtime == info.modified_time) {
                         info.hash = cached_meta->hash;
                         need_calc = false;
@@ -316,18 +334,25 @@ namespace VeritasSync {
                     }
                 }
 
-                // Cache Miss -> 计算哈希并写入 DB
+                // --- 耗时操作 (完全在事务之外执行) ---
                 if (need_calc) {
-                    info.hash = Hashing::CalculateSHA256(entry.path());
+                    info.hash = Hashing::CalculateSHA256(entry.path());  // <--- 最耗时的一步
                     calc_count++;
+
+                    // 将需要更新 DB 的文件加入批次
                     if (m_db && !info.hash.empty()) {
-                        m_db->update_file(info.path, info.hash, info.modified_time);
+                        db_batch_updates.push_back(info);
                     }
                 }
-                // -----------------------------
 
+                // 立即更新内存映射 (让 UI 能尽快看到文件，虽然此时还没入库)
                 if (!info.hash.empty()) {
                     m_file_map[info.path] = info;
+                }
+
+                // --- 检查是否需要提交批次 ---
+                if (db_batch_updates.size() >= BATCH_SIZE) {
+                    flush_batch();  // 开启事务 -> 快速写入 -> 提交事务
                 }
 
             } else if (entry.is_directory(ec) && !ec) {
@@ -335,9 +360,9 @@ namespace VeritasSync {
             }
         }
 
-        // --- 提交事务 ---
-        if (m_db) m_db->commit_transaction();
-        // --------------
+        // --- 循环结束，提交剩余的批次 ---
+        flush_batch();
+        // -----------------------------
 
         g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", m_file_map.size(), cache_hit_count,
                        calc_count);

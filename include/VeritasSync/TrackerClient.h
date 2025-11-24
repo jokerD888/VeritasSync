@@ -39,35 +39,38 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     std::string get_self_id() const { return m_self_id; }
 
    private:
-    void do_connect();
-    void do_register();
-    void do_read_header();
-    void handle_read_header(const boost::system::error_code& ec, std::size_t bytes);
-    void do_read_body(unsigned int msg_len);
-    void handle_read_body(const boost::system::error_code& ec, std::size_t bytes);
+       void do_connect();
+       void do_register();
+       void do_read_header();
+       void handle_read_header(const boost::system::error_code& ec, std::size_t bytes);
+       void do_read_body(unsigned int msg_len);
+       void handle_read_body(const boost::system::error_code& ec, std::size_t bytes);
 
-    void handle_message(const nlohmann::json& msg);
+       void handle_message(const nlohmann::json& msg);
 
-    void do_write(const std::string& msg);
-    void close_socket();
+       void do_write(const std::string& msg);
+       void schedule_reconnect();
+       void close_socket();
 
-    boost::asio::io_context m_io_context;
-    std::jthread m_thread;
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+       boost::asio::io_context m_io_context;
+       std::jthread m_thread;
+       boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
 
-    // --- 3. 现在 tcp::socket 是已知的 ---
-    tcp::socket m_socket;
+       // --- 3. 现在 tcp::socket 是已知的 ---
+       tcp::socket m_socket;
 
-    std::string m_host;
-    unsigned short m_port;
-    std::string m_sync_key;
-    std::string m_self_id;
+       std::string m_host;
+       unsigned short m_port;
+       std::string m_sync_key;
+       std::string m_self_id;
 
-    std::function<void(std::vector<std::string>)> m_on_ready_callback;
+       std::function<void(std::vector<std::string>)> m_on_ready_callback;
 
-    P2PManager* m_p2p_manager = nullptr;
-    boost::asio::streambuf m_read_buffer;
-    std::vector<char> m_write_buffer;
+       P2PManager* m_p2p_manager = nullptr;
+       boost::asio::streambuf m_read_buffer;
+       std::vector<char> m_write_buffer;
+
+       boost::asio::steady_timer m_retry_timer;
 };
 
 }  // namespace VeritasSync

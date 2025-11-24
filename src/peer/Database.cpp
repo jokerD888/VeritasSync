@@ -28,6 +28,17 @@ Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.str
         m_db = nullptr;
         return;
     }
+    // --- 优化: 启用 WAL 模式和 Normal 同步 ---
+    // WAL: 大幅提升并发性能，避免读写阻塞
+    // NORMAL: 在保证安全性的前提下减少 fsync 次数
+    char* errMsg = nullptr;
+    sqlite3_exec(m_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &errMsg);
+    if (errMsg) {
+        g_logger->warn("[Database] 启用 WAL 模式失败: {}", errMsg);
+        sqlite3_free(errMsg);
+    } else {
+        sqlite3_exec(m_db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+    }
 
     // 初始化表结构
     init_schema();

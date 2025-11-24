@@ -209,6 +209,8 @@ add_executable(unit_tests
     src/peer/SyncManager.cpp 
     src/peer/Hashing.cpp
     src/peer/Database.cpp
+    src/peer/Logger.cpp
+
 )
 
 # 包含头文件路径
