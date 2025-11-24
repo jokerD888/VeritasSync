@@ -80,6 +80,7 @@ target_include_directories(veritas_sync PRIVATE ${PROJECT_SOURCE_DIR}/include)
 # --- 为 veritas_sync 链接库 ---
 target_link_libraries(veritas_sync PRIVATE
     OpenSSL::Crypto
+    OpenSSL::SSL
     efsw::efsw
     Boost::system
     Boost::asio

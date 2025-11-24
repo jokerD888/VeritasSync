@@ -34,6 +34,9 @@ struct Config {
     std::string stun_host = "stun.l.google.com";
     unsigned short stun_port = 19302;
 
+    std::string stun_list_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+    bool enable_multi_stun_probing = true;  // 开关
+
     std::string turn_host;
     unsigned short turn_port = 3478;
     std::string turn_username;
@@ -83,6 +86,8 @@ inline void to_json(nlohmann::json& j, const Config& config) {
                        {"turn_port", config.turn_port},
                        {"turn_username", config.turn_username},
                        {"turn_password", config.turn_password},
+                       {"stun_list_url", config.stun_list_url},
+                       {"enable_multi_stun_probing", config.enable_multi_stun_probing},
                        {"log_level", config.log_level},
                        {"libjuice_log_level", config.libjuice_log_level},
                        {"kcp_update_interval_ms", config.kcp_update_interval_ms},
@@ -116,6 +121,10 @@ inline void from_json(const nlohmann::json& j, Config& config) {
     if (j.contains("kcp_window_size")) j.at("kcp_window_size").get_to(config.kcp_window_size);
     if (j.contains("file_hash_retry_delay_ms")) j.at("file_hash_retry_delay_ms").get_to(config.file_hash_retry_delay_ms);
     // ---------------------------------
+
+    if (j.contains("stun_list_url")) j.at("stun_list_url").get_to(config.stun_list_url);
+    if (j.contains("enable_multi_stun_probing"))
+        j.at("enable_multi_stun_probing").get_to(config.enable_multi_stun_probing);
 
     j.at("tasks").get_to(config.tasks);
 }

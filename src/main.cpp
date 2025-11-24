@@ -136,9 +136,10 @@ public:
             m_p2p_manager->set_turn_config(m_global_config.turn_host, m_global_config.turn_port,
                                            m_global_config.turn_username, m_global_config.turn_password);
         }
+        m_p2p_manager->set_multi_wan_config(m_global_config.enable_multi_stun_probing, m_global_config.stun_list_url);
 
         // 7. 创建 StateManager (传入 sync_key 用于日志)
-        // [修改] 第三个参数传入计算好的 enable_watcher，确保双向模式下两端都监控文件
+        // 第三个参数传入计算好的 enable_watcher，确保双向模式下两端都监控文件
         m_state_manager = std::make_unique<VeritasSync::StateManager>(m_task.sync_folder, *m_p2p_manager,
                                                                       enable_watcher, m_task.sync_key);
 

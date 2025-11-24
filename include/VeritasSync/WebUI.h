@@ -208,7 +208,7 @@ private:
             try {
                 auto j = nlohmann::json::parse(req.body);
 
-                // --- [新增] 临时变量用于校验，防止直接污染 m_config ---
+                // --- 临时变量用于校验，防止直接污染 m_config ---
                 std::string new_tracker_host = j.value("tracker_host", m_config.tracker_host);
                 int new_tracker_port = j.value("tracker_port", (int)m_config.tracker_port);
 
@@ -218,7 +218,20 @@ private:
                 std::string new_turn_host = j.value("turn_host", m_config.turn_host);
                 int new_turn_port = j.value("turn_port", (int)m_config.turn_port);
 
-                // --- [新增] 校验逻辑 ---
+                bool new_enable_multi_wan = j.value("enable_multi_stun_probing", m_config.enable_multi_stun_probing);
+                std::string new_stun_list_url = j.value("stun_list_url", m_config.stun_list_url);
+
+                // 简单的 URL 格式校验
+                if (new_enable_multi_wan && !new_stun_list_url.empty()) {
+                    if (new_stun_list_url.find("http") != 0) {
+                        res.status = 400;
+                        res.set_content("{\"error\":\"STUN 列表 URL 必须以 http:// 或 https:// 开头\"}",
+                                        "application/json; charset=utf-8");
+                        return;
+                    }
+                }
+
+                // --- 校验逻辑 ---
                 if (new_tracker_port < 1 || new_tracker_port > 65535 || new_stun_port < 1 || new_stun_port > 65535 ||
                     new_turn_port < 1 || new_turn_port > 65535) {
                     if (g_logger) g_logger->warn("[WebUI] 配置保存失败: 端口号必须在 1-65535 之间");
@@ -237,6 +250,9 @@ private:
 
                 m_config.turn_host = new_turn_host;
                 m_config.turn_port = (unsigned short)new_turn_port;  // 保存 TURN 端口
+
+                m_config.enable_multi_stun_probing = new_enable_multi_wan;
+                m_config.stun_list_url = new_stun_list_url;
 
                 if (j.contains("turn_username"))
                     m_config.turn_username = j.value("turn_username", m_config.turn_username);

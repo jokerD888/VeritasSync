@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -98,6 +99,9 @@ public:
 
     std::vector<TransferStatus> get_active_transfers();
 
+    void start_multi_wan_probe();
+    void set_multi_wan_config(bool enabled, std::string url);
+
 private:
     P2PManager();
     void init();
@@ -131,6 +135,21 @@ private:
     void handle_juice_candidate(juice_agent_t* agent, const char* sdp);
     void handle_juice_gathering_done(juice_agent_t* agent);
     void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
+
+    // --- [新增] 多 WAN 探测辅助方法 ---
+    // 从指定 URL 下载 STUN 服务器列表
+    std::vector<std::string> fetch_stun_servers(const std::string& url);
+    // 执行单个 STUN Binding Request 并解析返回的映射 IP
+    // 返回空字符串表示探测失败或超时
+    std::string perform_simple_stun_request(boost::asio::io_context& ioc, const std::string& host, uint16_t port);
+
+    // 基于现有的 SDP，生成包含探测到的额外 WAN IP 的 SDP 片段
+    std::string generate_extra_candidates_sdp(const std::string& base_sdp);
+    // 存储探测到的多 WAN IP (使用 set 自动去重)
+    std::set<std::string> m_detected_wan_ips;
+    std::mutex m_wan_ips_mutex;
+    bool m_multi_wan_enabled = false;
+    std::string m_stun_list_url;
 
     // --- UPnP 辅助函数 ---
     void init_upnp();

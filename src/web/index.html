@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>VeritasSync 控制台</title>
-        <style>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VeritasSync 控制台</title>
+    <style>
         :root {
             --primary: #2563eb;
             --bg: #f3f4f6;
@@ -125,25 +126,6 @@
             box-shadow: 0 0 0 2px #d1fae5
         }
 
-        /* 呼吸灯动画 */
-        @keyframes pulse-green {
-            0% {
-                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
-            }
-
-            70% {
-                box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
-            }
-
-            100% {
-                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
-            }
-        }
-
-        .dot.online {
-            animation: pulse-green 2s infinite;
-        }
-
         .task-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -191,13 +173,8 @@
             background: #e0e7ff;
             color: #3730a3
         }
-
-        .role-bi {
-            background: #f3e8ff;
-            color: #6b21a8;
-            border: 1px solid #e9d5ff;
-        }
-
+        
+        /* 双向模式标签样式 */
         .role-bi {
             background: #f3e8ff;
             color: #6b21a8;
@@ -303,45 +280,17 @@
             gap: 8px
         }
 
-        /* 增强版日志样式 */
         .log-container {
             background: #1e1e1e;
             color: #e5e7eb;
             padding: 1rem;
             border-radius: 0.5rem;
-            font-family: 'Consolas', monospace;
+            font-family: monospace;
             font-size: 13px;
             height: 65vh;
             overflow-y: auto;
             border: 1px solid #374151;
             white-space: pre-wrap
-        }
-
-        .log-line {
-            padding: 2px 0;
-            border-bottom: 1px solid #2d2d2d;
-        }
-
-        .log-info {
-            color: #a7f3d0;
-        }
-
-        .log-warn {
-            color: #fcd34d;
-        }
-
-        .log-error {
-            color: #fca5a5;
-            font-weight: bold;
-        }
-
-        .log-debug {
-            color: #9ca3af;
-        }
-
-        .log-time {
-            color: #6b7280;
-            margin-right: 8px;
         }
 
         .log-toolbar {
@@ -410,339 +359,179 @@
             }
         }
 
-        /* --- 传输列表美化样式 --- */
-        .transfer-item {
-            margin-bottom: 1rem;
-            background: #f9fafb;
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #e5e7eb;
-            transition: 0.2s;
+        /* --- 新增美化样式 --- */
+
+        /* 1. 状态呼吸灯动画 */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        .dot.online {
+            animation: pulse-green 2s infinite;
         }
 
-        .transfer-item:hover {
-            background: #fff;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-        }
-
-        .transfer-header {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.85rem;
-            margin-bottom: 8px;
-            align-items: center;
-        }
-
-        .transfer-badge {
-            font-size: 0.7rem;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: bold;
-            text-transform: uppercase;
-            margin-right: 8px;
-            display: inline-block;
-            min-width: 70px;
-            text-align: center;
-        }
-
-        .badge-up {
-            background: #dbeafe;
-            color: #1e40af;
-        }
-
-        /* 蓝色 Upload */
-        .badge-down {
-            background: #d1fae5;
-            color: #065f46;
-        }
-
-        /* 绿色 Download */
-
+        /* 2. 进度条美化 */
         .progress-track {
             background: #e5e7eb;
             height: 8px;
             border-radius: 4px;
             overflow: hidden;
-            position: relative;
+            margin-top: 6px;
         }
-
-        /* 动态条纹动画 */
         .progress-fill {
             height: 100%;
+            background: linear-gradient(45deg, var(--primary) 25%, #3b82f6 25%, #3b82f6 50%, var(--primary) 50%, var(--primary) 75%, #3b82f6 75%, #3b82f6);
+            background-size: 20px 20px;
             border-radius: 4px;
             transition: width 0.3s ease;
-            /* 条纹背景 */
-            background-image: linear-gradient(45deg, rgba(255, 255, 255, .2) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, .2) 50%, rgba(255, 255, 255, .2) 75%, transparent 75%, transparent);
-            background-size: 1rem 1rem;
-            animation: progress-stripes 1s linear infinite;
+            animation: stripe-move 1s linear infinite;
+        }
+        @keyframes stripe-move {
+            0% { background-position: 0 0; }
+            100% { background-position: 20px 20px; }
         }
 
-        .fill-up {
-            background-color: #3b82f6;
-        }
+        /* 3. 日志彩色高亮 */
+        .log-line { font-family: 'Consolas', monospace; white-space: pre-wrap; border-bottom: 1px solid #2d2d2d; padding: 2px 0; }
+        .log-info { color: #a7f3d0; }   /* 浅绿 */
+        .log-warn { color: #fcd34d; }   /* 黄色 */
+        .log-error { color: #fca5a5; font-weight: bold; } /* 浅红 */
+        .log-debug { color: #9ca3af; }  /* 灰色 */
+        .log-time { color: #6b7280; margin-right: 8px; }
+    </style>
+</head>
 
-        /* 蓝色 */
-        .fill-down {
-            background-color: #10b981;
-        }
-
-        /* 绿色 */
-
-        @keyframes progress-stripes {
-            0% {
-                background-position: 1rem 0;
-            }
-
-            100% {
-                background-position: 0 0;
-            }
-        }
-
-        .transfer-meta {
-            font-size: 11px;
-            color: #6b7280;
-            margin-top: 6px;
-            display: flex;
-            justify-content: space-between;
-            font-family: monospace;
-        }
-        </style>
-    </head>
-    <body>
-        <div class="overlay" id="restart-overlay">
-            <div class="spinner"></div>
-            <h2>正在重启应用程序...</h2>
-            <p style="color:var(--sub)">请稍候，页面将自动刷新</p>
-        </div>
-        <div class="sidebar">
-            <div class="brand">⚡ VeritasSync</div>
-            <div class="nav-item active" onclick="switchTab('dashboard', this)">📊 总览仪表盘</div>
-            <div class="nav-item" onclick="switchTab('settings', this)">⚙️ 全局设置</div>
-            <div class="nav-item" onclick="switchTab('logs', this)">📜 系统日志</div>
-        </div>
-        <div class="main">
-            <div id="view-dashboard" class="view-section">
-                <div class="header">
-                    <h1 class="page-title">任务管理</h1>
-                    <button class="btn btn-primary" onclick="openModal()">+ 新建任务</button>
-                </div>
-                <div class="status-grid">
-                    <div class="card">
-                        <div style="color:var(--sub);font-size:0.875rem">Tracker</div>
-                        <div class="stat-val">
-                            <div class="dot online"></div>
-                            在线
-                        </div>
-                        <div style="font-size:12px;color:var(--sub);margin-top:4px" id="display-tracker-addr">连接中...</div>
+<body>
+    <div class="overlay" id="restart-overlay">
+        <div class="spinner"></div>
+        <h2>正在重启应用程序...</h2>
+        <p style="color:var(--sub)">请稍候，页面将自动刷新</p>
+    </div>
+    <div class="sidebar">
+        <div class="brand">⚡ VeritasSync</div>
+        <div class="nav-item active" onclick="switchTab('dashboard', this)">📊 总览仪表盘</div>
+        <div class="nav-item" onclick="switchTab('settings', this)">⚙️ 全局设置</div>
+        <div class="nav-item" onclick="switchTab('logs', this)">📜 系统日志</div>
+    </div>
+    <div class="main">
+        <div id="view-dashboard" class="view-section">
+            <div class="header">
+                <h1 class="page-title">任务管理</h1><button class="btn btn-primary" onclick="openModal()">+ 新建任务</button>
+            </div>
+            <div class="status-grid">
+                <div class="card">
+                    <div style="color:var(--sub);font-size:0.875rem">Tracker</div>
+                    <div class="stat-val">
+                        <div class="dot online"></div> 在线
                     </div>
-                    <div class="card">
-                        <div style="color:var(--sub);font-size:0.875rem">活跃任务</div>
-                        <div class="stat-val" id="task-count">0</div>
-                    </div>
+                    <div style="font-size:12px;color:var(--sub);margin-top:4px" id="display-tracker-addr">连接中...</div>
                 </div>
                 <div class="card">
-                    <h3 style="margin-bottom:1rem;display:flex;align-items:center;gap:8px">
-                        🚀 正在传输
-                        <span id="transfer-count" style="font-size:0.8rem;background:#f3f4f6;padding:2px 8px;border-radius:12px;color:#666">0</span>
-                    </h3>
-                    <div id="transfer-container" style="min-height:60px">
-                        <div style="text-align:center;padding:1.5rem;color:#9ca3af;font-size:0.9rem">✨ 暂无活跃传输</div>
-                    </div>
-                </div>
-                <h3 style="margin-bottom:1rem">我的同步目录</h3>
-                <div class="task-grid" id="task-container"></div>
-            </div>
-            <div id="view-settings" class="view-section section-hidden">
-                <div class="header">
-                    <h1 class="page-title">全局配置</h1>
-                    <div style="display:flex;gap:10px">
-                        <button class="btn" onclick="restartApp()" id="btnRestart">
-                            🔄
-                        重启应用
-                        </button>
-                        <button class="btn btn-primary" onclick="saveSettings()" id="btnSave">
-                            💾
-                        保存设置
-                        </button>
-                    </div>
-                </div>
-                <div class="card" style="max-width:600px">
-                    <h3 style="margin-bottom:1.5rem">连接设置</h3>
-                    <div class="form-group">
-                        <label>Tracker 地址 (Host : Port)</label>
-                        <div class="input-group">
-                            <input
-                                id="cfgTrackerHost"
-                                class="form-input"
-                                placeholder="IP 或域名"
-                                style="flex: 3;"
-                            >
-                            <input
-                                id="cfgTrackerPort"
-                                class="form-input"
-                                type="number"
-                                placeholder="端口"
-                                style="flex: 1;"
-                            >
-                        </div>
-                    </div>
-                    <hr style="margin:1.5rem 0;border:0;border-top:1px solid var(--border)">
-                    <h3 style="margin-bottom:1.5rem">NAT 穿透 (STUN/TURN)</h3>
-                    <div class="form-group">
-                        <label>STUN 服务器 (Host : Port)</label>
-                        <div class="input-group">
-                            <input
-                                id="cfgStunHost"
-                                class="form-input"
-                                placeholder="stun.l.google.com"
-                                style="flex: 3;"
-                            >
-                            <input
-                                id="cfgStunPort"
-                                class="form-input"
-                                type="number"
-                                placeholder="19302"
-                                style="flex: 1;"
-                            >
-                        </div>
-                        <div style="font-size:0.8rem;color:var(--sub);margin-top:4px">
-                            备选推荐: stun.l.google.com:19302
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>TURN 服务器 (可选) (Host : Port)</label>
-                        <div class="input-group">
-                            <input
-                                id="cfgTurnHost"
-                                class="form-input"
-                                placeholder="留空以禁用"
-                                style="flex: 3;"
-                            >
-                            <input
-                                id="cfgTurnPort"
-                                class="form-input"
-                                type="number"
-                                placeholder="3478"
-                                style="flex: 1;"
-                            >
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>TURN 用户名</label>
-                        <input id="cfgTurnUser" class="form-input" value="">
-                    </div>
-                    <div class="form-group">
-                        <label>TURN 密码</label>
-                        <input
-                            id="cfgTurnPass"
-                            class="form-input"
-                            type="password"
-                            value=""
-                        >
-                    </div>
+                    <div style="color:var(--sub);font-size:0.875rem">活跃任务</div>
+                    <div class="stat-val" id="task-count">0</div>
                 </div>
             </div>
-            <div id="view-logs" class="view-section section-hidden">
-                <div class="header">
-                    <h1 class="page-title">运行日志</h1>
-                    <div class="log-toolbar">
-                        <input
-                            type="text"
-                            id="logFilter"
-                            class="form-input"
-                            style="width:180px;margin:0;padding:0.4rem"
-                            placeholder="🔍 关键词..."
-                            onkeyup="renderLog()"
-                        >
-                        <label style="font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px">
-                            <input type="checkbox" id="autoScroll" checked>
-                            自动滚动
-                        </label>
-                        <button class="btn" onclick="fetchGlobalLog()">刷新</button>
+            <div class="card">
+                <h3 style="margin-bottom:1rem">🚀 正在传输</h3>
+                <div id="transfer-container" style="color:#666;font-size:0.9rem">暂无活跃传输</div>
+            </div>
+            <h3 style="margin-bottom:1rem">我的同步目录</h3>
+            <div class="task-grid" id="task-container"></div>
+        </div>
+        <div id="view-settings" class="view-section section-hidden">
+            <div class="header">
+                <h1 class="page-title">全局配置</h1>
+                <div style="display:flex;gap:10px"><button class="btn" onclick="restartApp()" id="btnRestart">🔄
+                        重启应用</button><button class="btn btn-primary" onclick="saveSettings()" id="btnSave">💾
+                        保存设置</button></div>
+            </div>
+            <div class="card" style="max-width:600px">
+                <h3 style="margin-bottom:1.5rem">连接设置</h3>
+                <div class="form-group"><label>Tracker IP 地址</label><input id="cfgTrackerHost" class="form-input"
+                        value=""></div>
+                <div class="form-group"><label>Tracker 端口</label><input id="cfgTrackerPort" class="form-input"
+                        type="number" value=""></div>
+                <hr style="margin:1.5rem 0;border:0;border-top:1px solid var(--border)">
+                <h3 style="margin-bottom:1.5rem">NAT 穿透 (STUN/TURN)</h3>
+                <div class="form-group"><label>STUN 服务器</label><input id="cfgStunHost" class="form-input" value="">
+                </div>
+                <div class="form-group"><label>TURN 服务器 (可选)</label><input id="cfgTurnHost" class="form-input" value="">
+                </div>
+                <div class="form-group"><label>TURN 用户名</label><input id="cfgTurnUser" class="form-input" value="">
+                </div>
+                <div class="form-group"><label>TURN 密码</label><input id="cfgTurnPass" class="form-input" type="password"
+                        value=""></div>
+                <hr style="margin:1.5rem 0;border:0;border-top:1px solid var(--border)">
+                <h4 style="color:var(--text);margin-bottom:1rem;font-size:0.95rem;display:flex;align-items:center;gap:8px;">
+                    <span>🌐</span> 多 WAN / 高级探测增强
+                </h4>
+                
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--text);">
+                        <input type="checkbox" id="cfgEnableMultiWan" style="width:16px;height:16px;accent-color:var(--primary);">
+                        启用多 STUN 并发探测 (显著提升多宽带/NAT3 环境下的连通率)
+                    </label>
+                    <div style="font-size:0.8rem;color:var(--sub);margin-left:26px;margin-top:4px;">
+                        * 开启后将自动从下方列表获取 STUN 服务器,探测所有可能的公网 IP 并注入 SDP。
                     </div>
                 </div>
-                <div class="log-container" id="global-log-area">加载中...</div>
+
+                <div class="form-group">
+                    <label>STUN 列表源 URL</label>
+                    <input id="cfgStunListUrl" class="form-input" placeholder="https://..." style="font-family:var(--font-mono);font-size:0.8rem;">
+                </div>
             </div>
         </div>
-        <div class="modal" id="add-modal">
-            <div class="modal-box">
-                <h2 style="margin-bottom:1.5rem">新建任务</h2>
-                <div class="form-group">
-                    <label>Sync Key</label>
-                    <div class="input-group">
-                        <input
-                            id="newKey"
-                            class="form-input"
-                            type="text"
-                            autocomplete="off"
-                            data-lpignore="true"
-                            name="veritas_sync_key_field"
-                            placeholder="例如：project-01"
-                        >
-                        <button class="btn" onclick="genKey()" style="margin-top:4px">🎲 生成</button>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>同步模式</label>
-                    <select id="newMode" class="form-input" onchange="updateRoleVisibility()">
-                        <option value="oneway">➡️ 单向同步 (Source ➡️ Dest)</option>
-                        <option value="bidirectional">🔁 双向同步 (两端互相同步) </option>
-                        </select>
-                    </div>
-                    <div class="form-group" id="role-group">
-                        <label>角色</label>
-                        <select id="newRole" class="form-input">
-                            <option value="source">Source (发送端)</option>
-                            <option value="destination">Destination (接收端)</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>路径</label>
-                        <div class="input-group">
-                            <input id="newFolder" class="form-input">
-                            <button class="btn" onclick="pickFolder()" style="margin-top:4px">📂 浏览</button>
-                        </div>
-                    </div>
-                    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:2rem">
-                        <button class="btn" onclick="closeModal()">取消</button>
-                        <button class="btn btn-primary" onclick="addTask()">创建</button>
-                    </div>
+        <div id="view-logs" class="view-section section-hidden">
+            <div class="header">
+                <h1 class="page-title">运行日志</h1>
+                <div class="log-toolbar"><input type="text" id="logFilter" class="form-input"
+                        style="width:180px;margin:0;padding:0.4rem" placeholder="🔍 关键词..." onkeyup="renderLog()"><label
+                        style="font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px"><input
+                            type="checkbox" id="autoScroll" checked> 自动滚动</label><button class="btn"
+                        onclick="fetchGlobalLog()">刷新</button></div>
+            </div>
+            <div class="log-container" id="global-log-area">加载中...</div>
+        </div>
+    </div>
+    <div class="modal" id="add-modal">
+        <div class="modal-box">
+            <h2 style="margin-bottom:1.5rem">新建任务</h2>
+            <div class="form-group"><label>Sync Key</label>
+                <div class="input-group">
+                    <input id="newKey" class="form-input" type="text" autocomplete="off" data-lpignore="true" name="veritas_sync_key_field" placeholder="例如：project-01">
+                    <button class="btn" onclick="genKey()" style="margin-top:4px">🎲 生成</button>
                 </div>
             </div>
-            <div class="modal" id="log-modal">
-                <div class="modal-box" style="width:800px">
-                    <div style="display:flex;justify-content:space-between;margin-bottom:1rem">
-                        <h3>任务日志</h3>
-                        <button class="btn" onclick="closeLogModal()">关闭</button>
-                    </div>
-                    <div class="log-container" id="task-log-content" style="height:400px"></div>
-                </div>
+            <div class="form-group"><label>角色</label><select id="newRole" class="form-input">
+                    <option value="source">Source (发送)</option>
+                    <option value="destination">Destination (接收)</option>
+                </select></div>
+            <div class="form-group"><label>同步模式</label><select id="newMode" class="form-input">
+                    <option value="oneway">➡ 单向同步 (Source -> Dest)</option>
+                    <option value="bidirectional">🔁 双向同步 (Source <-> Dest)</option>
+                </select></div>
+            <div class="form-group"><label>路径</label>
+                <div class="input-group"><input id="newFolder" class="form-input"><button class="btn"
+                        onclick="pickFolder()" style="margin-top:4px">📂 浏览</button></div>
             </div>
-            <script>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:2rem"><button class="btn"
+                    onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="addTask()">创建</button>
+            </div>
+        </div>
+    </div>
+    <div class="modal" id="log-modal">
+        <div class="modal-box" style="width:800px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:1rem">
+                <h3>任务日志</h3><button class="btn" onclick="closeLogModal()">关闭</button>
+            </div>
+            <div class="log-container" id="task-log-content" style="height:400px"></div>
+        </div>
+    </div>
+    <script>
         let rawLog = "";
         const id = x => document.getElementById(x);
-
-        function updateRoleVisibility() {
-            const mode = id('newMode').value;
-            const roleGroup = id('role-group');
-            
-            if (mode === 'bidirectional') {
-                // 双向模式：隐藏角色选择，后台逻辑处理角色
-                roleGroup.style.display = 'none';
-            } else {
-                // 单向模式：显示角色选择
-                roleGroup.style.display = 'block';
-            }
-        }
-
-        function openModal() { 
-            id('add-modal').classList.add('open'); 
-            // 重置表单
-            id('newMode').value = 'oneway'; 
-            id('newRole').value = 'source'; 
-            // 根据重置后的值刷新UI状态
-            updateRoleVisibility();
-        }
 
         function switchTab(i, e) {
             document.querySelectorAll('.view-section').forEach(x => x.classList.add('section-hidden'));
@@ -750,7 +539,7 @@
             document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
             e.classList.add('active');
             if (i === 'dashboard') loadTasks();
-            if (i === 'settings') loadSettings();
+            if (i === 'settings') loadSettings(); // 切换到设置时加载配置
             if (i === 'logs') fetchGlobalLog();
         }
 
@@ -758,15 +547,18 @@
             try {
                 const r = await fetch('/api/config');
                 const c = await r.json();
-
+                
+                // 更新顶部的任务计数
                 id('task-count').innerText = c.tasks.length;
-
+                
+                // 更新 Tracker 显示
                 if (c.tracker_host) {
                     id('display-tracker-addr').innerText = `${c.tracker_host}:${c.tracker_port}`;
                 }
 
                 const container = id('task-container');
-
+                
+                // --- 新增：空状态检测与引导 ---
                 if (c.tasks.length === 0) {
                     container.innerHTML = `
                         <div style="grid-column: 1 / -1; text-align: center; padding: 4rem 2rem; background: white; border-radius: 1rem; border: 2px dashed var(--border);">
@@ -782,158 +574,103 @@
                     `;
                     return;
                 }
+                // ---------------------------
 
+                // 渲染任务列表
                 container.innerHTML = c.tasks.map((t, i) => {
-                const isBi = t.mode === 'bidirectional';
-                let badgeHtml = '';
-
-                // [核心修改] 徽章显示逻辑
-                if (isBi) {
-                    // 双向模式：只显示“双向同步”，完全隐藏 Source/Dest
-                    badgeHtml = `<span class="role role-bi">🔁 双向同步</span>`;
-                } else {
-                    // 单向模式：显示“单向” + “Source/Dest”
-                    const roleClass = t.role === 'source' ? 'role-src' : 'role-dst';
-                    const roleName = t.role === 'source' ? 'Source' : 'Dest';
-                    badgeHtml = `<span class="role" style="background:#eee;color:#555;margin-right:4px">➡️ 单向</span>
-                                <span class="role ${roleClass}">${roleName}</span>`;
-                }
-                        
-                return `
-            <div class="task-card">
+                    // 解析模式并生成标签
+                    const isBi = t.mode === 'bidirectional';
+                    const modeBadge = isBi 
+                        ? `<span class="role role-bi" style="margin-right:4px">🔁 双向</span>` 
+                        : `<span class="role" style="background:#eee;color:#555;margin-right:4px">➡ 单向</span>`;
+                            
+                    return `
+        <div class="task-card">
             <div class="task-header">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.sync_folder}">📁 ${t.sync_folder.split(/[/\\]/).pop() || 'Root'}</span>
-            <div style="flex-shrink:0;margin-left:8px">
-                ${badgeHtml} </div>
+                <span>📁 ${t.sync_folder.split(/[\/]/).pop() || 'Root'}</span>
+                <div>
+                    ${modeBadge}
+                    <span class="role ${t.role === 'source' ? 'role-src' : 'role-dst'}">${t.role}</span>
+                </div>
             </div>
             <div class="task-body">
-            <div class="info-item">
-                <div class="info-label">KEY</div>
-                <div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">PATH</div>
-                <div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div>
-            </div>
+                <div class="info-item">
+                    <div class="info-label">KEY</div>
+                    <div class="info-val" onclick="copy('${t.sync_key}')">${t.sync_key}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">PATH</div>
+                    <div class="info-val" title="${t.sync_folder}">${t.sync_folder}</div>
+                </div>
             </div>
             <div class="task-footer">
-            <button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button>
-            <button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button>
-            <button class="btn btn-danger" onclick="delTask(${i})">🗑</button>
+                <button class="btn btn-primary" style="flex:1" onclick="openFolder(${i})">📂 打开</button>
+                <button class="btn" style="flex:1" onclick="viewTaskLog(${i})">📄 日志</button>
+                <button class="btn btn-danger" onclick="delTask(${i})">🗑</button>
             </div>
-            </div>`;
-            }).join('');
+        </div>`;
+                }).join('');
             } catch (e) { console.error(e) }
         }
 
+        // 加载设置数据回填到表单
         async function loadSettings() {
             try {
                 const r = await fetch('/api/config');
                 const c = await r.json();
                 id('cfgTrackerHost').value = c.tracker_host || "";
                 id('cfgTrackerPort').value = c.tracker_port || 9988;
-                id('cfgStunHost').value = c.stun_host || "stun.l.google.com";
-                id('cfgStunPort').value = c.stun_port || 19302;
+                id('cfgStunHost').value = c.stun_host || "";
                 id('cfgTurnHost').value = c.turn_host || "";
-                id('cfgTurnPort').value = c.turn_port || 3478;
                 id('cfgTurnUser').value = c.turn_username || "";
                 id('cfgTurnPass').value = c.turn_password || "";
+
+                // --- 加载多 WAN 配置 ---
+                // 注意:如果后端 JSON 里没有这个字段,默认视为 true (根据 C++ 默认值)
+                id('cfgEnableMultiWan').checked = (c.enable_multi_stun_probing !== false);
+                id('cfgStunListUrl').value = c.stun_list_url || "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
             } catch (e) {
                 console.error("加载配置失败", e);
             }
         }
 
-        async function saveSettings() {
-            const b = id('btnSave');
-            b.disabled = true;
-            b.innerText = "保存中...";
-
-            const d = {
-                tracker_host: id('cfgTrackerHost').value,
-                tracker_port: parseInt(id('cfgTrackerPort').value || 0),
-                stun_host: id('cfgStunHost').value,
-                stun_port: parseInt(id('cfgStunPort').value || 0),
-                turn_host: id('cfgTurnHost').value,
-                turn_port: parseInt(id('cfgTurnPort').value || 0),
-                turn_username: id('cfgTurnUser').value,
-                turn_password: id('cfgTurnPass').value
-            };
-
-            if (d.tracker_port < 1 || d.stun_port < 1 || (d.turn_host && d.turn_port < 1)) {
-                alert("端口号无效，请输入 1-65535 之间的数字");
-                b.disabled = false;
-                b.innerText = "💾 保存设置";
-                return;
-            }
-
-            try {
-                const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(d) });
-                const res = await r.json();
-                if (r.ok) {
-                    alert("已保存，请重启应用以生效");
-                } else {
-                    alert("保存失败: " + (res.error || "未知错误"));
-                }
-            } catch (e) {
-                alert("网络错误");
-            }
-            b.disabled = false;
-            b.innerText = "💾 保存设置";
-        }
-
-        async function restartApp() { if (!confirm("确定要重启吗？")) return; id('restart-overlay').classList.add('active'); try { fetch('/api/restart', { method: 'POST' }); } catch (e) { } let c = 0; const t = setInterval(async () => { c++; try { const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); const r = await fetch('/api/config', { signal: ctl.signal }); if (r.ok) { clearInterval(t); location.reload(); } } catch (e) { if (c > 30) { clearInterval(t); location.reload(); } } }, 2000); }
+        async function saveSettings() { const b = id('btnSave'); b.disabled = true; b.innerText = "保存中..."; const d = { tracker_host: id('cfgTrackerHost').value, tracker_port: parseInt(id('cfgTrackerPort').value || 9988), stun_host: id('cfgStunHost').value, turn_host: id('cfgTurnHost').value, turn_username: id('cfgTurnUser').value, turn_password: id('cfgTurnPass').value, enable_multi_stun_probing: id('cfgEnableMultiWan').checked, stun_list_url: id('cfgStunListUrl').value }; try { const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(d) }); if (r.ok) alert("已保存,请重启"); else { try { const err = await r.json(); alert("保存失败: " + (err.error || "未知错误")); } catch(e) { alert("保存失败"); } } } catch (e) { alert("网络错误"); } b.disabled = false; b.innerText = "💾 保存设置"; }
+        async function restartApp() { if (!confirm("确定要重启吗?")) return; id('restart-overlay').classList.add('active'); try { fetch('/api/restart', { method: 'POST' }); } catch (e) { } let c = 0; const t = setInterval(async () => { c++; try { const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); const r = await fetch('/api/config', { signal: ctl.signal }); if (r.ok) { clearInterval(t); location.reload(); } } catch (e) { if (c > 30) { clearInterval(t); location.reload(); } } }, 2000); }
         function genKey() { const c = 'abcdefghijklmnopqrstuvwxyz0123456789', l = c.length; let k = 'sync-'; for (let i = 0; i < 8; i++)k += c.charAt(Math.floor(Math.random() * l)); id('newKey').value = k; }
         function closeLogModal() { id('log-modal').classList.remove('open'); }
         async function openFolder(i) { try { const r = await fetch(`/api/tasks/${i}/open`, { method: 'POST' }); if (!r.ok) alert('打开失败'); } catch (e) { } }
         async function pickFolder() { const b = event.target; b.disabled = true; try { const r = await fetch('/api/utils/pick_folder', { method: 'POST' }); const d = await r.json(); if (d.path) id('newFolder').value = d.path; } catch (e) { } b.disabled = false; }
-
         async function addTask() { 
             const k = id('newKey').value;
-            const m = id('newMode').value;
+            const r = id('newRole').value;
             const f = id('newFolder').value;
-            
-            // [核心逻辑] 如果是双向模式，强制角色为 'source'；否则取用户选择
-            const r = (m === 'bidirectional') ? 'source' : id('newRole').value;
+            const m = id('newMode').value; // 获取模式
             
             if (!k || !f) return alert('信息不完整'); 
             
-            try {
-                const resp = await fetch('/api/tasks', { 
-                    method: 'POST', 
-                    body: JSON.stringify({ 
-                        sync_key: k, 
-                        role: r, 
-                        sync_folder: f,
-                        mode: m 
-                    }) 
-                }); 
-                
-                if (resp.ok) {
-                    closeModal(); 
-                    setTimeout(() => { location.reload(); }, 500);
-                } else {
-                    alert('添加失败');
-                }
-            } catch(e) {
-                console.error(e);
-                alert('网络错误');
-            }
+            await fetch('/api/tasks', { 
+                method: 'POST', 
+                body: JSON.stringify({ 
+                    sync_key: k, 
+                    role: r, 
+                    sync_folder: f,
+                    mode: m // 发送模式字段
+                }) 
+            }); 
+            
+            closeModal(); 
+            location.reload(); 
         }
-
         async function delTask(i) { if (confirm('删除?')) { await fetch(`/api/tasks/${i}`, { method: 'DELETE' }); location.reload(); } }
-
-        async function fetchGlobalLog() {
-            try {
-                const r = await fetch('/api/log');
-                rawLog = await r.text();
-                renderLog();
-            } catch (e) { }
-        }
-
+        async function fetchGlobalLog() { const r = await fetch('/api/log'); rawLog = await r.text(); renderLog(); }
+        // 增强版日志渲染
         function renderLog() {
             const f = id('logFilter').value.toLowerCase();
             const e = id('global-log-area');
+            
+            // 简单的 HTML 转义防止 XSS (虽然日志通常是安全的)
             const escapeHtml = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
             const lines = rawLog.split('\n');
             let html = '';
 
@@ -946,113 +683,52 @@
                 else if (line.includes('[warn]')) cls = 'log-warn';
                 else if (line.includes('[debug]')) cls = 'log-debug';
 
+                // 尝试简单高亮时间戳 (假设格式 [2023-...])
                 const formattedLine = escapeHtml(line).replace(/^\[(.*?)\]/, '<span class="log-time">[$1]</span>');
+                
                 html += `<div class="log-line ${cls}">${formattedLine}</div>`;
             }
 
-            e.innerHTML = html;
+            e.innerHTML = html; // 使用 innerHTML 渲染颜色
             if (id('autoScroll').checked) e.scrollTop = e.scrollHeight;
         }
-
-        async function viewTaskLog(i) {
-            try {
-                const r = await fetch(`/api/tasks/${i}/log`);
-                id('task-log-content').innerText = await r.text();
-                id('log-modal').classList.add('open');
-            } catch (e) { }
-        }
-
+        async function viewTaskLog(i) { const r = await fetch(`/api/tasks/${i}/log`); id('task-log-content').innerText = await r.text(); id('log-modal').classList.add('open'); }
         function copy(t) { navigator.clipboard.writeText(t).then(() => alert('已复制')); }
         function openModal() { id('add-modal').classList.add('open'); }
         function closeModal() { id('add-modal').classList.remove('open'); }
-
-        const fi = id('newFolder');
-        fi.addEventListener('dragover', e => e.preventDefault());
-        fi.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) fi.value = (e.dataTransfer.files[0].path || e.dataTransfer.files[0].name).replace(/\\/g, '/'); });
-
+        const fi = id('newFolder'); fi.addEventListener('dragover', e => e.preventDefault()); fi.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) fi.value = (e.dataTransfer.files[0].path || e.dataTransfer.files[0].name).replace(/\\/g, '/'); });
         setInterval(() => { if (!id('view-logs').classList.contains('section-hidden') && id('autoScroll').checked) fetchGlobalLog() }, 3000);
 
         // 初始加载
         loadTasks();
 
-        // 辅助函数：格式化文件大小
-        function formatSize(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
-        }
-
-        // 辅助函数：格式化速度
-        function formatSpeed(bytesPerSec) {
-            return formatSize(bytesPerSec) + '/s';
-        }
-
-        // 传输状态轮询
         setInterval(async () => {
             try {
                 const r = await fetch('/api/status');
                 const data = await r.json();
                 const el = id('transfer-container');
-
-                id('transfer-count').innerText = data.length;
-
                 if (data.length === 0) {
-                    el.innerHTML = '<div style="text-align:center;padding:1.5rem;color:#9ca3af;font-size:0.9rem">✨ 暂无活跃传输</div>';
+                    el.innerHTML = '<div style="text-align:center;padding:1rem;color:#999">💤 暂无活跃传输</div>';
                 } else {
-                    el.innerHTML = data.map(d => {
-                        const isUp = (d.type === 'upload');
-                        const badgeClass = isUp ? 'badge-up' : 'badge-down';
-                        const fillClass = isUp ? 'fill-up' : 'fill-down';
-                        const typeText = isUp ? 'UPLOADING' : 'DOWNLOADING';
-
-                        // 后端块大小固定为 16384
-                        const CHUNK_SIZE = 16384;
-                        const currentBytes = d.done * CHUNK_SIZE;
-                        const totalBytes = d.total * CHUNK_SIZE;
-
-                        // 使用辅助函数格式化
-                        const sizeText = `${formatSize(currentBytes)} / ${formatSize(totalBytes)}`;
-                        const speedText = formatSpeed(d.speed || 0); // 使用后端传来的 speed
-
-                        return `
-                    <div class="transfer-item">
-                        <div class="transfer-header">
-                            <div style="display:flex;align-items:center;gap:8px;overflow:hidden;flex:1">
-                                <span class="transfer-badge ${badgeClass}">${typeText}</span>
-                                
-                                <div style="display:flex;flex-direction:column;overflow:hidden;line-height:1.3;flex:1">
-                                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#374151;font-size:0.9rem" title="${d.path}">
-                                        ${d.path.split(/[/\\]/).pop()}
-                                    </span>
-                                    <span style="font-size:0.75rem;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.root}">
-                                        📂 ${d.root}
-                                    </span>
-                                </div>
+                    el.innerHTML = data.map(d => `
+                        <div style="margin-bottom:12px">
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:0.9rem">
+                                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%" title="${d.path}">${d.path}</span>
+                                <span style="font-weight:bold;color:var(--primary)">${d.progress.toFixed(1)}%</span>
                             </div>
-                            
-                            <div style="font-weight:700;font-family:monospace;margin-left:10px;color:var(--primary);white-space:nowrap">
-                                ⚡ ${speedText}
+                            <div class="progress-track">
+                                <div class="progress-fill" style="width:${d.progress}%"></div>
+                            </div>
+                            <div style="font-size:11px;color:#999;margin-top:4px;display:flex;justify-content:space-between">
+                                <span>任务: ${d.key.substring(0, 8)}...</span>
+                                <span>块: ${d.recv}/${d.total}</span>
                             </div>
                         </div>
-                        
-                        <div class="progress-track">
-                            <div class="progress-fill ${fillClass}" style="width:${d.progress}%"></div>
-                        </div>
-                        
-                        <div class="transfer-meta" style="margin-top:8px;color:#6b7280;font-size:0.75rem;display:flex;justify-content:space-between;align-items:center">
-                            <span style="background:#f3f4f6;padding:2px 6px;border-radius:4px;font-family:monospace;user-select:all;max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${d.key}">
-                                🔑 ${d.key}
-                            </span>
-                            
-                            <span style="font-weight:500;font-family:monospace">${sizeText}</span>
-                        </div>
-                    </div>
-                `}).join('');
+                    `).join('');
                 }
             } catch (e) { }
-        }, 500); // 保持 500ms 的刷新频率
-            </script>
-        </body>
-    </html>
+        }, 1000);
+    </script>
+</body>
+
+</html>
