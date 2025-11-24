@@ -59,7 +59,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                             AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                         } else {
                             UINT flags = MF_STRING;
-                            if (item.checked) flags |= MF_CHECKED;
+                            if (item.checked_cb && item.checked_cb()) {
+                                flags |= MF_CHECKED;
+                            }
 
                             // 使用 EncodingUtils 转宽字符，解决菜单中文乱码
                             std::wstring wText = Utf8ToWide(item.text);
@@ -134,7 +136,16 @@ bool TrayIcon::init(const std::string& tooltip) {
 
     // 加载系统默认图标 (Application Icon)，如果没有则使用系统问号图标
     // 你可以在 .rc 资源文件中定义 IDI_APPLICATION 图标
-    m_impl->nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    m_impl->nid.hIcon =
+        (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(101), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                         GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED);
+
+    // 2. 如果加载失败，回退到默认大图标
+    if (!m_impl->nid.hIcon) {
+        m_impl->nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(101));
+    }
+
+    // 3. 最后的保底
     if (!m_impl->nid.hIcon) {
         m_impl->nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     }
@@ -147,11 +158,11 @@ bool TrayIcon::init(const std::string& tooltip) {
     return Shell_NotifyIconW(NIM_ADD, &m_impl->nid);
 }
 
-void TrayIcon::add_menu_item(const std::string& text, VoidCallback callback, bool checked) {
-    m_impl->menus.push_back({text, checked, callback});
+void TrayIcon::add_menu_item(const std::string& text, VoidCallback callback, CheckCallback check_cb) {
+    m_impl->menus.push_back({text, check_cb, callback});
 }
 
-void TrayIcon::add_separator() { m_impl->menus.push_back({"-", false, nullptr}); }
+void TrayIcon::add_separator() { m_impl->menus.push_back({"-", nullptr, nullptr}); }
 
 void TrayIcon::run_loop() {
     m_impl->running = true;
@@ -215,7 +226,7 @@ struct TrayIcon::Impl {};
 TrayIcon::TrayIcon() {}
 TrayIcon::~TrayIcon() {}
 bool TrayIcon::init(const std::string&) { return false; }
-void TrayIcon::add_menu_item(const std::string&, VoidCallback, bool) {}
+void TrayIcon::add_menu_item(const std::string&, VoidCallback, CheckCallback) {}
 void TrayIcon::add_separator() {}
 void TrayIcon::run_loop() {
     // Linux/Mac 暂时用 sleep 模拟阻塞，或者后续集成 GTK tray

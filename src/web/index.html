@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="app.svg">
     <title>VeritasSync 控制台</title>
     <style>
         :root {
@@ -358,7 +359,18 @@
     <!-- 顶部导航 -->
     <nav class="navbar">
         <div class="brand">
-            <span style="font-size:1.6rem; filter: drop-shadow(0 0 10px var(--primary))">⚡</span>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" 
+                style="width: 32px; height: 32px; filter: drop-shadow(0 0 8px var(--primary-glow)); margin-right: 8px; vertical-align: middle;">
+                <defs>
+                    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" style="stop-color:#0ea5e9;stop-opacity:1" /> <stop offset="100%" style="stop-color:#6366f1;stop-opacity:1" /> </linearGradient>
+                </defs>
+                <circle cx="256" cy="256" r="240" fill="#f8fafc"/>
+                <path d="M180 176 A80 80 0 1 0 180 336 C220 336 240 300 256 256 C272 212 292 176 332 176 A80 80 0 1 1 332 336" 
+                    fill="none" stroke="url(#grad2)" stroke-width="48" stroke-linecap="round"/>
+                <circle cx="130" cy="256" r="32" fill="#0f172a"/>
+                <circle cx="382" cy="256" r="32" fill="#0f172a"/>
+            </svg>
             VeritasSync
         </div>
         <div class="nav-tabs">

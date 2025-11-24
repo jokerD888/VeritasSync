@@ -57,6 +57,8 @@ add_executable(veritas_sync WIN32
     src/peer/CryptoLayer.cpp
     src/peer/TransferManager.cpp
     src/peer/Database.cpp
+    src/peer/SyncNode.cpp 
+    src/peer/Logger.cpp
 )
 
 if(WIN32)
@@ -69,7 +71,9 @@ add_custom_command(TARGET veritas_sync POST_BUILD
     # 3. 把 src/web/index.html 复制过去
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/src/web/index.html
-        $<TARGET_FILE_DIR:veritas_sync>/web/index.html
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/web/app.svg
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/web/app.ico
+        $<TARGET_FILE_DIR:veritas_sync>/web/
     
     # 4. (可选) 打印一条日志让你知道发生了什么
     COMMENT "Copying WebUI assets to output directory..."
@@ -232,11 +236,12 @@ gtest_discover_tests(unit_tests)
 
 # 1. 基础信息设置
 set(CPACK_PACKAGE_NAME "VeritasSync")
-set(CPACK_PACKAGE_VENDOR "JokerD888")
+set(CPACK_PACKAGE_VENDOR "jokerD888")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "VeritasSync - 高性能 P2P 文件同步工具")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/jokerd888/veritassync")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}") # 读取项目开头的版本号 (1.0)
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "VeritasSync") # 安装路径: C:/Program Files/VeritasSync
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt")
 
 # 2. 图标与资源配置
 # 安装包的图标 (左上角图标)

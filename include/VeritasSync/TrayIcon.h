@@ -9,10 +9,11 @@ namespace VeritasSync {
 class TrayIcon {
 public:
     using VoidCallback = std::function<void()>;
+    using CheckCallback = std::function<bool()>;
 
     struct MenuItem {
         std::string text;
-        bool checked = false;
+        CheckCallback checked_cb = nullptr;
         VoidCallback callback;
     };
 
@@ -22,7 +23,7 @@ public:
     ~TrayIcon();
 
     bool init(const std::string& tooltip);
-    void add_menu_item(const std::string& text, VoidCallback callback, bool checked = false);
+    void add_menu_item(const std::string& text, VoidCallback callback, CheckCallback check_cb = nullptr);
     void add_separator();
     void run_loop();
     void quit();
