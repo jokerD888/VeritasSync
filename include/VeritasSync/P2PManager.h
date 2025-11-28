@@ -102,6 +102,8 @@ public:
     void start_multi_wan_probe();
     void set_multi_wan_config(bool enabled, std::string url);
 
+    void update_stun_servers(const std::vector<std::string>& servers);
+
 private:
     P2PManager();
     void init();

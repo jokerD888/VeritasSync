@@ -192,6 +192,19 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
             m_self_id = payload.at("self_id").get<std::string>();
             std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
             g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
+            // --- 处理 Tracker 下发的 STUN 列表 ---
+            if (payload.contains("stun_servers")) {
+                try {
+                    std::vector<std::string> stun_list = payload.at("stun_servers").get<std::vector<std::string>>();
+                    if (!stun_list.empty() && m_p2p_manager) {
+                        // 将列表传递给 P2PManager
+                        boost::asio::post(m_p2p_manager->get_io_context(),
+                                          [mgr = m_p2p_manager, stun_list]() { mgr->update_stun_servers(stun_list); });
+                    }
+                } catch (const std::exception& e) {
+                    g_logger->warn("[TrackerClient] 解析 stun_servers 失败: {}", e.what());
+                }
+            }
             if (m_on_ready_callback) {
                 // --- 在 P2PManager 的 io_context 上调用回调 ---
                 boost::asio::post(m_p2p_manager->get_io_context(), [this, peers]() { m_on_ready_callback(peers); });

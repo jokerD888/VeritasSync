@@ -1,4 +1,6 @@
-﻿#include <spdlog/sinks/stdout_color_sinks.h>
+﻿#define CPPHTTPLIB_OPENSSL_SUPPORT  // 启用 HTTPS 支持
+#include <httplib.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <boost/asio.hpp>
@@ -32,6 +34,44 @@ constexpr const char* TYPE_PEER_JOIN = "PEER_JOIN";
 constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
 constexpr const char* TYPE_SIGNAL = "SIGNAL";
 }  // namespace SignalProto
+
+// ---  从 GitHub 下载 STUN 列表 ---
+std::vector<std::string> fetch_stun_servers() {
+    std::vector<std::string> servers;
+    std::string url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+    g_logger->info("[Tracker] 正在从 GitHub 下载 STUN 服务器列表...");
+
+    try {
+        httplib::Client cli("https://raw.githubusercontent.com");
+        cli.set_follow_location(true);
+        cli.set_read_timeout(10, 0);  // 10秒超时
+
+        auto res = cli.Get("/pradt2/always-online-stun/master/valid_hosts.txt");
+        if (res && res->status == 200) {
+            std::stringstream ss(res->body);
+            std::string line;
+            while (std::getline(ss, line)) {
+                // 清理空白字符
+                line.erase(0, line.find_first_not_of(" \t\r\n"));
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                if (!line.empty()) {
+                    servers.push_back(line);
+                }
+            }
+            g_logger->info("[Tracker] 成功加载 {} 个 STUN 服务器。", servers.size());
+        } else {
+            g_logger->error("[Tracker] 下载 STUN 列表失败: Status {}", res ? res->status : -1);
+        }
+    } catch (const std::exception& e) {
+        g_logger->error("[Tracker] 下载异常: {}", e.what());
+    }
+
+    // 如果下载失败，回退到内置的 Google 服务器，确保至少有一个可用
+    if (servers.empty()) {
+        servers.push_back("stun.l.google.com:19302");
+    }
+    return servers;
+}
 
 class TrackerServer;  // 前向声明
 
@@ -89,6 +129,7 @@ class TrackerServer {
    public:
     TrackerServer(boost::asio::io_context& io_context, short port)
         : m_acceptor(io_context, tcp::endpoint(tcp::v4(), port)) {
+        m_stun_servers = fetch_stun_servers();
         start_accept();
     }
 
@@ -116,6 +157,7 @@ class TrackerServer {
     // (peer_id -> Session 指针，用于快速查找)
     std::map<std::string, std::shared_ptr<Session>> m_peers_by_id;
     std::mutex m_mutex;
+    std::vector<std::string> m_stun_servers;
 };
 
 // --- TrackerServer 方法实现 ---
@@ -129,6 +171,9 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
     // 1. 准备 ACK 消息，包含当前房间中的所有 peers
     json reg_ack_payload;
     reg_ack_payload["self_id"] = new_peer_id;
+
+    reg_ack_payload["stun_servers"] = m_stun_servers;
+
     json peers_list = json::array();
     for (const auto& peer : peer_set) {
         peers_list.push_back(peer->get_id());
@@ -139,7 +184,6 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
     reg_ack_msg[SignalProto::MSG_TYPE] = SignalProto::TYPE_REG_ACK;
     reg_ack_msg[SignalProto::MSG_PAYLOAD] = reg_ack_payload;
 
-    // 1.A. 发送 REG_ACK 给新加入的 peer
     session->send(reg_ack_msg);
 
     // 2. 准备 PEER_JOIN 广播消息

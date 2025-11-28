@@ -364,51 +364,51 @@ std::string P2PManager::perform_simple_stun_request(boost::asio::io_context& ioc
     return "";
 }
 
-void P2PManager::start_multi_wan_probe() {
-    // 投递到 Worker 线程池，避免阻塞主线程
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this()]() {
-        if (!m_multi_wan_enabled || m_stun_list_url.empty()) return;
+void P2PManager::start_multi_wan_probe() { g_logger->info("[MultiWAN] 等待 Tracker 下发 STUN 服务器列表..."); }
 
-        g_logger->info("[MultiWAN] 正在启动多 STUN 探测任务...");
+void P2PManager::update_stun_servers(const std::vector<std::string>& servers) {
+    if (!m_multi_wan_enabled) return;
 
-        // 1. 获取列表
-        auto servers = fetch_stun_servers(m_stun_list_url);
-        if (servers.empty()) {
-            g_logger->warn("[MultiWAN] STUN 列表为空，跳过探测。");
-            return;
-        }
+    g_logger->info("[MultiWAN] 收到 Tracker 下发的 STUN 列表 ({} 个服务器)，准备探测...", servers.size());
 
-        // 2. 随机选取 10 个
+    // 投递到 Worker 线程池进行探测，避免阻塞网络线程
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), servers]() {
+        // 1. 随机选取 10 个 (避免一次性发太多包)
+        std::vector<std::string> target_servers = servers;
+        if (target_servers.empty()) return;
+
         std::random_device rd;
         std::mt19937 g(rd());
-        std::shuffle(servers.begin(), servers.end(), g);
-        if (servers.size() > 10) servers.resize(10);
+        std::shuffle(target_servers.begin(), target_servers.end(), g);
+        if (target_servers.size() > 10) target_servers.resize(10);
 
-        // 3. 并发探测
+        // 2. 并发探测 (复用之前的逻辑)
         std::vector<std::thread> threads;
         std::set<std::string> temp_results;
         std::mutex temp_mutex;
 
-        for (const auto& s : servers) {
+        for (const auto& s : target_servers) {
             threads.emplace_back([&, s]() {
+                // 解析 host:port
+                std::string host = s;
+                int port = 3478;
                 size_t colon = s.find(':');
-                if (colon == std::string::npos) return;
-
-                std::string host = s.substr(0, colon);
-                int port = 3478;  // 默认端口
-                try {
-                    port = std::stoi(s.substr(colon + 1));
-                } catch (...) {
+                if (colon != std::string::npos) {
+                    host = s.substr(0, colon);
+                    try {
+                        port = std::stoi(s.substr(colon + 1));
+                    } catch (...) {
+                    }
                 }
 
-                // 使用独立的 io_context
+                // 使用临时的 io_context 执行同步探测
                 boost::asio::io_context probe_ioc;
                 std::string ip = perform_simple_stun_request(probe_ioc, host, port);
 
                 if (!ip.empty()) {
                     std::lock_guard<std::mutex> lock(temp_mutex);
                     temp_results.insert(ip);
-                    g_logger->debug("[MultiWAN] 服务器 {}:{} 报告 IP: {}", host, port, ip);
+                    // g_logger->debug("[MultiWAN] 服务器 {}:{} 报告 IP: {}", host, port, ip);
                 }
             });
         }
@@ -417,7 +417,7 @@ void P2PManager::start_multi_wan_probe() {
             if (t.joinable()) t.join();
         }
 
-        // 4. 更新结果
+        // 3. 更新结果
         int new_ips = 0;
         {
             std::lock_guard<std::mutex> lock(m_wan_ips_mutex);
@@ -430,7 +430,10 @@ void P2PManager::start_multi_wan_probe() {
         }
 
         if (new_ips > 0) {
-            g_logger->info("[MultiWAN] 探测完成，新发现 {} 个公网 IP。总计: {}", new_ips, m_detected_wan_ips.size());
+            g_logger->info("[MultiWAN] Tracker 列表探测完成，新发现 {} 个公网 IP。总计: {}", new_ips,
+                           m_detected_wan_ips.size());
+        } else {
+            g_logger->info("[MultiWAN] Tracker 列表探测完成，未发现新 IP (当前总计: {})。", m_detected_wan_ips.size());
         }
     });
 }

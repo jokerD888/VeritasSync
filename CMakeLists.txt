@@ -130,6 +130,9 @@ target_link_libraries(veritas_tracker PRIVATE
     Boost::asio
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    httplib::httplib
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # ===========================================================
