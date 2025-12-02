@@ -81,7 +81,6 @@ void SyncNode::start() {
         m_p2p_manager->set_turn_config(m_global_config.turn_host, m_global_config.turn_port,
                                        m_global_config.turn_username, m_global_config.turn_password);
     }
-    m_p2p_manager->set_multi_wan_config(m_global_config.enable_multi_stun_probing, m_global_config.stun_list_url);
 
     // 7. 创建 StateManager
     m_state_manager =
