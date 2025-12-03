@@ -5,6 +5,7 @@
 #include <openssl/sha.h>
 
 #include <memory>
+#include <vector>
 
 #include "VeritasSync/Logger.h"
 
@@ -14,8 +15,6 @@ static const int GCM_IV_LEN = 12;
 static const int GCM_TAG_LEN = 16;
 
 // --- RAII 包装器 ---
-// 定义一个智能指针类型，它知道如何释放 EVP_CIPHER_CTX
-// decltype(&EVP_CIPHER_CTX_free) 获取函数指针的类型
 using EvpContextPtr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
 
 void CryptoLayer::set_key(const std::string& key_string) {
@@ -49,6 +48,7 @@ std::string CryptoLayer::encrypt(const std::string& plaintext) const {
     EVP_EncryptInit_ex(ctx.get(), NULL, NULL, reinterpret_cast<const unsigned char*>(m_key.c_str()), iv);
 
     int out_len;
+    // 分配足够的缓冲区：输入长度 + 块大小 (AES block size = 16)
     std::vector<unsigned char> ciphertext(plaintext.length() + EVP_MAX_BLOCK_LENGTH);
 
     // 加密数据
@@ -90,21 +90,30 @@ std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
     const unsigned char* tag =
         reinterpret_cast<const unsigned char*>(ciphertext.c_str() + ciphertext.length() - GCM_TAG_LEN);
     const unsigned char* encrypted_data = reinterpret_cast<const unsigned char*>(ciphertext.c_str() + GCM_IV_LEN);
-    int encrypted_data_len = static_cast<int>(ciphertext.length()) - GCM_IV_LEN - GCM_TAG_LEN;
+
+    size_t overhead = GCM_IV_LEN + GCM_TAG_LEN;
+    if (ciphertext.length() <= overhead) return "";
+    int encrypted_data_len = static_cast<int>(ciphertext.length() - overhead);
 
     EvpContextPtr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
     if (!ctx) return "";
 
     // 初始化解密操作
-    EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL);
+    if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) return "";
     EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
-    EVP_DecryptInit_ex(ctx.get(), NULL, NULL, reinterpret_cast<const unsigned char*>(m_key.c_str()), iv);
+    if (EVP_DecryptInit_ex(ctx.get(), NULL, NULL, reinterpret_cast<const unsigned char*>(m_key.c_str()), iv) != 1)
+        return "";
 
     int out_len;
-    std::vector<unsigned char> plaintext(encrypted_data_len);
+    // 额外增加缓冲区，防止 OpenSSL 写入越界导致 Heap Corruption
+    // EVP_DecryptUpdate 文档建议输出缓冲区应足够大 (in_len + block_size)
+    std::vector<unsigned char> plaintext(encrypted_data_len + EVP_MAX_BLOCK_LENGTH + 32, 0);
 
     // 解密数据
-    EVP_DecryptUpdate(ctx.get(), plaintext.data(), &out_len, encrypted_data, encrypted_data_len);
+    if (EVP_DecryptUpdate(ctx.get(), plaintext.data(), &out_len, encrypted_data, encrypted_data_len) != 1) {
+        g_logger->warn("[Crypto] 解密过程出错。");
+        return "";
+    }
     int plaintext_len = out_len;
 
     // 设置期望的 Tag
@@ -112,7 +121,9 @@ std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
 
     // 验证 Tag 并结束解密
     int ret = EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + out_len, &out_len);
-    EVP_CIPHER_CTX_free(ctx.get());
+
+    // 显式释放 (虽然 RAII 会做，但为了逻辑清晰)
+    ctx.reset();
 
     if (ret > 0) {
         plaintext_len += out_len;
