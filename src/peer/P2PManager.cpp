@@ -740,7 +740,12 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);
     }
 }
-
+TransferManager::SessionStats P2PManager::get_transfer_stats() {
+    if (m_transfer_manager) {
+        return m_transfer_manager->get_session_stats();
+    }
+    return {0, 0};
+}
 void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* from_peer) {
     // 1. 角色检查
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;

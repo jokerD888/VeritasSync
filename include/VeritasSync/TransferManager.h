@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <chrono>
@@ -34,6 +35,11 @@ using SendCallback = std::function<int(const std::string& peer_id, const std::st
 
 class TransferManager : public std::enable_shared_from_this<TransferManager> {
 public:
+    struct SessionStats {
+        uint64_t total;  // 发起的总任务数
+        uint64_t done;   // 成功完成的任务数
+    };
+
     // 构造函数注入所有依赖
     TransferManager(StateManager* sm, boost::asio::thread_pool& pool, CryptoLayer& crypto, SendCallback send_cb);
 
@@ -51,6 +57,8 @@ public:
 
     // 清理超时的接收任务 (需外部定时调用)
     void cleanup_stale_buffers();
+
+    SessionStats get_session_stats() const;
 
     static constexpr size_t CHUNK_DATA_SIZE = 16384;
 
@@ -84,6 +92,9 @@ private:
     std::map<std::string, ReceivingFile> m_receiving_files;
     std::mutex m_transfer_mutex;
     std::map<std::string, SendingFile> m_sending_files;  // 追踪上传
+
+    std::atomic<uint64_t> m_session_total{0};
+    std::atomic<uint64_t> m_session_done{0};
 };
 
 }  // namespace VeritasSync

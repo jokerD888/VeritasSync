@@ -67,6 +67,9 @@ struct UploadContext {
 
 // --- 实现 ---
 
+TransferManager::SessionStats TransferManager::get_session_stats() const {
+    return {m_session_total.load(), m_session_done.load()};
+}
 TransferManager::TransferManager(StateManager* sm, boost::asio::thread_pool& pool, CryptoLayer& crypto,
                                  SendCallback send_cb)
     : m_state_manager(sm), m_worker_pool(pool), m_crypto(crypto), m_send_callback(std::move(send_cb)) {}
@@ -81,6 +84,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     {
         std::lock_guard<std::mutex> lock(m_transfer_mutex);
         m_sending_files[requested_path_str] = {0, 0};
+        m_session_total++;
     }
 
     if (!m_state_manager) return;
@@ -194,6 +198,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                     self->m_sending_files.erase(ctx->path);
                 }
+                self->m_session_done++;
                 g_logger->info("[Transfer] 文件发送完成: {} (共 {} 块)", ctx->path, ctx->total_chunks);
             }
         };
@@ -256,6 +261,7 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
 
             auto res = self->m_receiving_files.insert({file_path_str, std::move(new_file)});
             it = res.first;
+            self->m_session_total++;
             g_logger->info("[Transfer] 开始接收: {} ({} 块)", file_path_str, total_chunks);
         }
 
@@ -288,7 +294,7 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             } else {
                 g_logger->error("[Transfer] 重命名失败: {}", ec.message());
             }
-
+            self->m_session_done++;
             self->m_receiving_files.erase(it);
         }
     });

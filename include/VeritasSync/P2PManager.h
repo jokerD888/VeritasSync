@@ -102,6 +102,8 @@ public:
 
     std::vector<TransferStatus> get_active_transfers();
 
+    TransferManager::SessionStats get_transfer_stats();
+
 private:
     P2PManager();
     void init();

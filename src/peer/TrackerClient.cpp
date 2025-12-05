@@ -52,6 +52,7 @@ TrackerClient::TrackerClient(std::string host, unsigned short port)
       m_port(port) {}
 
 void TrackerClient::schedule_reconnect() {
+    m_connected = false;
     // 立即关闭，确保 socket 状态重置
     if (m_socket.is_open()) {
         boost::system::error_code ignored_ec;
@@ -189,6 +190,7 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
         const std::string type = msg.at(SignalProto::MSG_TYPE).get<std::string>();
         const auto& payload = msg.at(SignalProto::MSG_PAYLOAD);
         if (type == SignalProto::TYPE_REG_ACK) {
+            m_connected = true;
             m_self_id = payload.at("self_id").get<std::string>();
             std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
             g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());

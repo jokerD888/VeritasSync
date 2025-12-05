@@ -285,7 +285,15 @@
 
         .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
         .stat-item { text-align: center; background: rgba(255,255,255,0.03); padding: 10px; border-radius: 8px; }
-        .stat-num { font-size: 1.8rem; font-weight: 700; color: #fff; line-height: 1; }
+        .stat-num { 
+            font-size: 1.8rem; 
+            font-weight: 700; 
+            color: #fff; 
+            line-height: 1.2; /*稍微增加行高防止切边*/
+            display: flex;    /* 使用 flex 布局 */
+            align-items: baseline; /* 基线对齐，保证数字底部对齐 */
+            justify-content: center; /* 居中显示 */
+        }
         .stat-desc { font-size: 0.75rem; color: var(--text-muted); margin-top: 5px; }
 
         /* --- 传输列表 --- */
@@ -816,6 +824,14 @@
             e.innerHTML = html;
             if (id('autoScroll').checked) e.scrollTop = e.scrollHeight;
         }
+        function formatBytes(bytes, decimals = 2) {
+            if (!+bytes) return '0 B';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+        }
         
         async function viewTaskLog(i) { const r = await fetch(`/api/tasks/${i}/log`); id('task-log-content').innerText = await r.text(); id('log-modal').classList.add('open'); }
         function copy(t) { navigator.clipboard.writeText(t).then(() => alert('已复制')); }
@@ -827,32 +843,94 @@
         setInterval(async () => {
             try {
                 const r = await fetch('/api/status');
-                const data = await r.json();
-                const el = id('transfer-container');
-                if (data.length === 0) {
-                    el.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:0.9rem">暂无活跃传输</div>';
+                const data = await r.json(); 
+                
+                // 数据结构现在是： { global: {...}, nodes: [...] }
+                // 兼容性处理：防止刚启动时为空
+                const global = data.global || { tracker_online: false, session_done: 0, session_total: 0 };
+                const nodes = data.nodes || [];
+
+                // --- 1. 更新 Tracker 状态 UI ---
+                const statusTextDiv = document.querySelector('.status-widget .led').parentNode;
+                const ledEl = document.querySelector('.led');
+                const statusAddrDiv = document.getElementById('display-tracker-addr'); 
+
+                if (global.tracker_online) {
+                    ledEl.style.background = '#10b981'; 
+                    ledEl.style.boxShadow = '0 0 10px #10b981';
+                    // 使用 innerHTML 替换文本
+                    statusTextDiv.innerHTML = '<span class="led" style="background:#10b981;box-shadow:0 0 10px #10b981;animation:pulse 2s infinite;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> 在线';
+                    statusTextDiv.style.color = 'var(--text-main)';
                 } else {
-                    el.innerHTML = data.map(d => {
+                    // 红色
+                    statusTextDiv.innerHTML = '<span class="led" style="background:#ef4444;box-shadow:0 0 10px #ef4444;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> 离线';
+                    statusTextDiv.style.color = '#ef4444'; 
+                }
+
+                // --- 2. 更新“会话统计” ---
+                const countEl = document.getElementById('transfer-count');
+                const descEl = countEl.nextElementSibling; // 获取下面的 "传输队列" 文字描述 DOM
+                
+                // 更新数字：格式为 "50 / 100"
+                countEl.innerHTML = `
+                    <span style="font-size:1.5rem; font-weight:700; color:#fff">${global.session_done}</span>
+                    <span style="font-size:1.1rem; font-weight:400; color:rgba(255,255,255,0.3); margin:0 4px; vertical-align:2px">/</span>
+                    <span style="font-size:1.2rem; font-weight:500; color:rgba(255,255,255,0.7)">${global.session_total}</span>
+                `;
+                
+                // 更新描述文字（让用户知道这是什么意思）
+                descEl.innerText = "已完成 / 总任务数";
+                
+                
+                // --- 3. 渲染实时数据流 (保持只显示活跃任务) ---
+                let allTransfers = [];
+                nodes.forEach(n => {
+                    if(n.transfers) allTransfers = allTransfers.concat(n.transfers);
+                });
+
+                const container = document.getElementById('transfer-container');
+                if (allTransfers.length === 0) {
+                    container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:0.9rem">暂无活跃的大文件传输<br><span style="font-size:0.8rem;opacity:0.6">(小文件同步已计入上方统计)</span></div>';
+                } else {
+                    container.innerHTML = allTransfers.map(d => {
                         const isUp = (d.type === 'upload');
                         const percent = d.progress;
                         const colorVar = isUp ? 'var(--primary)' : 'var(--secondary)';
+                        
+                        // 【新增】计算文件大小
+                        // C++ 中定义的块大小是 16384 (16KB)
+                        const CHUNK_SIZE = 16384; 
+                        const currentSize = formatBytes(d.done * CHUNK_SIZE);
+                        const totalSize = formatBytes(d.total * CHUNK_SIZE);
+                        
                         return `
                     <div class="transfer-item">
                         <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:0.85rem">
                             <span style="font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px" title="${d.path}">${d.path.split(/[/\\]/).pop()}</span>
                             <span style="color:${colorVar};font-weight:bold;font-size:0.75rem">${isUp ? '上传中' : '下载中'}</span>
                         </div>
+                        
                         <div class="transfer-bar-bg">
                             <div class="transfer-bar-fill" style="width:${percent}%; background:${colorVar}"></div>
                         </div>
-                        <div style="display:flex;justify-content:space-between;color:var(--text-sub);font-size:0.75rem;font-family:var(--font-mono)">
-                            <span>${(d.speed / 1024).toFixed(1)} KB/s</span>
-                            <span>${percent.toFixed(1)}%</span>
+                        
+                        <div style="display:flex; justify-content:space-between; color:var(--text-sub); font-size:0.75rem; font-family:var(--font-mono); margin-top:4px;">
+                            <!-- 左：速度 -->
+                            <span style="min-width:80px">${(d.speed / 1024).toFixed(1)} KB/s</span>
+                            
+                            <!-- 【新增】中：文件大小 -->
+                            <span style="color:var(--text-muted)">${currentSize} / ${totalSize}</span>
+                            
+                            <!-- 右：百分比 -->
+                            <span style="min-width:45px; text-align:right">${percent.toFixed(1)}%</span>
                         </div>
                     </div>
-                `}).join('');
+                    `}).join('');
                 }
-            } catch (e) { }
+                
+            } catch (e) { 
+                console.error("Status update error", e);
+            }
         }, 1000);
     </script>
 </body>

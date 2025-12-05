@@ -20,6 +20,10 @@ std::shared_ptr<P2PManager> SyncNode::get_p2p() { return m_p2p_manager; }
 std::string SyncNode::get_key() const { return m_task.sync_key; }
 std::string SyncNode::get_root_path() const { return m_task.sync_folder; }
 
+bool SyncNode::is_tracker_online() const {
+    return m_p2p_manager && m_tracker_client && m_tracker_client->is_connected();
+}
+
 void SyncNode::start() {
     g_logger->info("--- Starting Sync Task [{}] ---", m_task.sync_key);
     g_logger->info("[Config] Role: {}", m_task.role);

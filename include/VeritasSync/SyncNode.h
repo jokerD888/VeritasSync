@@ -23,6 +23,8 @@ public:
 
     void start();
 
+    bool is_tracker_online() const;
+
 private:
     SyncTask m_task;
     Config m_global_config;

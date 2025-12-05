@@ -80,28 +80,59 @@ int main(int argc, char* argv[]) {
 
     // --- 注入状态提供者给 WebUI ---
     web_ui.set_status_provider([]() {
-        std::vector<nlohmann::json> result;
-        std::lock_guard<std::mutex> lock(g_nodes_mutex);
+        nlohmann::json root;
+        root["nodes"] = nlohmann::json::array();
 
+        // 全局统计变量
+        bool any_tracker_online = false;
+        uint64_t global_done = 0;
+        uint64_t global_total = 0;
+
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
         for (const auto& node : g_active_nodes) {
+            nlohmann::json node_json;
+            node_json["key"] = node->get_key();
+            node_json["root"] = node->get_root_path();
+
+            // 1. 获取 Tracker 状态 (利用你已经写好的 is_tracker_online)
+            if (node->is_tracker_online()) {
+                any_tracker_online = true;
+                node_json["online"] = true;
+            } else {
+                node_json["online"] = false;
+            }
+
+            // 2. 获取传输数据
             auto p2p = node->get_p2p();
+            node_json["transfers"] = nlohmann::json::array();
+
             if (p2p) {
-                auto transfers = p2p->get_active_transfers();
-                for (const auto& item : transfers) {
-                    nlohmann::json j;
-                    j["key"] = node->get_key();
-                    j["root"] = node->get_root_path();
-                    j["path"] = item.path;
-                    j["total"] = item.total_chunks;
-                    j["done"] = item.processed_chunks;
-                    j["progress"] = item.progress;
-                    j["type"] = item.is_upload ? "upload" : "download";
-                    j["speed"] = item.speed;
-                    result.push_back(j);
+                // A. 累加统计数据
+                auto stats = p2p->get_transfer_stats();
+                global_done += stats.done;
+                global_total += stats.total;
+
+                // B. 获取活跃列表 (大文件)
+                auto active_list = p2p->get_active_transfers();
+                for (const auto& item : active_list) {
+                    nlohmann::json t;
+                    t["path"] = item.path;
+                    t["progress"] = item.progress;
+                    t["speed"] = item.speed;
+                    t["type"] = item.is_upload ? "upload" : "download";
+                    t["total"] = item.total_chunks;     // 总块数
+                    t["done"] = item.processed_chunks;  // 已处理块数
+                    node_json["transfers"].push_back(t);
                 }
             }
+            root["nodes"].push_back(node_json);
         }
-        return result;
+
+        // 3. 构建全局状态对象
+        root["global"] = {
+            {"tracker_online", any_tracker_online}, {"session_done", global_done}, {"session_total", global_total}};
+
+        return root;  // 返回的是一个对象 { nodes: [], global: {} }
     });
 
     // 在后台线程启动 WebUI

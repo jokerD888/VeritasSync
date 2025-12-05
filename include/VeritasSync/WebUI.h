@@ -46,7 +46,7 @@ public:
         setup_routes();
     }
 
-    using StatusProvider = std::function<std::vector<nlohmann::json>()>;
+    using StatusProvider = std::function<nlohmann::json()>;
     // 定义添加任务的回调类型
     using OnTaskAddCallback = std::function<void(const SyncTask&, const Config&)>;
     void set_status_provider(StatusProvider provider) { m_status_provider = provider; }
@@ -183,10 +183,13 @@ private:
 
         // 2. 获取状态
         m_svr.Get("/api/status", [this](const httplib::Request&, httplib::Response& res) {
-            nlohmann::json j = nlohmann::json::array();
+            nlohmann::json j;
             if (m_status_provider) {
-                auto status_list = m_status_provider();
-                for (const auto& item : status_list) j.push_back(item);
+                j = m_status_provider();  // 获取完整对象
+            } else {
+                // 默认空结构
+                j = {{"global", {{"tracker_online", false}, {"session_done", 0}, {"session_total", 0}}},
+                     {"nodes", nlohmann::json::array()}};
             }
             res.set_content(j.dump(), "application/json");
         });
