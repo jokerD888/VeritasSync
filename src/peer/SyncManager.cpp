@@ -26,9 +26,47 @@ SyncActions SyncManager::compare_states_and_get_requests(const std::vector<FileI
     // --- 阶段 2：查找请求文件 (保持不变) ---
     for (const auto& remote_file : remote_files) {
         auto it = local_file_hashes.find(remote_file.path);
+
         if (it == local_file_hashes.end()) {
+            // 本地没有 -> 请求下载
             actions.files_to_request.push_back(remote_file.path);
         } else if (it->second != remote_file.hash) {
+            // 本地有，但 Hash 不同。检查是否冲突。
+            bool is_conflict = false;
+
+            if (mode == SyncMode::BiDirectional) {
+                // 获取历史记录
+                auto history_opt = get_history(remote_file.path);
+                std::string local_hash = it->second;
+
+                if (!history_opt.has_value()) {
+                    // 场景 1: 无历史记录。
+                    // 说明 A 和 B 都在离线期间"新建"了同名文件，且内容不同。
+                    // 这就是冲突。
+                    g_logger->warn("[Sync] 离线新建冲突: {}", remote_file.path);
+                    is_conflict = true;
+                } else {
+                    // 场景 2: 有历史记录。
+                    std::string base_hash = history_opt->hash;
+
+                    // 如果 本地Hash != 历史Hash
+                    // 说明：上次同步后，我也修改了这个文件。
+                    // 既然现在 远程Hash != 本地Hash (外层 if 已判断)，说明对方也改了（或者对方版本更新）。
+                    // 结论：基于旧版本的并发修改 -> 冲突。
+                    if (local_hash != base_hash) {
+                        g_logger->warn("[Sync] 离线修改冲突: {}", remote_file.path);
+                        is_conflict = true;
+                    }
+                }
+            }
+
+            // 如果判定为冲突，加入重命名列表
+            if (is_conflict) {
+                actions.files_to_conflict_rename.push_back(remote_file.path);
+            }
+
+            // 无论是否冲突，最后都要把远程的最新版下载下来（覆盖原名文件）
+            // 区别在于：如果是冲突，上面会先让 P2PManager 把本地文件改名备份。
             actions.files_to_request.push_back(remote_file.path);
         }
     }

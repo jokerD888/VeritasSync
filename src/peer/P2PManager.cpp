@@ -812,6 +812,50 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
         DirSyncActions dir_actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, self->m_mode);
 
         // E. 执行批量 IO 操作 (删除/创建)
+        if (!file_actions.files_to_conflict_rename.empty()) {
+            g_logger->info("[Sync] 处理 {} 个冲突文件...", file_actions.files_to_conflict_rename.size());
+
+            for (const auto& rel_path : file_actions.files_to_conflict_rename) {
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(rel_path);
+
+                // 构造冲突文件名: filename.conflict.YYYYMMDD-HHMMSS.ext
+                auto now = std::chrono::system_clock::now();
+                std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+                struct tm timeinfo;
+
+                // 跨平台获取本地时间
+#ifdef _WIN32
+                localtime_s(&timeinfo, &now_c);
+#else
+                localtime_r(&now_c, &timeinfo);
+#endif
+
+                // 格式化时间字符串
+                char time_buf[64];
+                std::strftime(time_buf, sizeof(time_buf), "%Y%m%d-%H%M%S", &timeinfo);
+
+                std::string stem = full_path.stem().string();
+                std::string ext = full_path.extension().string();
+
+                // 新的命名方式，例如: test.conflict.20251205-194033.txt
+                std::string conflict_name = stem + ".conflict." + std::string(time_buf) + ext;
+                std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
+
+                std::error_code ec;
+                std::filesystem::rename(full_path, conflict_path, ec);
+
+                if (!ec) {
+                    g_logger->warn("[Sync] ⚡ 已保留冲突副本: {} -> {}", rel_path, conflict_path.filename().string());
+                    // 【重要】重命名后，原路径的文件就"消失"了。
+                    // 随后执行的 request_file 会重新下载远程版本填补这个空缺。
+                    // 同时也需要通知 StateManager 移除旧记录，防止干扰
+                    // (虽然不移也行，因为会被覆盖，但移除更干净)
+                    // self->m_state_manager->remove_path_from_map(rel_path);
+                } else {
+                    g_logger->error("[Sync] 冲突重命名失败: {}", ec.message());
+                }
+            }
+        }
 
         // E1. 删除多余文件
         if (!file_actions.files_to_delete.empty()) {
