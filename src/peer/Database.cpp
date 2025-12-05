@@ -102,18 +102,49 @@ void Database::prepare_statements() {
     sqlite3_prepare_v2(m_db, sql_hist_update, -1, &m_stmt_hist_update, nullptr);
 
     // 查询发送历史
-    const char* sql_hist_get = "SELECT hash FROM sync_history WHERE peer_id = ? AND path = ?;";
+    const char* sql_hist_get = "SELECT hash, ts FROM sync_history WHERE peer_id = ? AND path = ?;";
     sqlite3_prepare_v2(m_db, sql_hist_get, -1, &m_stmt_hist_get, nullptr);
-}
 
+    // 删除历史
+    const char* sql_hist_delete = "DELETE FROM sync_history WHERE path = ?;";
+    sqlite3_prepare_v2(m_db, sql_hist_delete, -1, &m_stmt_hist_delete, nullptr);
+}
+std::optional<SyncHistory> Database::get_sync_history(const std::string& peer_id, const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_hist_get) return std::nullopt;
+
+    sqlite3_reset(m_stmt_hist_get);
+    sqlite3_bind_text(m_stmt_hist_get, 1, peer_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_hist_get, 2, path.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(m_stmt_hist_get) == SQLITE_ROW) {
+        SyncHistory hist;
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_hist_get, 0));
+        hist.hash = val ? std::string(val) : "";
+        hist.ts = sqlite3_column_int64(m_stmt_hist_get, 1);
+        return hist;
+    }
+    return std::nullopt;
+}
 void Database::finalize_statements() {
     if (m_stmt_get) sqlite3_finalize(m_stmt_get);
     if (m_stmt_update) sqlite3_finalize(m_stmt_update);
     if (m_stmt_delete) sqlite3_finalize(m_stmt_delete);
     if (m_stmt_hist_update) sqlite3_finalize(m_stmt_hist_update);
     if (m_stmt_hist_get) sqlite3_finalize(m_stmt_hist_get);
+    if (m_stmt_hist_delete) sqlite3_finalize(m_stmt_hist_delete);
 }
+void Database::remove_sync_history(const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_hist_delete) return;
 
+    sqlite3_reset(m_stmt_hist_delete);
+    sqlite3_bind_text(m_stmt_hist_delete, 1, path.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(m_stmt_hist_delete) != SQLITE_DONE) {
+        g_logger->error("[Database] 删除历史记录失败: {}", sqlite3_errmsg(m_db));
+    }
+}
 void Database::update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_db || !m_stmt_hist_update) return;
@@ -127,18 +158,8 @@ void Database::update_sync_history(const std::string& peer_id, const std::string
     sqlite3_step(m_stmt_hist_update);
 }
 std::string Database::get_last_sent_hash(const std::string& peer_id, const std::string& path) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db || !m_stmt_hist_get) return "";
-
-    sqlite3_reset(m_stmt_hist_get);
-    sqlite3_bind_text(m_stmt_hist_get, 1, peer_id.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(m_stmt_hist_get, 2, path.c_str(), -1, SQLITE_STATIC);
-
-    if (sqlite3_step(m_stmt_hist_get) == SQLITE_ROW) {
-        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_hist_get, 0));
-        return val ? std::string(val) : "";
-    }
-    return "";
+    auto res = get_sync_history(peer_id, path);
+    return res ? res->hash : "";
 }
 std::optional<FileMetadata> Database::get_file(const std::string& rel_path) {
     std::lock_guard<std::mutex> lock(m_mutex);

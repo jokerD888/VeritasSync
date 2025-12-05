@@ -65,6 +65,10 @@ namespace VeritasSync {
         // 记录同步成功 (更新 Base Hash)
         void record_sync_success(const std::string& peer_id, const std::string& path, const std::string& hash);
 
+        void clear_sync_history(const std::string& path);
+
+        std::optional<SyncHistory> get_full_history(const std::string& peer_id, const std::string& path);
+
     private:
         // --- 供 UpdateListener 调用的内部方法 ---
         friend class UpdateListener;

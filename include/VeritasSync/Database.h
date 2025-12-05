@@ -19,6 +19,11 @@ struct FileMetadata {
     // 可以扩展 size 等字段
 };
 
+struct SyncHistory {
+    std::string hash;
+    int64_t ts = 0;  // 时间戳
+};
+
 class Database {
 public:
     Database(const std::filesystem::path& db_path);
@@ -38,7 +43,10 @@ public:
     void begin_transaction();
     void commit_transaction();
     void update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash);
+    // 获取完整的同步历史（包含时间戳）
+    std::optional<SyncHistory> get_sync_history(const std::string& peer_id, const std::string& path);
     std::string get_last_sent_hash(const std::string& peer_id, const std::string& path);
+    void remove_sync_history(const std::string& path);
 
 private:
     void init_schema();
@@ -55,6 +63,7 @@ private:
     sqlite3_stmt* m_stmt_get = nullptr;
     sqlite3_stmt* m_stmt_update = nullptr;
     sqlite3_stmt* m_stmt_delete = nullptr;
+    sqlite3_stmt* m_stmt_hist_delete = nullptr;
 
     std::mutex m_mutex;  // 数据库连接通常不是线程安全的，加锁保护
 };

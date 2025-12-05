@@ -60,7 +60,7 @@ static const uint8_t MSG_TYPE_JSON = 0x01;
 static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
 PeerContext::PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr)
-    : peer_id(std::move(id)), agent(ag), p2p_manager_ptr(std::move(manager_ptr)) {}
+    : peer_id(std::move(id)), agent(ag), p2p_manager_ptr(std::move(manager_ptr)), connected_at_ts(0) {}
 
 PeerContext::~PeerContext() {
     if (kcp) {
@@ -487,28 +487,39 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
         }
         // -----------------------------------
 
-        // --- 只在 KCP 未设置时才设置 KCP ---
         if (!context->kcp) {
+            // 获取当前系统时间戳 (秒)
+            auto now = std::chrono::system_clock::now();
+            context->connected_at_ts = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+            // 打印日志方便调试
+            g_logger->info("[P2P] 会话建立时间戳: {}", context->connected_at_ts);
             std::string conn_type_str = (new_type == ConnectionType::P2P)     ? "P2P"
                                         : (new_type == ConnectionType::Relay) ? "Relay"
                                                                               : "Unknown";
             g_logger->info("[KCP] ICE 连接建立 ({})，为 {} 设置 KCP 上下文。", conn_type_str, peer_id);
 
-            // --- 使用确定性的 conv ID ---
-            // 将 self_id 和 peer_id 排序后组合，确保双方生成相同的 conv
             std::string self_id = m_tracker_client ? m_tracker_client->get_self_id() : "";
             std::string id_pair = (self_id < peer_id) ? (self_id + peer_id) : (peer_id + self_id);
             uint32_t conv = static_cast<uint32_t>(std::hash<std::string>{}(id_pair));
 
             g_logger->info("[KCP] 使用 conv ID: {} (基于: {} <-> {})", conv, self_id, peer_id);
             context->setup_kcp(conv);
+        }
 
-            if (m_role == SyncRole::Source) {
-                g_logger->info("[P2P] (Source) KCP 就绪，向新对等点 {} 发送全量状态...", peer_id);
-                m_state_manager->scan_directory();
-                std::string json_state = m_state_manager->get_state_as_json_string();
-                send_over_kcp_peer(json_state, context.get());
-            }
+        // --- 2. 【核心修复】连接/重连时，广播自身状态 ---
+        // 移出了 (!context->kcp) 块，确保每次连接恢复都尝试同步
+        // 修改了条件：如果是 Source 或者是 双向模式，都要发送
+        if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
+            // 为了防止在 Candidate 切换瞬间频繁发送，可以加一个简单的日志防刷
+            // 但功能上多发几次是安全的。
+            g_logger->info("[P2P] 连接激活 ({})，向对等点 {} 推送状态快照...", juice_state_to_string(state), peer_id);
+
+            // 扫描并发送 (耗时操作建议放在 worker，但为了确保时序，这里先同步调用)
+            // SyncNode::start 启动时已经扫过一次，这里再次扫描是为了捕捉"离线期间"的变化
+            m_state_manager->scan_directory();
+            std::string json_state = m_state_manager->get_state_as_json_string();
+            send_over_kcp_peer(json_state, context.get());
         }
         // -----------------------------------
 
@@ -734,15 +745,22 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
     // 1. 角色检查
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
 
-    // 2. 获取 PeerID (深拷贝，防止异步执行时指针失效)
+    // 2. 获取 PeerID 和 连接时间
     std::string peer_id = from_peer ? from_peer->peer_id : "";
     if (peer_id.empty()) return;
 
-    g_logger->info("[KCP] (Destination) 收到来自 {} (Source) 的 'share_state' 消息。", peer_id);
+    // 【核心修复】计算历史记录的"安全阈值"
+    // 逻辑：连接建立时间 - 5秒缓冲。
+    // 任何晚于 (连接时间-5s) 的数据库记录，都认为是连接建立后产生的新交互，
+    // 不能用来评估对方发来的这份（可能是在连接建立瞬间生成的）旧快照。
+    int64_t safe_threshold_ts = from_peer ? (from_peer->connected_at_ts - 5) : 0;
 
-    // 3. 【核心优化】投递到 Worker 线程池
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload, peer_id]() {
-        // --- 以下所有逻辑都在后台线程执行，不会卡死心跳 ---
+    g_logger->info("[KCP] (Destination) 收到来自 {} 的状态。连接TS: {}, 历史阈值: {}", peer_id,
+                   from_peer->connected_at_ts, safe_threshold_ts);
+
+    // 3. 投递到 Worker 线程池处理 (避免阻塞网络线程)
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload, peer_id, safe_threshold_ts]() {
+        // --- 以下逻辑在后台线程执行 ---
 
         // A. 解析远程状态
         std::vector<FileInfo> remote_files;
@@ -755,11 +773,11 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
             return;
         }
 
-        // B. 扫描本地状态 (IO 密集型，最耗时的一步)
+        // B. 扫描本地状态 (IO 密集型)
         self->m_state_manager->scan_directory();
 
         // C. 获取本地状态数据
-        // 注意：这里涉及 JSON 序列化/反序列化，虽然有点绕，但沿用了原逻辑以保证正确性
+        // 注意：这里涉及 JSON 序列化/反序列化以获取深拷贝
         nlohmann::json temp_json = nlohmann::json::parse(self->m_state_manager->get_state_as_json_string());
         std::vector<FileInfo> local_files =
             temp_json.at(Protocol::MSG_PAYLOAD).at("files").get<std::vector<FileInfo>>();
@@ -769,26 +787,46 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                        remote_files.size());
 
         // D. 执行比较算法 (CPU 密集型)
-        auto history_func = [self, peer_id](const std::string& path) -> std::string {
-            return self->m_state_manager->get_base_hash(peer_id, path);
+        // 【关键】构建智能拦截回调
+        auto history_func = [self, peer_id, safe_threshold_ts](const std::string& path) -> std::optional<SyncHistory> {
+            // 1. 查数据库获取完整历史 (Hash + Timestamp)
+            auto res = self->m_state_manager->get_full_history(peer_id, path);
+
+            if (res.has_value()) {
+                // 2. 检查时间戳：如果记录时间 > 连接时间阈值
+                if (res->ts > safe_threshold_ts) {
+                    // 说明这是一条"未来"记录（相对于快照生成时间），是连接建立后才产生的。
+                    // 触发快照隔离：假装这条历史不存在，强制 SyncManager 认为这是"新增文件"从而保留它。
+                    g_logger->info("[Sync] 🛡️ 忽略过新历史: {} (记录TS {} > 阈值 {}), 判定为状态滞后，强制保留。", path,
+                                   res->ts, safe_threshold_ts);
+                    return std::nullopt;
+                }
+            }
+            return res;
         };
+
+        // 调用 SyncManager (SyncManager::compare_states_and_get_requests 需已更新签名)
         SyncActions file_actions =
-            SyncManager::compare_states_and_get_requests(local_files, remote_files, history_func,  // 传入回调
-                                                         self->m_mode);
+            SyncManager::compare_states_and_get_requests(local_files, remote_files, history_func, self->m_mode);
+
         DirSyncActions dir_actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, self->m_mode);
 
-        // E. 执行批量 IO 操作 (删除/创建) - 直接在 Worker 线程完成
+        // E. 执行批量 IO 操作 (删除/创建)
 
         // E1. 删除多余文件
         if (!file_actions.files_to_delete.empty()) {
             g_logger->info("[Sync] 计划删除 {} 个本地多余的文件。", file_actions.files_to_delete.size());
             for (const auto& file_path_str : file_actions.files_to_delete) {
-                std::filesystem::path relative_path(std::u8string_view(
-                    reinterpret_cast<const char8_t*>(file_path_str.c_str()), file_path_str.length()));
+                std::filesystem::path relative_path = Utf8ToPath(file_path_str);
                 std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
                 std::error_code ec;
+
+                // 执行删除
                 if (std::filesystem::remove(full_path, ec)) {
                     g_logger->info("[Sync] -> 已删除 (相对路径): {}", file_path_str);
+                    // 【重要】删除成功后，必须从 StateManager 和 数据库历史 中移除
+                    // 这样下次如果重新创建该文件，就不会因为有旧历史而被判定为"删除"
+                    self->m_state_manager->remove_path_from_map(file_path_str);
                 } else if (ec != std::errc::no_such_file_or_directory) {
                     g_logger->error("[Sync] -> 删除失败 (相对路径): {} Error: {}", file_path_str, ec.message());
                 }
@@ -797,43 +835,30 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
 
         // E2. 删除多余目录
         if (!dir_actions.dirs_to_delete.empty()) {
-            // [关键步骤 1] 排序优化：由深到浅删除
-            // 长度降序足以保证子目录 (A/B) 排在父目录 (A) 之前
-            std::sort(dir_actions.dirs_to_delete.begin(), dir_actions.dirs_to_delete.end(),
+            // 排序优化：由深到浅删除，避免父目录先被删导致子目录删除失败
+            std::vector<std::string> sorted_dirs = dir_actions.dirs_to_delete;
+            std::sort(sorted_dirs.begin(), sorted_dirs.end(),
                       [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
 
-            g_logger->info("[Sync] 计划清理 {} 个本地目录。", dir_actions.dirs_to_delete.size());
-
-            for (const auto& dir_path_str : dir_actions.dirs_to_delete) {
-                // 使用统一的路径转换工具，确保 Windows/Linux 兼容性
+            for (const auto& dir_path_str : sorted_dirs) {
                 std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
                 std::error_code ec;
                 bool deleted = false;
 
                 if (self->m_mode == SyncMode::OneWay) {
-                    // [单向模式] 暴力镜像：递归删除
-                    // remove_all 返回删除的文件/目录数量，uintmax_t(-1) 表示出错
+                    // 单向模式：强制递归删除
                     if (std::filesystem::remove_all(full_path, ec) != static_cast<std::uintmax_t>(-1)) {
                         deleted = true;
-                        g_logger->info("[Sync] (OneWay) 强制删除目录: {}", dir_path_str);
                     }
                 } else {
-                    // [双向模式] 安全模式：只删除空目录
-                    // remove 只在目录为空时成功，这天然防止了误删 "保留文件"
+                    // 双向模式：只删空目录，作为保护机制
                     if (std::filesystem::remove(full_path, ec)) {
                         deleted = true;
-                        g_logger->info("[Sync] (BiDi) 已清理空目录: {}", dir_path_str);
-                    } else {
-                        // 这是一个“良性失败”，说明目录里还有我们决定保留的文件
-                        g_logger->debug("[Sync] (BiDi) 跳过非空目录: {} (内含保留文件)", dir_path_str);
                     }
                 }
 
-                // 保持内存状态一致性
                 // 只有物理删除成功了，才从内存 Map 中移除
                 if (deleted || (!deleted && !std::filesystem::exists(full_path))) {
-                    // 1. 删除成功 -> 移除
-                    // 2. 删除失败但文件已不存在 (并发情况) -> 移除
                     self->m_state_manager->remove_dir_from_map(dir_path_str);
                 }
             }
@@ -841,39 +866,27 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
 
         // E3. 创建缺失目录
         if (!dir_actions.dirs_to_create.empty()) {
-            g_logger->info("[Sync] 计划创建 {} 个缺失的目录。", dir_actions.dirs_to_create.size());
             for (const auto& dir_path_str : dir_actions.dirs_to_create) {
-                std::filesystem::path relative_path(
-                    std::u8string_view(reinterpret_cast<const char8_t*>(dir_path_str.c_str()), dir_path_str.length()));
-                std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
                 std::error_code ec;
                 std::filesystem::create_directories(full_path, ec);
                 if (!ec) {
-                    g_logger->info("[Sync] -> 已创建目录 (相对路径): {}", dir_path_str);
-                } else {
-                    g_logger->error("[Sync] -> 创建目录失败 (相对路径): {} Error: {}", dir_path_str, ec.message());
+                    self->m_state_manager->add_dir_to_map(dir_path_str);
                 }
             }
         }
 
         // F. 发送文件请求 (涉及 KCP 发送，必须切回 IO 线程)
         if (!file_actions.files_to_request.empty()) {
-            g_logger->info("[KCP] 计划向 {} (Source) 请求 {} 个缺失/过期的文件。", peer_id,
+            g_logger->info("[KCP] 计划向 {} 请求 {} 个缺失/过期的文件。", peer_id,
                            file_actions.files_to_request.size());
 
-            // 投递回 IO Context
             boost::asio::post(self->m_io_context, [self, peer_id, reqs = std::move(file_actions.files_to_request)]() {
-                // 加锁查找 Peer
                 std::lock_guard<std::mutex> lock(self->m_peers_mutex);
                 auto it = self->m_peers_by_id.find(peer_id);
-                if (it == self->m_peers_by_id.end()) {
-                    g_logger->warn("[Sync] 无法发送请求: 对等点 {} 已断开。", peer_id);
-                    return;
-                }
+                if (it == self->m_peers_by_id.end()) return;
 
-                // 获取裸指针用于发送
-                auto peer_ctx = it->second.get();
-
+                auto peer_ctx = it->second.get();  // 获取裸指针用于发送
                 for (const auto& file_path : reqs) {
                     nlohmann::json request_msg;
                     request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;

@@ -56,6 +56,9 @@ struct PeerContext {
     ConnectionType current_type = ConnectionType::None;
     // --------------------
 
+    // 记录连接建立时的系统时间戳
+    int64_t connected_at_ts = 0;
+
     PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
     ~PeerContext();
     void setup_kcp(uint32_t conv);

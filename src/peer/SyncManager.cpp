@@ -9,11 +9,10 @@
 namespace VeritasSync {
 SyncActions SyncManager::compare_states_and_get_requests(const std::vector<FileInfo>& local_files,
                                                          const std::vector<FileInfo>& remote_files,
-                                                         HistoryQueryFunc get_history_hash,  // 接收回调
-                                                         SyncMode mode) {
+                                                         HistoryQueryFunc get_history, SyncMode mode) {
     SyncActions actions;
 
-    // --- 阶段 1：构建查找表 ---
+    // --- 阶段 1：构建查找表 (保持不变) ---
     std::map<std::string, std::string> local_file_hashes;
     for (const auto& info : local_files) {
         local_file_hashes[info.path] = info.hash;
@@ -24,47 +23,47 @@ SyncActions SyncManager::compare_states_and_get_requests(const std::vector<FileI
         remote_file_paths.insert(info.path);
     }
 
-    g_logger->info("[SyncManager] 比较中... 本地: {}, 远程: {}, 模式: {}", local_files.size(), remote_files.size(),
-                   (mode == SyncMode::OneWay ? "OneWay" : "BiDirectional"));
-
-    // --- 阶段 2：查找需要“请求”的文件 (远程有，本地没有或不同) ---
+    // --- 阶段 2：查找请求文件 (保持不变) ---
     for (const auto& remote_file : remote_files) {
         auto it = local_file_hashes.find(remote_file.path);
         if (it == local_file_hashes.end()) {
-            // 本地没有 -> 请求
             actions.files_to_request.push_back(remote_file.path);
         } else if (it->second != remote_file.hash) {
-            // 哈希不同 -> 请求
             actions.files_to_request.push_back(remote_file.path);
         }
     }
 
-    // --- 阶段 3：查找需要“删除”的文件 (本地有，远程没有) ---
+    // --- 阶段 3：查找删除文件 (【核心修改部分】) ---
     for (const auto& local_file : local_files) {
         // 如果本地文件在远程找不到
         if (remote_file_paths.find(local_file.path) == remote_file_paths.end()) {
             bool should_delete = false;
 
             if (mode == SyncMode::OneWay) {
-                // [单向模式] 简单镜像：远程没有我就删
                 should_delete = true;
             } else {
-                // [双向模式] 智能判断逻辑
-                // 查询数据库：上次同步时，这个文件是什么样子的？
-                std::string last_synced_hash = get_history_hash(local_file.path);
+                // [双向模式] 智能判断
+                // 调用回调获取历史记录对象
+                auto history_opt = get_history(local_file.path);
 
-                if (last_synced_hash.empty()) {
-                    // 情况 A: 没历史记录 -> 说明这是我离线期间新创建的文件 -> 【保留】
+                if (!history_opt.has_value()) {
+                    // 情况 A: 没历史记录 (或者被上层拦截屏蔽了) -> 本地新增 -> 【保留】
                     g_logger->info("[Sync] 双向同步：保留本地新增文件 {}", local_file.path);
                     should_delete = false;
-                } else if (last_synced_hash == local_file.hash) {
-                    // 情况 B: 历史记录和现在一样 -> 说明我没改过，是对方删了 -> 【跟随删除】
-                    g_logger->info("[Sync] 双向同步：检测到远程删除，执行本地删除 {}", local_file.path);
-                    should_delete = true;
                 } else {
-                    // 情况 C: 历史记录不同 -> 说明对方删了，但我改了 -> 【冲突保留】
-                    g_logger->warn("[Sync] ⚠️ 双向同步冲突：远程已删除，但本地已修改。保留 {}", local_file.path);
-                    should_delete = false;
+                    const auto& history = history_opt.value();
+
+                    // 这里不需要再判断时间了，时间过滤将在 P2PManager 的回调中完成
+                    // 这里只负责纯粹的 Hash 对比
+                    if (history.hash == local_file.hash) {
+                        // 情况 B: 历史 Hash 匹配 -> 远程真实删除 -> 【跟随删除】
+                        g_logger->info("[Sync] 双向同步：检测到远程删除，执行本地删除 {}", local_file.path);
+                        should_delete = true;
+                    } else {
+                        // 情况 C: 冲突 (Hash 不变但历史存在? 其实这里主要指内容变了) -> 【保留】
+                        g_logger->warn("[Sync] ⚠️ 双向同步冲突或修改：保留 {}", local_file.path);
+                        should_delete = false;
+                    }
                 }
             }
 

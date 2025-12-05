@@ -240,7 +240,17 @@ namespace VeritasSync {
         // --- 提交事务 ---
         if (m_db) m_db->commit_transaction();
     }
-
+    void StateManager::clear_sync_history(const std::string& path) {
+        if (m_db) {
+            m_db->remove_sync_history(path);
+        }
+    }
+    std::optional<SyncHistory> StateManager::get_full_history(const std::string& peer_id, const std::string& path) {
+        if (m_db) {
+            return m_db->get_sync_history(peer_id, path);
+        }
+        return std::nullopt;
+    }
     void StateManager::remove_path_from_map(const std::string& relative_path) {
         std::lock_guard<std::mutex> lock(m_file_map_mutex);
         m_file_map.erase(relative_path);
@@ -248,6 +258,7 @@ namespace VeritasSync {
         // 同时也从数据库移除，保持一致性
         if (m_db) {
             m_db->remove_file(relative_path);
+            m_db->remove_sync_history(relative_path);  // 移除“僵尸”同步历史！
         }
     }
 
