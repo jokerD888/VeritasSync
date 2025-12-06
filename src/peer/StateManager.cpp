@@ -440,4 +440,14 @@ namespace VeritasSync {
         }
         return "";
     }
+
+    std::vector<FileInfo> StateManager::get_all_files() const {
+        std::lock_guard<std::mutex> lock(m_file_map_mutex);
+        std::vector<FileInfo> files;
+        files.reserve(m_file_map.size());
+        for (const auto& [path, info] : m_file_map) {
+            files.push_back(info);
+        }
+        return files;
+    }
 }  // namespace VeritasSync

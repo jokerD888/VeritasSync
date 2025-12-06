@@ -288,7 +288,8 @@ P2PManager::~P2PManager() {
 
 int P2PManager::kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user) {
     PeerContext* context = static_cast<PeerContext*>(user);
-    if (context && context->agent) {
+    // 【关键】检查连接有效性，避免 use-after-free
+    if (context && context->is_valid.load() && context->agent) {
         if (juice_send(context->agent, buf, len) != 0) {
             // KCP 会重传
         }
@@ -540,26 +541,40 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
             context->setup_kcp(conv);
         }
 
-        // --- 2. 【核心修复】连接/重连时，广播自身状态 ---
-        // 移出了 (!context->kcp) 块，确保每次连接恢复都尝试同步
-        // 修改了条件：如果是 Source 或者是 双向模式，都要发送
+        // --- 【1.2版本】可靠同步会话机制 ---
         if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
-            // 为了防止在 Candidate 切换瞬间频繁发送，可以加一个简单的日志防刷
-            // 但功能上多发几次是安全的。
-            g_logger->info("[P2P] 连接激活 ({})，向对等点 {} 推送状态快照...", juice_state_to_string(state), peer_id);
+            g_logger->info("[P2P] 连接激活 ({})，准备向对等点 {} 推送文件状态...", juice_state_to_string(state),
+                           peer_id);
 
-            // 扫描并发送 (耗时操作建议放在 worker，但为了确保时序，这里先同步调用)
-            // SyncNode::start 启动时已经扫过一次，这里再次扫描是为了捕捉"离线期间"的变化
-            m_state_manager->scan_directory();
-            std::string json_state = m_state_manager->get_state_as_json_string();
-            send_over_kcp_peer(json_state, context.get());
+            // 生成新的同步会话 ID
+            uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
+            context->sync_session_id.store(session_id);
+
+            // 投递到 Worker 线程执行同步
+            boost::asio::post(m_worker_pool, [this, self = shared_from_this(), ctx = context, session_id]() {
+                perform_flood_sync(ctx, session_id);
+            });
         }
         // -----------------------------------
 
+        // --- 连接成功时重置重连计数 ---
+        {
+            std::lock_guard<std::mutex> reconnect_lock(m_reconnect_mutex);
+            m_reconnect_attempts.erase(peer_id);
+            m_last_reconnect_time.erase(peer_id);
+        }
+        // ---------------------------------
+
     } else if (state == JUICE_STATE_FAILED) {
-        // 【重要】只保留日志，不重试
-        // libjuice 将会自动尝试 Relay 升级
-        g_logger->error("[ICE] 对等点 {} P2P/Relay 均连接失败。", peer_id);
+        // --- ICE FAILED 自动重连机制 ---
+        g_logger->error("[ICE] 对等点 {} P2P/Relay 均连接失败，将清理并尝试重连...", peer_id);
+
+        // 1. 清理失败的连接
+        handle_peer_leave(peer_id);
+
+        // 2. 检查重试次数并调度重连
+        schedule_reconnect(peer_id);
+        // ---------------------------------
     }
 }
 void P2PManager::handle_juice_candidate(juice_agent_t* agent, const char* sdp) {
@@ -671,16 +686,75 @@ void P2PManager::handle_peer_leave(const std::string& peer_id) {
     auto it = m_peers_by_id.find(peer_id);
     if (it != m_peers_by_id.end()) {
         g_logger->info("[P2P] 对等点 {} 已断开连接，正在清理...", peer_id);
-        juice_agent_t* agent = it->second->agent;
-
-        // 1. 从 agent 映射中移除
+        
+        auto context = it->second;
+        
+        // 1. 【关键】先标记为无效，让所有异步任务（flood等）安全退出
+        context->is_valid.store(false);
+        
+        // 2. 清理 kcp
+        if (context->kcp) {
+            ikcp_release(context->kcp);
+            context->kcp = nullptr;
+        }
+        
+        // 3. 清理 agent
+        juice_agent_t* agent = context->agent;
         if (agent) {
             m_peers_by_agent.erase(agent);
-            juice_destroy(agent);  // 销毁 agent
+            context->agent = nullptr;  // 先置空，防止悬空指针
+            juice_destroy(agent);
         }
-        // 2. 从 id 映射中移除 (it->second 是 shared_ptr，将在此处被销毁)
+        
+        // 4. 从 id 映射中移除
         m_peers_by_id.erase(it);
     }
+}
+
+void P2PManager::schedule_reconnect(const std::string& peer_id) {
+    int attempt_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_reconnect_mutex);
+        attempt_count = ++m_reconnect_attempts[peer_id];
+
+        // 达到最大重试次数，停止重连
+        if (attempt_count > MAX_RECONNECT_ATTEMPTS) {
+            g_logger->error("[ICE] 对等点 {} 已达最大重连次数 ({})，停止重试。请检查网络或在 WebUI 重启服务。", peer_id,
+                            MAX_RECONNECT_ATTEMPTS);
+            m_reconnect_attempts.erase(peer_id);
+            return;
+        }
+
+        m_last_reconnect_time[peer_id] = std::chrono::steady_clock::now();
+    }
+
+    // 指数退避延迟: 3s, 6s, 12s, 24s, 48s
+    int delay_ms = BASE_RECONNECT_DELAY_MS * (1 << (attempt_count - 1));
+    g_logger->info("[ICE] 将在 {} ms 后尝试重新连接对等点 {} (第 {} 次尝试)", delay_ms, peer_id, attempt_count);
+
+    // 创建定时器延迟重连
+    auto timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
+    timer->expires_after(std::chrono::milliseconds(delay_ms));
+    timer->async_wait([this, self = shared_from_this(), peer_id, timer](const boost::system::error_code& ec) {
+        if (ec) {
+            if (ec != boost::asio::error::operation_aborted) {
+                g_logger->warn("[ICE] 重连定时器取消/错误: {} (peer: {})", ec.message(), peer_id);
+            }
+            return;
+        }
+
+        // 检查是否已经重新连接成功（在等待期间）
+        {
+            std::lock_guard<std::mutex> lock(m_peers_mutex);
+            if (m_peers_by_id.find(peer_id) != m_peers_by_id.end()) {
+                g_logger->info("[ICE] 对等点 {} 已重新连接，跳过本次重连。", peer_id);
+                return;
+            }
+        }
+
+        g_logger->info("[ICE] 开始重新连接对等点 {}...", peer_id);
+        connect_to_peers({peer_id});
+    });
 }
 
 void P2PManager::send_over_kcp(const std::string& msg) {
@@ -752,9 +826,14 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_pe
                     m_transfer_manager->queue_upload(from_peer->peer_id, json_payload);
                 }
             } else if (json_msg_type == Protocol::TYPE_DIR_CREATE && can_receive) {
-                handle_dir_create(json_payload);
+                handle_dir_create(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && can_receive) {
                 handle_dir_delete(json_payload, from_peer);
+            } else if (json_msg_type == Protocol::TYPE_SYNC_BEGIN && can_receive) {
+                handle_sync_begin(json_payload, from_peer);
+            } else if (json_msg_type == Protocol::TYPE_SYNC_ACK) {
+                // ACK 可以由任何角色处理
+                handle_sync_ack(json_payload, from_peer);
             } else {
                 g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
                                m_role == SyncRole::Source ? "Source" : "Destination");
@@ -983,6 +1062,11 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
 void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
 
+    // 【同步会话】增加接收计数
+    if (from_peer) {
+        from_peer->received_file_count.fetch_add(1);
+    }
+
     FileInfo remote_info;
     try {
         remote_info = payload.get<FileInfo>();
@@ -997,7 +1081,7 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* 
     //  --- 1. 拦截回声 (Echo Check) ---
     // 检查这是否是我们刚刚发给对方的文件（防止死循环）
     if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
-        g_logger->debug("[Sync] 拦截回声 (Echo): {} 来自 {}", remote_info.path, peer_id);
+        // g_logger->debug("[Sync] 拦截回声 (Echo): {} 来自 {}", remote_info.path, peer_id);
         return;
     }
 
@@ -1114,8 +1198,13 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* 
         }
     });
 }
-void P2PManager::handle_dir_create(const nlohmann::json& payload) {
+void P2PManager::handle_dir_create(const nlohmann::json& payload, PeerContext* from_peer) {
     if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
+
+    // 【同步会话】增加接收计数
+    if (from_peer) {
+        from_peer->received_dir_count.fetch_add(1);
+    }
 
     boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
         std::string relative_path_str;
@@ -1310,6 +1399,221 @@ std::string P2PManager::rewrite_candidate(const std::string& sdp_candidate) {
 
     // 映射失败，返回原始候选地址
     return sdp_candidate;
+}
+
+// ============================================================
+// 【 1.2 版本】可靠同步会话机制
+// ============================================================
+
+void P2PManager::send_sync_begin(PeerContext* peer, uint64_t session_id, size_t file_count, size_t dir_count) {
+    if (!peer || !peer->is_valid.load() || !peer->kcp) return;
+    
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_SYNC_BEGIN;
+    msg[Protocol::MSG_PAYLOAD] = {
+        {"session_id", session_id},
+        {"file_count", file_count},
+        {"dir_count", dir_count}
+    };
+    send_over_kcp_peer(msg.dump(), peer);
+}
+
+void P2PManager::send_sync_ack(PeerContext* peer, uint64_t session_id, size_t received_files, size_t received_dirs) {
+    if (!peer || !peer->is_valid.load() || !peer->kcp) return;
+    
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_SYNC_ACK;
+    msg[Protocol::MSG_PAYLOAD] = {
+        {"session_id", session_id},
+        {"received_files", received_files},
+        {"received_dirs", received_dirs}
+    };
+    send_over_kcp_peer(msg.dump(), peer);
+}
+
+void P2PManager::handle_sync_begin(const nlohmann::json& payload, PeerContext* from_peer) {
+    if (!from_peer) return;
+    
+    try {
+        uint64_t session_id = payload.at("session_id").get<uint64_t>();
+        size_t file_count = payload.at("file_count").get<size_t>();
+        size_t dir_count = payload.at("dir_count").get<size_t>();
+        
+        g_logger->info("[Sync] 收到同步开始通知 (session: {}, 预期: {} 文件, {} 目录)",
+                       session_id, file_count, dir_count);
+        
+        // 记录预期数量
+        from_peer->sync_session_id.store(session_id);
+        from_peer->expected_file_count.store(file_count);
+        from_peer->expected_dir_count.store(dir_count);
+        from_peer->received_file_count.store(0);
+        from_peer->received_dir_count.store(0);
+        
+        // 启动定时器检查同步完成情况
+        auto timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
+        timer->expires_after(std::chrono::seconds(10));  // 10 秒后检查
+        timer->async_wait([this, self = shared_from_this(), peer_id = from_peer->peer_id, 
+                           session_id, file_count, dir_count, timer](const boost::system::error_code& ec) {
+            if (ec) return;
+            
+            std::shared_ptr<PeerContext> peer;
+            {
+                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                auto it = m_peers_by_id.find(peer_id);
+                if (it == m_peers_by_id.end()) return;
+                peer = it->second;
+            }
+            
+            // 检查是否是同一个 session
+            if (peer->sync_session_id.load() != session_id) return;
+            
+            size_t received_files = peer->received_file_count.load();
+            size_t received_dirs = peer->received_dir_count.load();
+            
+            if (received_files < file_count || received_dirs < dir_count) {
+                g_logger->warn("[Sync] 同步不完整！收到 {}/{} 文件, {}/{} 目录。发送 ACK 请求补发...",
+                               received_files, file_count, received_dirs, dir_count);
+                send_sync_ack(peer.get(), session_id, received_files, received_dirs);
+            } else {
+                g_logger->info("[Sync] 同步完成！收到全部 {} 文件和 {} 目录", file_count, dir_count);
+            }
+        });
+    } catch (const std::exception& e) {
+        g_logger->error("[Sync] 解析 sync_begin 失败: {}", e.what());
+    }
+}
+
+void P2PManager::handle_sync_ack(const nlohmann::json& payload, PeerContext* from_peer) {
+    if (!from_peer) return;
+    
+    try {
+        uint64_t session_id = payload.at("session_id").get<uint64_t>();
+        size_t received_files = payload.at("received_files").get<size_t>();
+        size_t received_dirs = payload.at("received_dirs").get<size_t>();
+        
+        g_logger->warn("[Sync] 收到 ACK: 对方只收到 {} 文件, {} 目录。重新同步...",
+                       received_files, received_dirs);
+        
+        // 由于对端没收完，重新进行完整同步
+        // 生成新的 session_id 避免混淆
+        uint64_t new_session_id = std::chrono::steady_clock::now().time_since_epoch().count();
+        from_peer->sync_session_id.store(new_session_id);
+        
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), 
+                                          ctx = std::shared_ptr<PeerContext>(from_peer->p2p_manager_ptr, from_peer), 
+                                          new_session_id]() {
+            // 重新获取 peer 的 shared_ptr
+            std::shared_ptr<PeerContext> peer;
+            {
+                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                auto it = m_peers_by_id.find(ctx->peer_id);
+                if (it != m_peers_by_id.end()) {
+                    peer = it->second;
+                }
+            }
+            if (peer) {
+                perform_flood_sync(peer, new_session_id);
+            }
+        });
+    } catch (const std::exception& e) {
+        g_logger->error("[Sync] 解析 sync_ack 失败: {}", e.what());
+    }
+}
+
+void P2PManager::perform_flood_sync(std::shared_ptr<PeerContext> ctx, uint64_t session_id) {
+    if (!ctx || !ctx->is_valid.load() || !m_state_manager) {
+        g_logger->warn("[Sync] perform_flood_sync: 上下文无效，跳过");
+        return;
+    }
+    
+    // 检查 session_id 是否一致（防止重复执行旧会话）
+    if (ctx->sync_session_id.load() != session_id) {
+        g_logger->info("[Sync] 会话 ID 已变更，跳过本次同步");
+        return;
+    }
+    
+    // 1. 扫描目录获取所有文件
+    m_state_manager->scan_directory();
+    std::vector<FileInfo> files = m_state_manager->get_all_files();
+    std::set<std::string> dirs = m_state_manager->get_local_directories();
+
+    if (files.empty() && dirs.empty()) {
+        g_logger->info("[P2P] 没有文件需要推送给 {}", ctx->peer_id);
+        return;
+    }
+
+    g_logger->info("[P2P] 开始向 {} 推送 {} 个文件和 {} 个目录 (session: {})...", 
+                   ctx->peer_id, files.size(), dirs.size(), session_id);
+
+    // 2. 【关键】先发送 sync_begin 通知对方预期数量
+    boost::asio::post(m_io_context, [this, self = shared_from_this(), ctx, session_id, 
+                                     file_count = files.size(), dir_count = dirs.size()]() {
+        send_sync_begin(ctx.get(), session_id, file_count, dir_count);
+    });
+
+    // 3. 发送目录信息
+    for (const auto& dir_path : dirs) {
+        // 【关键】检查连接有效性
+        if (!ctx->is_valid.load()) {
+            g_logger->warn("[P2P] 连接已断开，停止发送目录 (session: {})", session_id);
+            return;
+        }
+        
+        nlohmann::json msg;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_CREATE;
+        msg[Protocol::MSG_PAYLOAD] = {{"path", dir_path}};
+
+        std::weak_ptr<PeerContext> weak_ctx = ctx;
+        boost::asio::post(m_io_context, [self = shared_from_this(), weak_ctx, msg_str = msg.dump()]() {
+            auto ctx_locked = weak_ctx.lock();
+            if (ctx_locked && ctx_locked->is_valid.load() && ctx_locked->kcp) {
+                self->send_over_kcp_peer(msg_str, ctx_locked.get());
+            }
+        });
+    }
+
+    // 4. 逐个发送文件状态
+    for (size_t i = 0; i < files.size(); ++i) {
+        // 【关键】检查连接有效性和会话有效性
+        if (!ctx->is_valid.load()) {
+            g_logger->warn("[P2P] 连接已断开，停止发送文件 (session: {}, 已发送 {}/{})", 
+                           session_id, i, files.size());
+            return;
+        }
+        
+        if (ctx->sync_session_id.load() != session_id) {
+            g_logger->info("[Sync] 会话 ID 已变更，停止本次同步 (已发送 {}/{})", i, files.size());
+            return;
+        }
+        
+        const auto& file = files[i];
+        nlohmann::json msg;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
+        msg[Protocol::MSG_PAYLOAD] = file;
+
+        std::weak_ptr<PeerContext> weak_ctx = ctx;
+        boost::asio::post(m_io_context, [self = shared_from_this(), weak_ctx, msg_str = msg.dump()]() {
+            auto ctx_locked = weak_ctx.lock();
+            if (ctx_locked && ctx_locked->is_valid.load() && ctx_locked->kcp) {
+                self->send_over_kcp_peer(msg_str, ctx_locked.get());
+            }
+        });
+
+        // 【流控】每 50 个文件检查一次 KCP 发送队列积压量
+        if ((i + 1) % 50 == 0) {
+            // 在 io_context 线程获取 pending 状态
+            if (ctx->is_valid.load() && ctx->kcp) {
+                int pending = ikcp_waitsnd(ctx->kcp);
+                while (pending > 1024 && ctx->is_valid.load() && ctx->kcp) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    pending = ctx->kcp ? ikcp_waitsnd(ctx->kcp) : 0;
+                }
+            }
+        }
+    }
+
+    g_logger->info("[P2P] 向 {} 推送文件状态完成 ({} 个文件, {} 个目录, session: {})", 
+                   ctx->peer_id, files.size(), dirs.size(), session_id);
 }
 
 }  // namespace VeritasSync

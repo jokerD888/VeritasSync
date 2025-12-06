@@ -51,6 +51,12 @@ namespace VeritasSync {
         static constexpr const char* TYPE_DIR_CREATE = "dir_create";  // 目录创建
         static constexpr const char* TYPE_DIR_DELETE = "dir_delete";  // 目录删除
         // --------------------
+
+        // --- 状态同步握手协议 ---
+        static constexpr const char* TYPE_SYNC_BEGIN = "sync_begin";  // 开始同步，携带预期文件/目录数量
+        static constexpr const char* TYPE_SYNC_ACK = "sync_ack";      // 确认收到的数量，请求补发
+        static constexpr const char* TYPE_SYNC_COMPLETE = "sync_complete";  // 同步完成确认
+        // -----------------------
     };
 
 }  // namespace VeritasSync

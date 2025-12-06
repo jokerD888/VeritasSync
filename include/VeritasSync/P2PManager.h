@@ -59,6 +59,18 @@ struct PeerContext {
     // 记录连接建立时的系统时间戳
     int64_t connected_at_ts = 0;
 
+    // --- 连接有效性标志（用于安全中断 flood 等异步任务）---
+    std::atomic<bool> is_valid{true};
+    // --------------------
+
+    // --- 同步会话状态 ---
+    std::atomic<uint64_t> sync_session_id{0};      // 当前同步会话 ID
+    std::atomic<size_t> expected_file_count{0};    // 预期文件数
+    std::atomic<size_t> expected_dir_count{0};     // 预期目录数
+    std::atomic<size_t> received_file_count{0};    // 已收到文件数
+    std::atomic<size_t> received_dir_count{0};     // 已收到目录数
+    // ----------------------
+
     PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
     ~PeerContext();
     void setup_kcp(uint32_t conv);
@@ -123,8 +135,16 @@ private:
     void handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer);
     void handle_file_request(const nlohmann::json& payload, PeerContext* from_peer);
 
-    void handle_dir_create(const nlohmann::json& payload);
+    void handle_dir_create(const nlohmann::json& payload, PeerContext* from_peer);
     void handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer);
+
+    // --- 同步会话管理 ---
+    void handle_sync_begin(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_sync_ack(const nlohmann::json& payload, PeerContext* from_peer);
+    void send_sync_begin(PeerContext* peer, uint64_t session_id, size_t file_count, size_t dir_count);
+    void send_sync_ack(PeerContext* peer, uint64_t session_id, size_t received_files, size_t received_dirs);
+    void perform_flood_sync(std::shared_ptr<PeerContext> ctx, uint64_t session_id);
+    // -----------------------
 
     // --- libjuice 回调 (C 风格) ---
     static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
@@ -191,6 +211,15 @@ private:
     struct UPNPUrls m_upnp_urls;
     struct IGDdatas m_upnp_data;
     // --------------------------
+
+    // --- ICE FAILED 自动重连机制 ---
+    std::mutex m_reconnect_mutex;
+    std::map<std::string, int> m_reconnect_attempts;  // peer_id -> 重试次数
+    std::map<std::string, std::chrono::steady_clock::time_point> m_last_reconnect_time;  // peer_id -> 上次重连时间
+    static constexpr int MAX_RECONNECT_ATTEMPTS = 5;  // 最大重试次数
+    static constexpr int BASE_RECONNECT_DELAY_MS = 3000;  // 基础重连延迟 3秒
+    void schedule_reconnect(const std::string& peer_id);
+    // ---------------------------------
 
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作

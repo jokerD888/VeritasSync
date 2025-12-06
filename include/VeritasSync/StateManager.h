@@ -69,6 +69,9 @@ namespace VeritasSync {
 
         std::optional<SyncHistory> get_full_history(const std::string& peer_id, const std::string& path);
 
+        // 获取所有文件列表（用于分批推送）
+        std::vector<FileInfo> get_all_files() const;
+
     private:
         // --- 供 UpdateListener 调用的内部方法 ---
         friend class UpdateListener;
