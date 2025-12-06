@@ -354,6 +354,10 @@
             animation: spin 1s linear infinite; margin-bottom: 1.5rem;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        .transfer-bar-fill.stalled::after {
+            display: none !important;
+        }
     </style>
 </head>
 <body>
@@ -888,6 +892,15 @@
                     if(n.transfers) allTransfers = allTransfers.concat(n.transfers);
                 });
 
+                // 【新增】排序逻辑：活跃在前(stalled=false)，僵尸在后(stalled=true)
+                // 如果状态相同，按路径排序保持列表稳定
+                allTransfers.sort((a, b) => {
+                    if (a.stalled === b.stalled) {
+                        return a.path.localeCompare(b.path);
+                    }
+                    return a.stalled ? 1 : -1; // stalled(true) > active(false) -> 放到后面
+                });
+
                 const container = document.getElementById('transfer-container');
                 if (allTransfers.length === 0) {
                     container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:0.9rem">暂无活跃的大文件传输<br><span style="font-size:0.8rem;opacity:0.6">(小文件同步已计入上方统计)</span></div>';
@@ -895,37 +908,61 @@
                     container.innerHTML = allTransfers.map(d => {
                         const isUp = (d.type === 'upload');
                         const percent = d.progress;
-                        const colorVar = isUp ? 'var(--primary)' : 'var(--secondary)';
                         
-                        // 【新增】计算文件大小
-                        // C++ 中定义的块大小是 16384 (16KB)
+                        // --- 状态渲染逻辑 ---
+                        const isStalled = d.stalled; 
+
+                        let colorVar, statusText, barOpacity;
+
+                        if (isStalled) {
+                            // 僵尸状态：灰色，提示文字变化
+                            colorVar = '#64748b'; 
+                            statusText = '⚠️ 连接中断 / 等待恢复...';
+                            barOpacity = 0.6; 
+                        } else {
+                            // 正常状态：蓝/绿
+                            colorVar = isUp ? 'var(--primary)' : 'var(--secondary)';
+                            statusText = isUp ? '上传中' : '下载中';
+                            barOpacity = 1.0;
+                        }
+                        // ---------------------------
+
                         const CHUNK_SIZE = 16384; 
                         const currentSize = formatBytes(d.done * CHUNK_SIZE);
                         const totalSize = formatBytes(d.total * CHUNK_SIZE);
                         
+                        // 【关键修改】注意下面的 class 列表和 ${statusText} 的使用
                         return `
-                    <div class="transfer-item">
-                        <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:0.85rem">
-                            <span style="font-weight:600;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px" title="${d.path}">${d.path.split(/[/\\]/).pop()}</span>
-                            <span style="color:${colorVar};font-weight:bold;font-size:0.75rem">${isUp ? '上传中' : '下载中'}</span>
-                        </div>
-                        
-                        <div class="transfer-bar-bg">
-                            <div class="transfer-bar-fill" style="width:${percent}%; background:${colorVar}"></div>
-                        </div>
-                        
-                        <div style="display:flex; justify-content:space-between; color:var(--text-sub); font-size:0.75rem; font-family:var(--font-mono); margin-top:4px;">
-                            <!-- 左：速度 -->
-                            <span style="min-width:80px">${(d.speed / 1024).toFixed(1)} KB/s</span>
+                        <div class="transfer-item">
+                            <!-- 头部行：文件名 + 状态 -->
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:0.85rem">
+                                
+                                <!-- 1. 文件名：flex:1 自动占据剩余空间，超出部分省略号 -->
+                                <span style="font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; margin-right:10px;" title="${d.path}">
+                                    ${d.path.split(/[/\\]/).pop()}
+                                </span>
+
+                                <!-- 2. 状态文字：强制不换行，不许压缩 -->
+                                <span style="color:${colorVar}; font-weight:bold; font-size:0.75rem; white-space:nowrap; flex-shrink:0;">
+                                    ${statusText}
+                                </span>
+                            </div>
                             
-                            <!-- 【新增】中：文件大小 -->
-                            <span style="color:var(--text-muted)">${currentSize} / ${totalSize}</span>
+                            <div class="transfer-bar-bg">
+                                <!-- 进度条 -->
+                                <div class="transfer-bar-fill ${isStalled ? 'stalled' : ''}" 
+                                    style="width:${percent}%; background:${colorVar}; opacity:${barOpacity}">
+                                </div>
+                            </div>
                             
-                            <!-- 右：百分比 -->
-                            <span style="min-width:45px; text-align:right">${percent.toFixed(1)}%</span>
+                            <!-- 底部行：速度 + 大小 + 百分比 -->
+                            <div style="display:flex; justify-content:space-between; color:var(--text-sub); font-size:0.75rem; font-family:var(--font-mono); margin-top:4px;">
+                                <span style="min-width:80px">${(d.speed / 1024).toFixed(1)} KB/s</span>
+                                <span style="color:var(--text-muted)">${currentSize} / ${totalSize}</span>
+                                <span style="min-width:45px; text-align:right">${percent.toFixed(1)}%</span>
+                            </div>
                         </div>
-                    </div>
-                    `}).join('');
+                        `}).join('');
                 }
                 
             } catch (e) { 

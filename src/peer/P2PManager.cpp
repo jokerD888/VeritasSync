@@ -304,42 +304,75 @@ void P2PManager::schedule_kcp_update() {
     });
 }
 void P2PManager::update_all_kcps() {
+    // 获取当前时间戳用于驱动 KCP 时钟
     auto current_time_ms = (IUINT32)std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch())
                                .count();
+
+    // 临时存储收到的消息，避免在锁内处理业务逻辑
     std::vector<std::pair<std::string, std::shared_ptr<PeerContext>>> received_messages;
+
     {
         std::lock_guard<std::mutex> lock(m_peers_mutex);
         for (auto const& [agent, context] : m_peers_by_agent) {
             if (!context->kcp) continue;
+
+            // 1. 驱动 KCP 状态机 (处理重传、拥塞控制等)
             ikcp_update(context->kcp, current_time_ms);
-            char buffer[BUFFERSIZE];
-            int size;
-            while ((size = ikcp_recv(context->kcp, buffer, sizeof(buffer))) > 0) {
-                // 存入 shared_ptr (context 本身就是 shared_ptr)
-                received_messages.emplace_back(std::string(buffer, size), context);
+
+            // 2. 动态接收循环
+            // KCP 可能积压了多个包，所以要用 while 循环一次性收完
+            while (true) {
+                // [关键步骤 A] 偷看下一个包的大小
+                int peek_size = ikcp_peeksize(context->kcp);
+
+                // 如果 peek_size < 0，说明没有完整的数据包，直接跳出循环
+                if (peek_size < 0) break;
+
+                // [关键步骤 B] 根据包大小动态分配内存
+                // std::vector 会在栈上管理对象，在堆上分配 peek_size 大小的内存
+                // 如果包是 700KB，这里就分配 700KB；如果是 50字节，就分配 50字节
+                std::vector<char> buffer(peek_size);
+
+                // [关键步骤 C] 真正接收数据
+                // 此时 buffer 大小完全匹配，绝对不会失败
+                int recv_len = ikcp_recv(context->kcp, buffer.data(), peek_size);
+
+                if (recv_len > 0) {
+                    // 将接收到的二进制数据转为 string，存入暂存队列
+                    // 这里的 buffer.data() 包含了完整的 JSON 快照或文件块
+                    received_messages.emplace_back(std::string(buffer.data(), recv_len), context);
+                } else {
+                    // 理论上 peek 成功后 recv 不应失败，防止死循环
+                    break;
+                }
             }
         }
     }
 
-    // 动态调整更新频率
+    // --- 以下是自适应更新频率逻辑 (保持原样) ---
     if (!received_messages.empty()) {
         m_last_data_time = std::chrono::steady_clock::now();
-        // 有数据传输时，全力驱动 KCP，间隔设为 5ms
+        // 有数据传输时，全力驱动 KCP，间隔设为 5ms 以降低延迟
         m_kcp_update_interval_ms = 5;
     } else {
+        // 空闲时降低 CPU 占用
         auto idle_duration = std::chrono::steady_clock::now() - m_last_data_time;
         if (idle_duration > std::chrono::seconds(5)) {
-            m_kcp_update_interval_ms = 100;
+            m_kcp_update_interval_ms = 100;  // 深度睡眠
         } else {
-            m_kcp_update_interval_ms = 10;
+            m_kcp_update_interval_ms = 10;  // 轻度睡眠
         }
     }
 
+    // --- 处理消息 (在锁外执行，防止死锁) ---
     for (const auto& msg_pair : received_messages) {
-        // 调用处理函数时使用 .get()，但在后续异步化步骤中，我们会捕获这个 shared_ptr
+        // msg_pair.first 是消息内容 string
+        // msg_pair.second 是 PeerContext 指针
         handle_kcp_message(msg_pair.first, msg_pair.second.get());
     }
+
+    // 调度下一次更新
     schedule_kcp_update();
 }
 

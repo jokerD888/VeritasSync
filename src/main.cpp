@@ -122,6 +122,7 @@ int main(int argc, char* argv[]) {
                     t["type"] = item.is_upload ? "upload" : "download";
                     t["total"] = item.total_chunks;     // 总块数
                     t["done"] = item.processed_chunks;  // 已处理块数
+                    t["stalled"] = item.is_stalled;
                     node_json["transfers"].push_back(t);
                 }
             }

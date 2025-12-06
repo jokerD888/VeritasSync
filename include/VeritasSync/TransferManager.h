@@ -27,6 +27,7 @@ struct TransferStatus {
     float progress;
     bool is_upload;  // true=上传, false=下载
     double speed;
+    bool is_stalled = false;
 };
 
 // 定义发送回调：(目标PeerID, 加密后的数据)
@@ -73,7 +74,7 @@ private:
         std::string temp_path;
         uint32_t total_chunks = 0;
         uint32_t received_chunks = 0;
-        std::chrono::steady_clock::time_point last_active;
+        std::chrono::steady_clock::time_point last_active = std::chrono::steady_clock::now();
 
         uint32_t last_tick_chunks = 0;
         std::chrono::steady_clock::time_point last_tick_time = std::chrono::steady_clock::now();
@@ -86,6 +87,8 @@ private:
         uint32_t last_tick_chunks = 0;
         std::chrono::steady_clock::time_point last_tick_time = std::chrono::steady_clock::now();
         double current_speed = 0.0;
+        // 记录发送活跃时间
+        std::chrono::steady_clock::time_point last_active = std::chrono::steady_clock::now();
     };
 
     // 正在接收的文件映射 (Path -> State)

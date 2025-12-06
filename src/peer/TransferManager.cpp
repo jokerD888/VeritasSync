@@ -165,6 +165,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                     if (self->m_sending_files.count(ctx->path)) {
                         self->m_sending_files[ctx->path].sent_chunks = ctx->current_chunk;
+                        // 更新活跃时间 (喂狗)
+                        self->m_sending_files[ctx->path].last_active = std::chrono::steady_clock::now();
                     }
                 }
 
@@ -266,7 +268,25 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         }
 
         ReceivingFile& recv_file = it->second;
-        recv_file.last_active = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+
+        // 【新增 >>> 核心复活逻辑】
+        // 检查是否为“僵尸复活”：如果距离上次活跃超过 10 秒
+        auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - recv_file.last_active).count();
+        if (duration_sec > 10) {
+            // 情况 C：进程重启。特征：停滞很久，且收到的是起始块 (Chunk 0)
+            if (chunk_index == 0) {
+                g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", file_path_str);
+                recv_file.received_chunks = 0;  // 重置计数器
+            } else {
+                // 情况 B：断网恢复。继续传输。
+                g_logger->info("[Transfer] 检测到僵尸任务恢复 (断网重连): {}", file_path_str);
+            }
+        }
+        // 【<<< 新增结束】
+
+        // 【修改】使用 now 变量更新活跃时间 (喂狗)
+        recv_file.last_active = now;
 
         if (recv_file.file_stream.is_open()) {
             size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
@@ -305,25 +325,37 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
     std::vector<TransferStatus> list;
     auto now = std::chrono::steady_clock::now();
 
+    // 【新增】定义超时阈值 (5秒没数据就算停滞)
+    const int STALL_THRESHOLD_MS = 5000;
+
     // 1. 处理下载任务 (Receiving)
     for (auto& [path, recv] : m_receiving_files) {
         // --- 速度计算逻辑 ---
         std::chrono::duration<double> elapsed = now - recv.last_tick_time;
-        if (elapsed.count() >= 0.5) {  // 每 500ms 更新一次速度，避免抖动
+        if (elapsed.count() >= 0.5) {  // 每 500ms 更新一次速度
             uint32_t delta_chunks = recv.received_chunks - recv.last_tick_chunks;
-            // 速度 = (新增块数 * 块大小) / 经过时间
             recv.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
-
-            // 更新快照
             recv.last_tick_chunks = recv.received_chunks;
             recv.last_tick_time = now;
         }
 
+        // 【新增】检测是否停滞
+        auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - recv.last_active).count();
+        bool stalled = (time_since_active > STALL_THRESHOLD_MS);
+
+        // 如果停滞，速度显示为 0，避免用户困惑
+        double display_speed = stalled ? 0.0 : recv.current_speed;
+
         float prog =
             (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
 
-        // 将 recv.current_speed 填入 TransferStatus
-        list.push_back({path, recv.total_chunks, recv.received_chunks, prog, false, recv.current_speed});
+        // 【修改】填入 stalled 状态
+        list.push_back({
+            path, recv.total_chunks, recv.received_chunks, prog,
+            false,  // is_upload
+            display_speed,
+            stalled  // stalled
+        });
     }
 
     // 2. 处理上传任务 (Sending)
@@ -333,16 +365,26 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
         if (elapsed.count() >= 0.5) {
             uint32_t delta_chunks = send.sent_chunks - send.last_tick_chunks;
             send.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
-
             send.last_tick_chunks = send.sent_chunks;
             send.last_tick_time = now;
         }
 
+        // 【新增】检测是否停滞
+        auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - send.last_active).count();
+        bool stalled = (time_since_active > STALL_THRESHOLD_MS);
+
+        double display_speed = stalled ? 0.0 : send.current_speed;
+
         float prog =
             (send.total_chunks > 0) ? (static_cast<float>(send.sent_chunks) / send.total_chunks * 100.0f) : 0.0f;
 
-        // 将 send.current_speed 填入 TransferStatus
-        list.push_back({path, send.total_chunks, send.sent_chunks, prog, true, send.current_speed});
+        // 【修改】填入 stalled 状态
+        list.push_back({
+            path, send.total_chunks, send.sent_chunks, prog,
+            true,  // is_upload
+            display_speed,
+            stalled  // stalled
+        });
     }
 
     return list;
@@ -353,9 +395,10 @@ void TransferManager::cleanup_stale_buffers() {
     auto now = std::chrono::steady_clock::now();
 
     for (auto it = m_receiving_files.begin(); it != m_receiving_files.end();) {
+        // 10分钟彻底清理
         auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.last_active);
-        if (duration.count() > 10) {  // 10分钟超时
-            g_logger->warn("[Transfer] 接收超时，清理: {}", it->first);
+        if (duration.count() > 10) {
+            g_logger->warn("[Transfer] 接收超时 (僵尸清理): {}", it->first);
             if (it->second.file_stream.is_open()) it->second.file_stream.close();
             std::filesystem::remove(it->second.temp_path);
             it = m_receiving_files.erase(it);
