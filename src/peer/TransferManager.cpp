@@ -102,30 +102,77 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
         ctx->file_hash = self->m_state_manager->get_file_hash(ctx->path);
         std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(ctx->path);
+        full_path.make_preferred(); // 确保 Windows 下使用反斜杠
 
-        // 打开文件
-        ctx->file.open(full_path, std::ios::binary | std::ios::ate);
-        if (!ctx->file.is_open()) {
-            g_logger->error("[Transfer] 无法打开文件: {}", full_path.string());
-            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-            self->m_sending_files.erase(ctx->path);
+#ifdef _WIN32
+        // Windows 长路径增强
+        std::wstring wpath = full_path.wstring();
+        if (full_path.is_absolute() && wpath.substr(0, 4) != L"\\\\?\\") {
+            wpath = L"\\\\?\\" + wpath;
+            full_path = std::filesystem::path(wpath);
+        }
+#endif
+
+        // 先检查文件物理是否存在
+        std::error_code fs_ec;
+        if (!std::filesystem::exists(full_path, fs_ec)) {
+            g_logger->error("[Transfer] 文件物理不存在: {} (OS Error: {})", PathToUtf8(full_path), fs_ec.message());
+            {
+                std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                self->m_sending_files.erase(ctx->path);
+            }
+            self->m_session_done++;
             return;
         }
 
-        std::streamsize size = ctx->file.tellg();
-        ctx->file.seekg(0, std::ios::beg);
+        // --- 直接进入循环，由循环内部负责按需打开和关闭句柄 ---
 
-        // 计算块数 (0字节文件也算1块)
-        ctx->total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
-
-        // 更新 UI
-        {
-            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-            self->m_sending_files[ctx->path].total_chunks = static_cast<uint32_t>(ctx->total_chunks);
-        }
 
         // --- 定义递归上传逻辑 ---
-        auto upload_loop = [self, ctx](auto& loop_ref) -> void {
+        auto upload_loop = [self, ctx, full_path](auto& loop_ref) -> void {
+            // 【核心修复】如果句柄关闭了（或刚开始），在此处重新打开
+            if (!ctx->file.is_open()) {
+                bool opened = false;
+                for (int retry = 0; retry < 5; ++retry) {
+                    ctx->file.clear();
+                    ctx->file.open(full_path, std::ios::binary | std::ios::in); // 以读方式打开
+                    if (ctx->file.is_open()) {
+                        opened = true;
+                        break;
+                    }
+                    // 如果是 EMFILE (24)，说明系统句柄耗尽，增加退让时间
+                    int wait_ms = (errno == 24) ? 1000 : 200;
+                    if (retry < 4) {
+                        g_logger->warn("[Transfer] 句柄超限或访问冲突(errno:{}), 退让 {}ms: {}", errno, wait_ms, ctx->path);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+                    }
+                }
+
+                if (!opened) {
+                    g_logger->error("[Transfer] 无法恢复文件句柄，任务终止: {}", ctx->path);
+                    {
+                        std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                        self->m_sending_files.erase(ctx->path);
+                    }
+                    self->m_session_done++;
+                    return;
+                }
+
+                // 首次打开时计算总数
+                if (ctx->total_chunks == 0) {
+                    ctx->file.seekg(0, std::ios::end);
+                    std::streamsize size = ctx->file.tellg();
+                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
+                    
+                    std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                    if (self->m_sending_files.count(ctx->path)) {
+                        self->m_sending_files[ctx->path].total_chunks = static_cast<uint32_t>(ctx->total_chunks);
+                    }
+                }
+                
+                // 重新定位到当前块
+                ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * CHUNK_DATA_SIZE, std::ios::beg);
+            }
             // 使用 while 循环来处理非阻塞的情况，提高效率
             while (ctx->current_chunk < ctx->total_chunks) {
                 // 读取数据
@@ -172,27 +219,27 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
                 // --- 智能流控 ---
                 if (pending > ctx->CONGESTION_THRESHOLD) {
-                    // 积压严重：设置定时器，异步等待，释放当前线程
-                    // 动态调整休眠时间：积压越多，等待越久
-                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * 1.5) ? 20 : 5;
+                    // 【关键修复】在挂起等待前，主动关闭文件句柄！
+                    // 这确保了只有当前正在活跃读写的线程（通常只有几个）会占用句柄。
+                    ctx->file.close();
 
+                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * 1.5) ? 20 : 5;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
                     ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
                         if (!ec) {
-                            // 定时器回调在 IO 线程执行，我们需要跳回 Worker 线程池继续读取文件
                             boost::asio::post(self->m_worker_pool, [loop_ref]() {
-                                // 递归调用，恢复 while 循环
                                 loop_ref(loop_ref);
                             });
                         }
                     });
-                    return;  // 退出当前函数，释放线程
+                    return;
                 }
                 // 如果没有积压，continue while 循环，直接发下一块，效率最高
             }
 
             // --- 循环结束：清理与收尾 ---
             if (ctx->current_chunk >= ctx->total_chunks) {
+                ctx->file.close(); // 传输完成，关闭句柄
                 if (!ctx->file_hash.empty()) {
                     self->m_state_manager->record_file_sent(ctx->peer_id, ctx->path, ctx->file_hash);
                 }

@@ -11,6 +11,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <thread>
 
 #include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Hashing.h"
@@ -539,23 +540,24 @@ void P2PManager::handle_juice_state_changed(juice_agent_t* agent, juice_state_t 
 
             g_logger->info("[KCP] 使用 conv ID: {} (基于: {} <-> {})", conv, self_id, peer_id);
             context->setup_kcp(conv);
+
+            // --- 【1.2版本】可靠同步会话机制 ---
+            // 仅在首次建立 KCP 连接时触发同步推送
+            if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
+                g_logger->info("[P2P] 连接激活 ({})，准备向对等点 {} 推送文件状态...", juice_state_to_string(state),
+                               peer_id);
+
+                // 生成新的同步会话 ID
+                uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
+                context->sync_session_id.store(session_id);
+
+                // 投递到 Worker 线程执行同步
+                boost::asio::post(m_worker_pool, [this, self = shared_from_this(), ctx = context, session_id]() {
+                    perform_flood_sync(ctx, session_id);
+                });
+            }
         }
-
-        // --- 【1.2版本】可靠同步会话机制 ---
-        if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
-            g_logger->info("[P2P] 连接激活 ({})，准备向对等点 {} 推送文件状态...", juice_state_to_string(state),
-                           peer_id);
-
-            // 生成新的同步会话 ID
-            uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
-            context->sync_session_id.store(session_id);
-
-            // 投递到 Worker 线程执行同步
-            boost::asio::post(m_worker_pool, [this, self = shared_from_this(), ctx = context, session_id]() {
-                perform_flood_sync(ctx, session_id);
-            });
-        }
-        // -----------------------------------
+        // ---------------------------------
 
         // --- 连接成功时重置重连计数 ---
         {
@@ -794,6 +796,16 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerContext* peer) {
     }
     ikcp_send(peer->kcp, encrypted_msg.c_str(), encrypted_msg.length());
 }
+
+// 增加新的线程安全 wrapper
+void P2PManager::send_over_kcp_peer_safe(const std::string& msg,  const std::string& peer_id) {
+     std::lock_guard<std::mutex> lock(m_peers_mutex);
+     auto it = m_peers_by_id.find(peer_id);
+     if (it != m_peers_by_id.end() && it->second->kcp) {
+          send_over_kcp_peer(msg, it->second.get());
+     }
+}
+
 void P2PManager::handle_kcp_message(const std::string& msg, PeerContext* from_peer) {
     std::string decrypted_msg = m_crypto.decrypt(msg);
     if (decrypted_msg.empty()) {
@@ -1059,219 +1071,279 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
     });
 }
 
-void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
+    void P2PManager::handle_file_update(const nlohmann::json& payload, PeerContext* from_peer) {
+        if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
 
-    // 【同步会话】增加接收计数
-    if (from_peer) {
-        from_peer->received_file_count.fetch_add(1);
-    }
+        // 【同步会话】增加接收计数并刷新超时
+        if (from_peer) {
+            from_peer->received_file_count.fetch_add(1);
+            
+            // --- 刷新超时定时器 (在 IO 线程执行) ---
+            std::string pid = from_peer->peer_id;
+            uint64_t sid = from_peer->sync_session_id.load();
+            
+            boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
+                 std::lock_guard<std::mutex> lock(m_peers_mutex);
+                 auto it = m_peers_by_id.find(pid);
+                 if (it != m_peers_by_id.end()) {
+                     auto peer = it->second;
+                     // 只有在 session 匹配且 timer 存在时才延期 
+                     if (peer->sync_session_id.load() == sid && peer->sync_timeout_timer) {
+                         peer->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+                         peer->sync_timeout_timer->async_wait([this, self, pid, sid, t=peer->sync_timeout_timer](const boost::system::error_code& ec){
+                             if (ec) return; // 取消或被新的 wait 覆盖
+                             
+                             // 真正的超时检查
+                             std::shared_ptr<PeerContext> p;
+                             { std::lock_guard<std::mutex> l(m_peers_mutex); auto i=m_peers_by_id.find(pid); if(i!=m_peers_by_id.end()) p=i->second; }
+                             
+                             if(!p || p->sync_session_id != sid || p->sync_timeout_timer != t) return;
 
-    FileInfo remote_info;
-    try {
-        remote_info = payload.get<FileInfo>();
-    } catch (const std::exception& e) {
-        g_logger->error("[KCP] 解析 file_update 失败: {}", e.what());
-        return;
-    }
+                             size_t rf = p->received_file_count.load(); size_t ef = p->expected_file_count.load();
+                             size_t rd = p->received_dir_count.load(); size_t ed = p->expected_dir_count.load();
 
-    std::string peer_id = from_peer ? from_peer->peer_id : "";
-    if (peer_id.empty()) return;
+                             if (rf < ef || rd < ed) {
+                                  g_logger->warn("[Sync] 滑动超时触发！进度 stalled wait at {}/{} files. Resending ACK.", rf, ef);
+                                  send_sync_ack(p.get(), sid, rf, rd);
+                             }
+                         });
+                     }
+                 }
+            });
+        }
 
-    //  --- 1. 拦截回声 (Echo Check) ---
-    // 检查这是否是我们刚刚发给对方的文件（防止死循环）
-    if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
-        // g_logger->debug("[Sync] 拦截回声 (Echo): {} 来自 {}", remote_info.path, peer_id);
-        return;
-    }
-
-    g_logger->info("[P2P] 收到更新请求: {}", remote_info.path);
-
-    std::filesystem::path relative_path(
-        std::u8string_view(reinterpret_cast<const char8_t*>(remote_info.path.c_str()), remote_info.path.length()));
-    std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-
-    bool should_request = false;
-    std::error_code ec;
-
-    //  --- 2. 冲突检测 (Conflict Resolution) ---
-
-    if (!std::filesystem::exists(full_path, ec)) {
-        // 情况 0: 本地没有该文件 -> 直接请求 (Create/New)
-        g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
-        should_request = true;
-    } else {
-        // 获取三方 Hash 进行比对
-        std::string remote_hash = remote_info.hash;
-        std::string local_hash = Hashing::CalculateSHA256(full_path);                       // 实时计算本地 Hash
-        std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);  // 从数据库获取上次同步状态
-
-        if (local_hash == remote_hash) {
-            // 情况 B: 内容完全一致 (Duplicate/Echo)
-            g_logger->info("[Sync] 内容一致，无需更新: {}", remote_info.path);
-            // 即使不下载，也要更新 Base Hash，确保数据库记录最新状态
-            m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+        FileInfo remote_info;
+        try {
+            remote_info = payload.get<FileInfo>();
+        } catch (const std::exception& e) {
+            g_logger->error("[KCP] 解析 file_update 失败: {}", e.what());
             return;
         }
 
-        // 关键：冲突判定逻辑
-        if (base_hash.empty() || local_hash == base_hash) {
-            // 情况 A: 正常更新 (Fast-forward)
-            // Base为空(第一次同步) 或者 Local等于Base(本地没动过)
-            // 说明只有远程变了 -> 安全覆盖
-            g_logger->info("[Sync] 正常更新 (Local==Base): {}", remote_info.path);
-            should_request = true;
-        } else {
-            // 情况 C: 冲突 (Conflict)!!!
-            // Local != Base (本地修改过) 且 Local != Remote (和远程不一样)
-            g_logger->warn("[Sync] ⚠️ 检测到冲突: {}", remote_info.path);
-            g_logger->warn("       Base: {}...", base_hash.substr(0, 6));
-            g_logger->warn("       Local: {}...", local_hash.substr(0, 6));
-            g_logger->warn("       Remote: {}...", remote_hash.substr(0, 6));
+        std::string peer_id = from_peer ? from_peer->peer_id : "";
+        if (peer_id.empty()) return;
 
-            // 执行 “保留冲突文件” 策略 (Rename Local)
-            auto now = std::chrono::system_clock::now();
-            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-
-            std::string filename = relative_path.stem().string();
-            std::string ext = relative_path.extension().string();
-            // 构造冲突文件名: filename.conflict.12345678.ext
-            std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
-
-            std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
-
-            std::error_code ren_ec;
-            std::filesystem::rename(full_path, conflict_path, ren_ec);
-
-            if (!ren_ec) {
-                g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
-                // 重命名成功后，原路径就“空”了，可以请求远程文件来填补位置
-                should_request = true;
-            } else {
-                g_logger->error("[Sync] 冲突处理失败 (无法重命名): {}", ren_ec.message());
-                // 如果无法重命名，为了保护本地数据，我们拒绝更新
+        // Offload 耗时操作到 Worker 线程
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), remote_info, peer_id]() { // Capture remote_info by value
+            //  --- 1. 拦截回声 (Echo Check) ---
+            if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
                 return;
             }
-        }
-    }
 
-    if (should_request) {
-        nlohmann::json request_msg;
-        request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-        request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
-        send_over_kcp_peer(request_msg.dump(), from_peer);
-    }
-}
-void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
+            g_logger->info("[P2P] 收到更新请求: {}", remote_info.path);
 
-    // 直接扔到 Worker 线程，不阻塞网络
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (const std::exception& e) {
-            g_logger->error("[KCP] (Destination) 解析 file_delete 失败: {}", e.what());
-            return;
-        }
+            std::filesystem::path relative_path(std::u8string_view(reinterpret_cast<const char8_t*>(remote_info.path.c_str()), remote_info.path.length()));
+            std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
 
-        g_logger->info("[KCP] (Destination) 收到增量删除: {}", relative_path_str);
+            bool should_request = false;
+            std::error_code ec;
 
-        std::filesystem::path relative_path(std::u8string_view(
-            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
-
-        std::error_code ec;
-        // 执行磁盘 IO (在 Worker 线程)
-        if (std::filesystem::remove(full_path, ec)) {
-            g_logger->info("[Sync] -> 已删除本地文件: {}", relative_path_str);
-            // StateManager 内部有锁，线程安全
-            self->m_state_manager->remove_path_from_map(relative_path_str);
-        } else {
-            // 如果文件本来就不存在，当作成功处理
-            if (ec != std::errc::no_such_file_or_directory) {
-                g_logger->error("[Sync] -> 删除失败: {} Error: {}", relative_path_str, ec.message());
+            //  --- 2. 冲突检测 (Conflict Resolution) ---
+            if (!std::filesystem::exists(full_path, ec)) {
+                // 情况 0: 本地没有该文件 -> 直接请求 (Create/New)
+                g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
+                should_request = true;
             } else {
-                g_logger->info("[Sync] -> 本地文件已不存在, 无需操作: {}", relative_path_str);
-                self->m_state_manager->remove_path_from_map(relative_path_str);
+                std::string remote_hash = remote_info.hash;
+                // 【耗时操作】在 Worker 线程计算 Hash，不再阻塞网络！
+                std::string local_hash = Hashing::CalculateSHA256(full_path);                       
+                std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path); 
+
+                if (local_hash == remote_hash) {
+                    g_logger->info("[Sync] 内容一致，无需更新: {}", remote_info.path);
+                    m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+                    return;
+                }
+
+                if (base_hash.empty() || local_hash == base_hash) {
+                    g_logger->info("[Sync] 正常更新 (Local==Base): {}", remote_info.path);
+                    should_request = true;
+                } else {
+                    g_logger->warn("[Sync] ⚠️ 检测到冲突: {}", remote_info.path);
+                    g_logger->warn("       Base: {}...", base_hash.substr(0, 6));
+                    g_logger->warn("       Local: {}...", local_hash.substr(0, 6));
+                    g_logger->warn("       Remote: {}...", remote_hash.substr(0, 6));
+
+                    auto now = std::chrono::system_clock::now();
+                    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+                    std::string filename = relative_path.stem().string();
+                    std::string ext = relative_path.extension().string();
+                    std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
+                    std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
+
+                    std::error_code ren_ec;
+                    std::filesystem::rename(full_path, conflict_path, ren_ec);
+
+                    if (!ren_ec) {
+                        g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
+                        should_request = true;
+                    } else {
+                        g_logger->error("[Sync] 冲突处理失败 (无法重命名): {}", ren_ec.message());
+                        return;
+                    }
+                }
             }
-        }
-    });
-}
-void P2PManager::handle_dir_create(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
 
-    // 【同步会话】增加接收计数
-    if (from_peer) {
-        from_peer->received_dir_count.fetch_add(1);
+            if (should_request) {
+                nlohmann::json request_msg;
+                request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
+                request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
+                
+                // 【注意】必须发回到 IO 线程发送 KCP，确保线程安全
+                std::string msg_str = request_msg.dump();
+                boost::asio::post(m_io_context, [self, peer_id, msg_str]() {
+                     std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+                     auto it = self->m_peers_by_id.find(peer_id);
+                     if (it != self->m_peers_by_id.end() && it->second->kcp) {
+                         self->send_over_kcp_peer(msg_str, it->second.get());
+                     }
+                });
+            }
+        });
     }
+    void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer) {
+        if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
 
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (...) {
-            return;
+        // 【同步会话】增加计数并刷新超时
+        if (from_peer) {
+            from_peer->received_file_count.fetch_add(1);
+            
+            std::string pid = from_peer->peer_id;
+            uint64_t sid = from_peer->sync_session_id.load();
+            boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
+                 std::lock_guard<std::mutex> lock(m_peers_mutex);
+                 auto it = m_peers_by_id.find(pid);
+                 if (it != m_peers_by_id.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
+                     it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+                 }
+            });
         }
 
-        g_logger->info("[KCP] (Destination) 收到增量目录创建: {}", relative_path_str);
+        // 直接扔到 Worker 线程，不阻塞网络
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+            std::string relative_path_str;
+            try {
+                relative_path_str = payload.at("path").get<std::string>();
+            } catch (const std::exception& e) {
+                g_logger->error("[KCP] (Destination) 解析 file_delete 失败: {}", e.what());
+                return;
+            }
 
-        std::filesystem::path relative_path(std::u8string_view(
-            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+            g_logger->info("[KCP] (Destination) 收到增量删除: {}", relative_path_str);
 
-        std::error_code ec;
-        // 执行磁盘 IO
-        if (std::filesystem::create_directories(full_path, ec)) {
-            g_logger->info("[Sync] -> 已创建目录: {}", relative_path_str);
-            // StateManager 内部有锁，线程安全
-            self->m_state_manager->add_dir_to_map(relative_path_str);
-        } else if (ec) {
-            g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
+            std::filesystem::path relative_path(std::u8string_view(
+                reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+            std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+            std::error_code ec;
+            if (std::filesystem::remove(full_path, ec)) {
+                g_logger->info("[Sync] -> 已删除本地文件: {}", relative_path_str);
+                self->m_state_manager->remove_path_from_map(relative_path_str);
+            } else {
+                if (ec != std::errc::no_such_file_or_directory) {
+                    g_logger->error("[Sync] -> 删除失败: {} Error: {}", relative_path_str, ec.message());
+                } else {
+                    g_logger->info("[Sync] -> 本地文件已不存在, 无需操作: {}", relative_path_str);
+                    self->m_state_manager->remove_path_from_map(relative_path_str);
+                }
+            }
+        });
+    }
+    void P2PManager::handle_dir_create(const nlohmann::json& payload, PeerContext* from_peer) {
+        if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
+
+        // 【同步会话】增加接收计数并刷新超时
+        if (from_peer) {
+            from_peer->received_dir_count.fetch_add(1);
+
+            std::string pid = from_peer->peer_id;
+            uint64_t sid = from_peer->sync_session_id.load();
+            boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
+                 std::lock_guard<std::mutex> lock(m_peers_mutex);
+                 auto it = m_peers_by_id.find(pid);
+                 if (it != m_peers_by_id.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
+                     it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+                 }
+            });
         }
-    });
-}
+
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+            std::string relative_path_str;
+            try {
+                relative_path_str = payload.at("path").get<std::string>();
+            } catch (...) {
+                return;
+            }
+
+            g_logger->info("[KCP] (Destination) 收到增量目录创建: {}", relative_path_str);
+
+            std::filesystem::path relative_path(std::u8string_view(
+                reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+            std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+            std::error_code ec;
+            if (std::filesystem::create_directories(full_path, ec)) {
+                g_logger->info("[Sync] -> 已创建目录: {}", relative_path_str);
+                self->m_state_manager->add_dir_to_map(relative_path_str);
+            } else if (ec) {
+                g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
+            }
+        });
+    }
 void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext* from_peer) {
     // 此函数现在可能不再被直接调用，或者仅仅作为 wrapper
     if (from_peer) {
         m_transfer_manager->queue_upload(from_peer->peer_id, payload);
     }
 }
-void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer) {
-    if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
+    void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer) {
+        if (m_role != SyncRole::Destination && m_mode != SyncMode::BiDirectional) return;
 
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (...) {
-            return;
+        // 【同步会话】刷新超时
+        if (from_peer) {
+            from_peer->received_dir_count.fetch_add(1);
+
+            std::string pid = from_peer->peer_id;
+            uint64_t sid = from_peer->sync_session_id.load();
+            boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
+                 std::lock_guard<std::mutex> lock(m_peers_mutex);
+                 auto it = m_peers_by_id.find(pid);
+                 if (it != m_peers_by_id.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
+                     it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+                 }
+            });
         }
 
-        g_logger->info("[KCP] (Destination) 收到增量目录删除: {}", relative_path_str);
-
-        std::filesystem::path relative_path(std::u8string_view(
-            reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
-        std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
-
-        std::error_code ec;
-        // 执行磁盘 IO
-        std::filesystem::remove_all(full_path, ec);
-
-        if (!ec) {
-            g_logger->info("[Sync] -> 已删除目录: {}", relative_path_str);
-            // StateManager 内部有锁，线程安全
-            self->m_state_manager->remove_dir_from_map(relative_path_str);
-        } else {
-            if (ec != std::errc::no_such_file_or_directory) {
-                g_logger->error("[Sync] -> 删除目录失败: {} Error: {}", relative_path_str, ec.message());
-            } else {
-                // 如果目录已不存在，也要清理 map
-                self->m_state_manager->remove_dir_from_map(relative_path_str);
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), payload]() {
+            std::string relative_path_str;
+            try {
+                relative_path_str = payload.at("path").get<std::string>();
+            } catch (...) {
+                return;
             }
-        }
-    });
-}
+
+            g_logger->info("[KCP] (Destination) 收到增量目录删除: {}", relative_path_str);
+
+            std::filesystem::path relative_path(std::u8string_view(
+                reinterpret_cast<const char8_t*>(relative_path_str.c_str()), relative_path_str.length()));
+            std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
+            std::error_code ec;
+            std::filesystem::remove_all(full_path, ec);
+
+            if (!ec) {
+                g_logger->info("[Sync] -> 已删除目录: {}", relative_path_str);
+                self->m_state_manager->remove_dir_from_map(relative_path_str);
+            } else {
+                if (ec != std::errc::no_such_file_or_directory) {
+                    g_logger->error("[Sync] -> 删除目录失败: {} Error: {}", relative_path_str, ec.message());
+                } else {
+                    self->m_state_manager->remove_dir_from_map(relative_path_str);
+                }
+            }
+        });
+    }
 
 // --- 清理停滞的文件组装缓冲区 ---
 void P2PManager::schedule_cleanup_task() {
@@ -1449,29 +1521,34 @@ void P2PManager::handle_sync_begin(const nlohmann::json& payload, PeerContext* f
         from_peer->received_file_count.store(0);
         from_peer->received_dir_count.store(0);
         
-        // 启动定时器检查同步完成情况
-        auto timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
-        timer->expires_after(std::chrono::seconds(10));  // 10 秒后检查
-        timer->async_wait([this, self = shared_from_this(), peer_id = from_peer->peer_id, 
+        // 启动智能定时器 (初始 60s)
+        from_peer->sync_timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
+        auto timer = from_peer->sync_timeout_timer;
+        timer->expires_after(std::chrono::seconds(60));
+
+        std::string pid = from_peer->peer_id; // Copy ID
+        
+        timer->async_wait([this, self = shared_from_this(), pid, 
                            session_id, file_count, dir_count, timer](const boost::system::error_code& ec) {
             if (ec) return;
             
             std::shared_ptr<PeerContext> peer;
             {
                 std::lock_guard<std::mutex> lock(m_peers_mutex);
-                auto it = m_peers_by_id.find(peer_id);
+                auto it = m_peers_by_id.find(pid);
                 if (it == m_peers_by_id.end()) return;
                 peer = it->second;
             }
             
-            // 检查是否是同一个 session
+            // 检查是否是同一个 session 且是同一个 timer
             if (peer->sync_session_id.load() != session_id) return;
+            if (peer->sync_timeout_timer != timer) return;
             
             size_t received_files = peer->received_file_count.load();
             size_t received_dirs = peer->received_dir_count.load();
             
             if (received_files < file_count || received_dirs < dir_count) {
-                g_logger->warn("[Sync] 同步不完整！收到 {}/{} 文件, {}/{} 目录。发送 ACK 请求补发...",
+                g_logger->warn("[Sync] 同步不完整 (超时)！收到 {}/{} 文件, {}/{} 目录。发送 ACK 请求补发...",
                                received_files, file_count, received_dirs, dir_count);
                 send_sync_ack(peer.get(), session_id, received_files, received_dirs);
             } else {
@@ -1487,15 +1564,22 @@ void P2PManager::handle_sync_ack(const nlohmann::json& payload, PeerContext* fro
     if (!from_peer) return;
     
     try {
-        uint64_t session_id = payload.at("session_id").get<uint64_t>();
+        uint64_t ack_session_id = payload.at("session_id").get<uint64_t>();
         size_t received_files = payload.at("received_files").get<size_t>();
         size_t received_dirs = payload.at("received_dirs").get<size_t>();
         
-        g_logger->warn("[Sync] 收到 ACK: 对方只收到 {} 文件, {} 目录。重新同步...",
-                       received_files, received_dirs);
+        // 【关键】检查这是否针对当前活跃会话的回复
+        uint64_t current_id = from_peer->sync_session_id.load();
+        if (ack_session_id != current_id) {
+            g_logger->warn("[Sync] 收到过时或不匹配的 ACK (ACK ID: {}, 当前 ID: {})，忽略。", ack_session_id, current_id);
+            return;
+        }
+
+        g_logger->warn("[Sync] 收到 ACK (ID: {}): 对方只收到 {} 文件, {} 目录。重新同步...",
+                       ack_session_id, received_files, received_dirs);
         
-        // 由于对端没收完，重新进行完整同步
-        // 生成新的 session_id 避免混淆
+        // 既然对方没收完，且会话 ID 匹配，说明确实需要补发
+        // 我们生成一个新的 ID 并重新开始推送
         uint64_t new_session_id = std::chrono::steady_clock::now().time_since_epoch().count();
         from_peer->sync_session_id.store(new_session_id);
         
@@ -1601,11 +1685,18 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerContext> ctx, uint64_t s
 
         // 【流控】每 50 个文件检查一次 KCP 发送队列积压量
         if ((i + 1) % 50 == 0) {
-            // 在 io_context 线程获取 pending 状态
-            if (ctx->is_valid.load() && ctx->kcp) {
-                int pending = ikcp_waitsnd(ctx->kcp);
-                while (pending > 1024 && ctx->is_valid.load() && ctx->kcp) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            int pending = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                if (ctx->is_valid.load() && ctx->kcp) {
+                    pending = ikcp_waitsnd(ctx->kcp);
+                }
+            }
+
+            while (pending > 1024 && ctx->is_valid.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                {
+                    std::lock_guard<std::mutex> lock(m_peers_mutex);
                     pending = ctx->kcp ? ikcp_waitsnd(ctx->kcp) : 0;
                 }
             }

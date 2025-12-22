@@ -3,6 +3,7 @@
 #include <boost/asio.hpp>
 #include <efsw/efsw.hpp>
 #include <iostream>
+#include <thread>
 
 #include "VeritasSync/EncodingUtils.h"
 #include "VeritasSync/Hashing.h"
@@ -162,6 +163,8 @@ namespace VeritasSync {
 
         if (changes_to_process.empty()) return;
 
+        std::unordered_set<std::string> failed_changes;
+
         m_file_filter.load_rules(m_root_path);
 
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
@@ -179,7 +182,10 @@ namespace VeritasSync {
 
                 std::error_code ec;
                 std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
-                if (ec) continue;
+                if (ec) {
+                    g_logger->warn("[StateManager] 路径解析错误 {}: {}. 跳过。", full_path_str, ec.message());
+                    continue;
+                }
 
                 const std::u8string u8_path_str = relative_path.u8string();
                 std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
@@ -196,12 +202,20 @@ namespace VeritasSync {
                         info.path = rel_path_str;
 
                         auto ftime = std::filesystem::last_write_time(full_path, ec);
-                        if (ec) continue;
+                        if (ec) {
+                            g_logger->warn("[StateManager] 无法获取文件时间 (可能被锁定) {}: {}. 稍后重试。", rel_path_str, ec.message());
+                            failed_changes.insert(full_path_str);
+                            continue;
+                        }
                         auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                         info.modified_time = sctp.time_since_epoch().count();
 
                         info.hash = Hashing::CalculateSHA256(full_path);
-                        if (info.hash.empty()) continue;
+                        if (info.hash.empty()) {
+                            g_logger->warn("[StateManager] 哈希计算失败 (可能被锁定) {}. 稍后重试。", rel_path_str);
+                            failed_changes.insert(full_path_str);
+                            continue;
+                        }
 
                         // 更新内存
                         m_file_map[info.path] = info;
@@ -233,12 +247,31 @@ namespace VeritasSync {
                     }
                 }
             } catch (const std::exception& e) {
-                g_logger->error("[{}] [StateManager] 处理变更异常: {} ({})", m_sync_key, full_path_str, e.what());
+                g_logger->error("[{}] [StateManager] 处理变更异常: {} ({}) - 将重试", m_sync_key, full_path_str, e.what());
+                failed_changes.insert(full_path_str);
             }
         }
 
         // --- 提交事务 ---
         if (m_db) m_db->commit_transaction();
+
+        // --- 处理失败重试 ---
+        if (!failed_changes.empty()) {
+            g_logger->info("[StateManager] {} 个文件处理失败，安排重试...", failed_changes.size());
+            {
+                std::lock_guard<std::mutex> lock(m_changes_mutex);
+                for (const auto& path : failed_changes) {
+                    m_pending_changes.insert(path);
+                }
+            }
+            // 启动异步重试任务 (Detached thread sleep -> post to io_context)
+            std::thread([this]() {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                boost::asio::post(this->get_io_context(), [this]() {
+                    this->process_debounced_changes();
+                });
+            }).detach();
+        }
     }
     void StateManager::clear_sync_history(const std::string& path) {
         if (m_db) {
@@ -307,6 +340,9 @@ namespace VeritasSync {
 
         int cache_hit_count = 0;
         int calc_count = 0;
+        
+        // 失败重试列表
+        std::vector<std::string> retry_list;
 
         for (const auto& entry : iterator) {
             std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
@@ -329,7 +365,11 @@ namespace VeritasSync {
                 info.path = rel_path_str;
 
                 auto ftime = std::filesystem::last_write_time(entry, ec);
-                if (ec) continue;
+                if (ec) {
+                    g_logger->warn("[Scan] 获取时间失败: {}", rel_path_str);
+                    retry_list.push_back(entry.path().string());
+                    continue;
+                }
                 auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                 info.modified_time = sctp.time_since_epoch().count();
 
@@ -348,6 +388,13 @@ namespace VeritasSync {
                 // --- 耗时操作 (完全在事务之外执行) ---
                 if (need_calc) {
                     info.hash = Hashing::CalculateSHA256(entry.path());  // <--- 最耗时的一步
+                    
+                    if (info.hash.empty()) {
+                         g_logger->warn("[Scan] 哈希计算失败: {}", rel_path_str);
+                         retry_list.push_back(entry.path().string());
+                         continue;
+                    }
+
                     calc_count++;
 
                     // 将需要更新 DB 的文件加入批次
@@ -374,6 +421,54 @@ namespace VeritasSync {
         // --- 循环结束，提交剩余的批次 ---
         flush_batch();
         // -----------------------------
+
+        // --- 处理重试列表 ---
+        if (!retry_list.empty()) {
+            g_logger->info("[StateManager] 扫描结束，正在重试 {} 个失败的文件...", retry_list.size());
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 等待 1 秒
+            
+            for (const auto& full_path_str : retry_list) {
+                std::filesystem::path full_path = Utf8ToPath(full_path_str);
+                // 简化的重试逻辑:
+                // 由于这是个别文件，不再做批量优化，直接处理
+                try {
+                     std::error_code ec;
+                     if (!std::filesystem::exists(full_path, ec)) continue;
+                     
+                     std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
+                     if (ec) continue;
+                     std::string rel_path_str = PathToUtf8(relative_path);
+                     
+                     FileInfo info;
+                     info.path = rel_path_str;
+                     
+                     auto ftime = std::filesystem::last_write_time(full_path, ec);
+                     if (ec) {
+                         g_logger->error("[Scan] 重试失败 (Time): {}", rel_path_str);
+                         continue;
+                     }
+                     auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+                     info.modified_time = sctp.time_since_epoch().count();
+                     
+                     info.hash = Hashing::CalculateSHA256(full_path);
+                     if (info.hash.empty()) {
+                         g_logger->error("[Scan] 重试失败 (Hash): {}", rel_path_str);
+                         continue;
+                     }
+                     
+                     // 成功，更新
+                     m_file_map[info.path] = info;
+                     if (m_db) {
+                         m_db->update_file(info.path, info.hash, info.modified_time);
+                     }
+                     calc_count++;
+                     
+                } catch(const std::exception& e) {
+                    g_logger->error("[Scan] 重试异常: {}", e.what());
+                }
+            }
+            g_logger->info("[StateManager] 重试完成。");
+        }
 
         g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", m_file_map.size(), cache_hit_count,
                        calc_count);

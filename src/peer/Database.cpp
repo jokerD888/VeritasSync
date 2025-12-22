@@ -28,6 +28,11 @@ Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.str
         m_db = nullptr;
         return;
     }
+
+    // --- 设置繁忙重试超时 (5秒) ---
+    // 防止多线程写入时出现 "database is locked" 错误
+    sqlite3_busy_timeout(m_db, 5000);
+
     // --- 优化: 启用 WAL 模式和 Normal 同步 ---
     // WAL: 大幅提升并发性能，避免读写阻塞
     // NORMAL: 在保证安全性的前提下减少 fsync 次数

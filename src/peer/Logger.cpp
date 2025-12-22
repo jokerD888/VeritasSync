@@ -13,9 +13,9 @@ std::shared_ptr<spdlog::logger> g_logger;
 void init_logger() {
     try {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_level(spdlog::level::debug);
+        console_sink->set_level(spdlog::level::warn);
         auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", 1024 * 1024 * 5, 3);
-        file_sink->set_level(spdlog::level::debug);
+        file_sink->set_level(spdlog::level::warn);
 
         spdlog::init_thread_pool(8192, 1);
 
@@ -23,8 +23,8 @@ void init_logger() {
             std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},
                                                    spdlog::thread_pool(), spdlog::async_overflow_policy::block);
 
-        g_logger->set_level(spdlog::level::debug);
-        g_logger->flush_on(spdlog::level::info);
+        g_logger->set_level(spdlog::level::warn);
+        g_logger->flush_on(spdlog::level::warn);
 
         spdlog::register_logger(g_logger);
         spdlog::set_default_logger(g_logger);

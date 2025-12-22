@@ -74,6 +74,9 @@ struct PeerContext {
     PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
     ~PeerContext();
     void setup_kcp(uint32_t conv);
+    
+    // --- 1.2.1 修复：每个会话独立的超时定时器 ---
+    std::shared_ptr<boost::asio::steady_timer> sync_timeout_timer;
 };
 
 class StateManager;
@@ -127,6 +130,7 @@ private:
     // --- 上层应用逻辑 ---
     void send_over_kcp(const std::string& msg);
     void send_over_kcp_peer(const std::string& msg, PeerContext* peer);
+    void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
     void handle_kcp_message(const std::string& msg, PeerContext* from_peer);
 
     // --- 消息处理器 ---
