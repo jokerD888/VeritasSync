@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "VeritasSync/Config.h"
-#include "VeritasSync/Database.h"
-#include "VeritasSync/Protocol.h"
+#include "VeritasSync/common/Config.h"
+#include "VeritasSync/storage/Database.h"
+#include "VeritasSync/sync/Protocol.h"
 
 namespace VeritasSync {
     struct SyncActions {

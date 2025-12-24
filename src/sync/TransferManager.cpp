@@ -1,4 +1,4 @@
-#include "VeritasSync/TransferManager.h"
+#include "VeritasSync/sync/TransferManager.h"
 
 #include <snappy.h>
 
@@ -7,12 +7,12 @@
 #include <boost/asio/steady_timer.hpp>
 #include <thread>
 
-#include "VeritasSync/CryptoLayer.h"
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Hashing.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/Protocol.h"
-#include "VeritasSync/StateManager.h"
+#include "VeritasSync/common/CryptoLayer.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Hashing.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/sync/Protocol.h"
+#include "VeritasSync/storage/StateManager.h"
 
 namespace VeritasSync {
 
@@ -141,15 +141,17 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         break;
                     }
                     // 如果是 EMFILE (24)，说明系统句柄耗尽，增加退让时间
-                    int wait_ms = (errno == 24) ? 1000 : 200;
+                    std::string sys_err = GetLastSystemError();
+                    int wait_ms = (errno == EMFILE || errno == ENFILE) ? 1000 : 200;
                     if (retry < 4) {
-                        g_logger->warn("[Transfer] 句柄超限或访问冲突(errno:{}), 退让 {}ms: {}", errno, wait_ms, ctx->path);
+                        g_logger->warn("[Transfer] ⚠️ 文件打开失败(retry {}), 退让 {}ms: {} | {}", retry+1, wait_ms, ctx->path, sys_err);
                         std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
                     }
                 }
 
                 if (!opened) {
-                    g_logger->error("[Transfer] 无法恢复文件句柄，任务终止: {}", ctx->path);
+                    std::string sys_err = GetLastSystemError();
+                    g_logger->error("[Transfer] ❌ 无法打开文件(重试5次后放弃): {} | {}", ctx->path, sys_err);
                     {
                         std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                         self->m_sending_files.erase(ctx->path);
@@ -292,7 +294,12 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
 
             if (full_path.has_parent_path()) {
-                std::filesystem::create_directories(full_path.parent_path());
+                std::error_code dir_ec;
+                std::filesystem::create_directories(full_path.parent_path(), dir_ec);
+                if (dir_ec) {
+                    g_logger->error("[Transfer] ❌ 无法创建目录: {} | {}", PathToUtf8(full_path.parent_path()), FormatErrorCode(dir_ec));
+                    return;
+                }
             }
 
             std::filesystem::path temp_path = full_path;
@@ -304,7 +311,8 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             new_file.file_stream.open(temp_path, std::ios::binary | std::ios::out);
 
             if (!new_file.file_stream.is_open()) {
-                g_logger->error("[Transfer] 无法创建临时文件: {}", temp_path.string());
+                std::string sys_err = GetLastSystemError();
+                g_logger->error("[Transfer] ❌ 无法创建临时文件: {} | {}", PathToUtf8(temp_path), sys_err);
                 return;
             }
 
@@ -339,6 +347,14 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
             recv_file.file_stream.seekp(offset);
             recv_file.file_stream.write(uncompressed_data.data(), uncompressed_data.size());
+            
+            // 检查写入是否成功
+            if (recv_file.file_stream.fail()) {
+                std::string sys_err = GetLastSystemError();
+                g_logger->error("[Transfer] ❌ 文件写入失败 (chunk {}): {} | {}", chunk_index, file_path_str, sys_err);
+                recv_file.file_stream.close();
+                return;
+            }
             recv_file.received_chunks++;
         }
 
@@ -445,9 +461,13 @@ void TransferManager::cleanup_stale_buffers() {
         // 10分钟彻底清理
         auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.last_active);
         if (duration.count() > 10) {
-            g_logger->warn("[Transfer] 接收超时 (僵尸清理): {}", it->first);
+            g_logger->warn("[Transfer] ⏰ 接收超时 (僵尸清理): {}", it->first);
             if (it->second.file_stream.is_open()) it->second.file_stream.close();
-            std::filesystem::remove(it->second.temp_path);
+            std::error_code rm_ec;
+            std::filesystem::remove(it->second.temp_path, rm_ec);
+            if (rm_ec) {
+                g_logger->warn("[Transfer] 清理临时文件失败: {} | {}", it->second.temp_path, FormatErrorCode(rm_ec));
+            }
             it = m_receiving_files.erase(it);
         } else {
             ++it;

@@ -1,7 +1,7 @@
-#include "VeritasSync/TrayIcon.h"
+#include "VeritasSync/common/TrayIcon.h"
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
 
 #ifdef _WIN32
 #include <shellapi.h>

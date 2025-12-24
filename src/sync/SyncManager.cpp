@@ -1,10 +1,10 @@
-﻿#include "VeritasSync/SyncManager.h"
+#include "VeritasSync/sync/SyncManager.h"
 
 #include <map>
 #include <set>
 
 // 1. 引入 Logger 头文件
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 SyncActions SyncManager::compare_states_and_get_requests(const std::vector<FileInfo>& local_files,

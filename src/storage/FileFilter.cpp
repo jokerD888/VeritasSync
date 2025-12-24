@@ -1,10 +1,10 @@
-#include "VeritasSync/FileFilter.h"
+#include "VeritasSync/storage/FileFilter.h"
 
 #include <fstream>
 #include <iostream>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 

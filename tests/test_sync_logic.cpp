@@ -3,9 +3,22 @@
 #include <optional>  // 引入 optional
 #include <vector>
 
-#include "VeritasSync/SyncManager.h"
+#include "VeritasSync/sync/SyncManager.h"
+#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
+
+// 全局测试环境：初始化 Logger
+class SyncLogicTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        init_logger();
+    }
+};
+
+// 注册全局环境
+static ::testing::Environment* const sync_env =
+    ::testing::AddGlobalTestEnvironment(new SyncLogicTestEnvironment());
 
 // 辅助函数：创建 FileInfo
 FileInfo make_file(const std::string& path, const std::string& hash, uint64_t mtime = 1000) {
@@ -105,4 +118,150 @@ TEST(SyncLogicTest, BiDi_FreshHistory_ShouldKeep) {
         SyncManager::compare_states_and_get_requests(local, remote, history_func_intercepted, SyncMode::BiDirectional);
 
     EXPECT_TRUE(actions.files_to_delete.empty());
+}
+
+// ============ 新增测试用例 ============
+
+// --- 边界情况测试 ---
+
+TEST(SyncLogicTest, EmptyBothSides) {
+    std::vector<FileInfo> local;
+    std::vector<FileInfo> remote;
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    EXPECT_TRUE(actions.files_to_request.empty());
+    EXPECT_TRUE(actions.files_to_delete.empty());
+}
+
+TEST(SyncLogicTest, SameFileSameHash) {
+    // 本地和远程有相同的文件，相同的 Hash
+    std::vector<FileInfo> local = {make_file("same.txt", "hash_same")};
+    std::vector<FileInfo> remote = {make_file("same.txt", "hash_same")};
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    // 不需要任何操作
+    EXPECT_TRUE(actions.files_to_request.empty());
+    EXPECT_TRUE(actions.files_to_delete.empty());
+}
+
+TEST(SyncLogicTest, SameFileDifferentHash) {
+    // 本地和远程有相同的文件，但 Hash 不同
+    std::vector<FileInfo> local = {make_file("updated.txt", "hash_old")};
+    std::vector<FileInfo> remote = {make_file("updated.txt", "hash_new")};
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    // 需要请求更新
+    ASSERT_EQ(actions.files_to_request.size(), 1);
+    EXPECT_EQ(actions.files_to_request[0], "updated.txt");
+}
+
+TEST(SyncLogicTest, MultipleFilesComplex) {
+    // 复杂场景：多个文件，混合情况
+    std::vector<FileInfo> local = {
+        make_file("unchanged.txt", "hash_a"),
+        make_file("updated.txt", "hash_old"),
+        make_file("local_only.txt", "hash_c"),
+    };
+    std::vector<FileInfo> remote = {
+        make_file("unchanged.txt", "hash_a"),
+        make_file("updated.txt", "hash_new"),
+        make_file("remote_only.txt", "hash_d"),
+    };
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    // 应该请求 updated.txt 和 remote_only.txt
+    EXPECT_EQ(actions.files_to_request.size(), 2);
+    
+    // 应该删除 local_only.txt
+    EXPECT_EQ(actions.files_to_delete.size(), 1);
+    EXPECT_EQ(actions.files_to_delete[0], "local_only.txt");
+}
+
+// --- 多语言路径测试 (使用 ASCII 模拟) ---
+
+TEST(SyncLogicTest, SpecialFilePaths) {
+    std::vector<FileInfo> local;
+    std::vector<FileInfo> remote = {
+        make_file("chinese_file.txt", "hash_cn"),
+        make_file("japanese_file.txt", "hash_jp"),
+        make_file("korean_file.txt", "hash_kr"),
+    };
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    EXPECT_EQ(actions.files_to_request.size(), 3);
+}
+
+// --- 目录同步测试 ---
+
+TEST(SyncLogicTest, DirSync_RemoteNewDirs_ShouldCreate) {
+    std::set<std::string> local_dirs;
+    std::set<std::string> remote_dirs = {"dir1", "dir2/subdir"};
+    
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    
+    EXPECT_EQ(actions.dirs_to_create.size(), 2);
+    EXPECT_TRUE(actions.dirs_to_delete.empty());
+}
+
+TEST(SyncLogicTest, DirSync_LocalExtraDirs_ShouldDelete) {
+    std::set<std::string> local_dirs = {"local_dir", "another_dir"};
+    std::set<std::string> remote_dirs;
+    
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    
+    EXPECT_TRUE(actions.dirs_to_create.empty());
+    EXPECT_EQ(actions.dirs_to_delete.size(), 2);
+}
+
+TEST(SyncLogicTest, DirSync_BiDi_BothSidesMarked) {
+    std::set<std::string> local_dirs = {"local_new"};
+    std::set<std::string> remote_dirs = {"remote_new"};
+    
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::BiDirectional);
+    
+    // 远程有而本地没有的目录应该被创建
+    EXPECT_EQ(actions.dirs_to_create.size(), 1);
+    EXPECT_EQ(actions.dirs_to_create[0], "remote_new");
+    
+    // 实现中：无论单向还是双向，本地多余目录都会被标记为删除
+    // 安全性由执行层的 "Empty Check" 保证
+    EXPECT_EQ(actions.dirs_to_delete.size(), 1);
+    EXPECT_EQ(actions.dirs_to_delete[0], "local_new");
+}
+
+// --- 大规模数据测试 ---
+
+TEST(SyncLogicTest, LargeFileCount) {
+    std::vector<FileInfo> local;
+    std::vector<FileInfo> remote;
+    
+    // 创建 1000 个文件
+    for (int i = 0; i < 1000; ++i) {
+        remote.push_back(make_file("file_" + std::to_string(i) + ".txt", "hash_" + std::to_string(i)));
+    }
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    EXPECT_EQ(actions.files_to_request.size(), 1000);
+}
+
+// --- 特殊字符路径测试 ---
+
+TEST(SyncLogicTest, SpecialCharacterPaths) {
+    std::vector<FileInfo> local;
+    std::vector<FileInfo> remote = {
+        make_file("file with spaces.txt", "hash1"),
+        make_file("file-with-dashes.txt", "hash2"),
+        make_file("file_with_underscores.txt", "hash3"),
+        make_file("file.multiple.dots.txt", "hash4"),
+    };
+    
+    auto actions = SyncManager::compare_states_and_get_requests(local, remote, dummy_no_history, SyncMode::OneWay);
+    
+    EXPECT_EQ(actions.files_to_request.size(), 4);
 }

@@ -1,4 +1,4 @@
-﻿#include <chrono>
+#include <chrono>
 #include <efsw/efsw.hpp>
 #include <filesystem>
 #include <iomanip>  // 用于 std::setw

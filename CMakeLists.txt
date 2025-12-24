@@ -49,17 +49,20 @@ add_executable(veritas_sync WIN32
     veritas.rc
     src/main.cpp
     src/platform/TrayIcon.cpp
-    src/peer/Hashing.cpp
-    src/peer/TrackerClient.cpp
-    src/peer/P2PManager.cpp
-    src/peer/StateManager.cpp
-    src/peer/SyncManager.cpp
-    src/peer/FileFilter.cpp
-    src/peer/CryptoLayer.cpp
-    src/peer/TransferManager.cpp
-    src/peer/Database.cpp
-    src/peer/SyncNode.cpp 
-    src/peer/Logger.cpp
+    src/common/Hashing.cpp
+    src/common/CryptoLayer.cpp
+    src/common/Logger.cpp
+    src/net/IceTransport.cpp
+    src/net/KcpSession.cpp
+    src/p2p/TrackerClient.cpp
+    src/p2p/P2PManager.cpp
+    src/p2p/PeerController.cpp
+    src/storage/StateManager.cpp
+    src/storage/FileFilter.cpp
+    src/storage/Database.cpp
+    src/sync/SyncManager.cpp
+    src/sync/TransferManager.cpp
+    src/sync/SyncNode.cpp 
 )
 
 if(WIN32)
@@ -206,15 +209,25 @@ find_package(GTest CONFIG REQUIRED)
 
 # 定义测试可执行文件
 add_executable(unit_tests 
+    # --- 测试文件 ---
     tests/test_sync_logic.cpp 
     tests/test_protocol.cpp
     tests/test_hashing.cpp
     tests/test_database.cpp
-    src/peer/SyncManager.cpp 
-    src/peer/Hashing.cpp
-    src/peer/Database.cpp
-    src/peer/Logger.cpp
-
+    tests/test_binary_frame.cpp
+    tests/test_crypto_layer.cpp
+    tests/test_encoding_utils.cpp
+    tests/test_file_filter.cpp
+    tests/test_kcp_session.cpp
+    
+    # --- 被测试的源文件 ---
+    src/sync/SyncManager.cpp 
+    src/common/Hashing.cpp
+    src/common/CryptoLayer.cpp
+    src/common/Logger.cpp
+    src/storage/Database.cpp
+    src/storage/FileFilter.cpp
+    src/net/KcpSession.cpp
 )
 
 # 包含头文件路径
@@ -228,6 +241,7 @@ target_link_libraries(unit_tests PRIVATE
     spdlog::spdlog 
     OpenSSL::Crypto
     unofficial::sqlite3::sqlite3
+    kcp::kcp
 )
 
 # 注册测试

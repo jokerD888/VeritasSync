@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-#include "VeritasSync/Config.h"
+#include "VeritasSync/common/Config.h"
 
 namespace VeritasSync {
 

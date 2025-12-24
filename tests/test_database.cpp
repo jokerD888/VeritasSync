@@ -3,9 +3,22 @@
 
 #include <filesystem>
 
-#include "VeritasSync/Database.h"
+#include "VeritasSync/storage/Database.h"
+#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
+
+// 全局测试环境：初始化 Logger
+class DatabaseTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        init_logger();
+    }
+};
+
+// 注册全局环境
+static ::testing::Environment* const db_env =
+    ::testing::AddGlobalTestEnvironment(new DatabaseTestEnvironment());
 
 class DatabaseTest : public ::testing::Test {
 protected:

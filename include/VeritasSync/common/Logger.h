@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <spdlog/spdlog.h>
 
 #include <memory>

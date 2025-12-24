@@ -1,4 +1,4 @@
-﻿#define CPPHTTPLIB_OPENSSL_SUPPORT  // 启用 HTTPS 支持
+#define CPPHTTPLIB_OPENSSL_SUPPORT  // 启用 HTTPS 支持
 #include <httplib.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>

@@ -63,4 +63,64 @@ inline std::string WideToUtf8(const std::wstring& wstr) {
 
 #endif
 
+// ---------------------------------------------------------
+// 3. 错误诊断辅助函数
+// ---------------------------------------------------------
+
+// 获取当前系统错误信息（包含 errno 和 Win32 错误码）
+// 用于文件操作失败时的诊断日志
+inline std::string GetLastSystemError() {
+#ifdef _WIN32
+    DWORD win_err = GetLastError();
+    int posix_err = errno;
+    
+    std::string result = "errno=" + std::to_string(posix_err);
+    if (posix_err != 0) {
+        result += " (";
+        switch (posix_err) {
+            case ENOENT: result += "ENOENT:文件不存在"; break;
+            case EACCES: result += "EACCES:权限拒绝"; break;
+            case EMFILE: result += "EMFILE:进程句柄超限"; break;
+            case ENFILE: result += "ENFILE:系统句柄超限"; break;
+            case ENOSPC: result += "ENOSPC:磁盘空间不足"; break;
+            case EEXIST: result += "EEXIST:文件已存在"; break;
+            case ENOTEMPTY: result += "ENOTEMPTY:目录非空"; break;
+            case EBUSY: result += "EBUSY:资源忙"; break;
+            default: result += "未知POSIX错误"; break;
+        }
+        result += ")";
+    }
+    
+    if (win_err != 0) {
+        result += ", Win32=" + std::to_string(win_err);
+        wchar_t buf[256] = {0};
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL, win_err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                       buf, 255, NULL);
+        std::wstring wmsg(buf);
+        // 去除末尾换行
+        while (!wmsg.empty() && (wmsg.back() == L'\r' || wmsg.back() == L'\n')) {
+            wmsg.pop_back();
+        }
+        if (!wmsg.empty()) {
+            result += " (" + WideToUtf8(wmsg) + ")";
+        }
+    }
+    return result;
+#else
+    int posix_err = errno;
+    std::string result = "errno=" + std::to_string(posix_err);
+    if (posix_err != 0) {
+        result += " (" + std::string(strerror(posix_err)) + ")";
+    }
+    return result;
+#endif
+}
+
+// 格式化 std::error_code 为可读字符串
+inline std::string FormatErrorCode(const std::error_code& ec) {
+    if (!ec) return "OK";
+    return "code=" + std::to_string(ec.value()) + " (" + ec.message() + ")";
+}
+
 }  // namespace VeritasSync

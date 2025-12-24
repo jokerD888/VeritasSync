@@ -1,5 +1,5 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "VeritasSync/P2PManager.h"
+#include "VeritasSync/p2p/P2PManager.h"
 
 #include <httplib.h>
 
@@ -13,13 +13,13 @@
 #include <sstream>
 #include <thread>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Hashing.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/Protocol.h"
-#include "VeritasSync/StateManager.h"
-#include "VeritasSync/SyncManager.h"
-#include "VeritasSync/TrackerClient.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Hashing.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/sync/Protocol.h"
+#include "VeritasSync/storage/StateManager.h"
+#include "VeritasSync/sync/SyncManager.h"
+#include "VeritasSync/p2p/TrackerClient.h"
 #define BUFFERSIZE 32768
 #include <b64/decode.h>
 #include <b64/encode.h>
@@ -981,7 +981,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                     // (虽然不移也行，因为会被覆盖，但移除更干净)
                     // self->m_state_manager->remove_path_from_map(rel_path);
                 } else {
-                    g_logger->error("[Sync] 冲突重命名失败: {}", ec.message());
+                    g_logger->error("[Sync] ❌ 冲突重命名失败: {} | {}", rel_path, FormatErrorCode(ec));
                 }
             }
         }
@@ -1001,7 +1001,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                     // 这样下次如果重新创建该文件，就不会因为有旧历史而被判定为"删除"
                     self->m_state_manager->remove_path_from_map(file_path_str);
                 } else if (ec != std::errc::no_such_file_or_directory) {
-                    g_logger->error("[Sync] -> 删除失败 (相对路径): {} Error: {}", file_path_str, ec.message());
+                    g_logger->error("[Sync] ❌ 删除文件失败: {} | {}", file_path_str, FormatErrorCode(ec));
                 }
             }
         }
@@ -1027,6 +1027,8 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                     // 双向模式：只删空目录，作为保护机制
                     if (std::filesystem::remove(full_path, ec)) {
                         deleted = true;
+                    } else if (ec && ec != std::errc::directory_not_empty) {
+                        g_logger->warn("[Sync] 删除目录失败: {} | {}", dir_path_str, FormatErrorCode(ec));
                     }
                 }
 
@@ -1045,6 +1047,8 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                 std::filesystem::create_directories(full_path, ec);
                 if (!ec) {
                     self->m_state_manager->add_dir_to_map(dir_path_str);
+                } else {
+                    g_logger->warn("[Sync] 创建目录失败: {} | {}", dir_path_str, FormatErrorCode(ec));
                 }
             }
         }
@@ -1179,7 +1183,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                         g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
                         should_request = true;
                     } else {
-                        g_logger->error("[Sync] 冲突处理失败 (无法重命名): {}", ren_ec.message());
+                        g_logger->error("[Sync] ❌ 冲突处理失败 (无法重命名): {} | {}", remote_info.path, FormatErrorCode(ren_ec));
                         return;
                     }
                 }
@@ -1242,7 +1246,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                 self->m_state_manager->remove_path_from_map(relative_path_str);
             } else {
                 if (ec != std::errc::no_such_file_or_directory) {
-                    g_logger->error("[Sync] -> 删除失败: {} Error: {}", relative_path_str, ec.message());
+                    g_logger->error("[Sync] ❌ 删除文件失败: {} | {}", relative_path_str, FormatErrorCode(ec));
                 } else {
                     g_logger->info("[Sync] -> 本地文件已不存在, 无需操作: {}", relative_path_str);
                     self->m_state_manager->remove_path_from_map(relative_path_str);
@@ -1287,7 +1291,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerContext* 
                 g_logger->info("[Sync] -> 已创建目录: {}", relative_path_str);
                 self->m_state_manager->add_dir_to_map(relative_path_str);
             } else if (ec) {
-                g_logger->error("[Sync] -> 创建目录失败: {} Error: {}", relative_path_str, ec.message());
+                g_logger->error("[Sync] ❌ 创建目录失败: {} | {}", relative_path_str, FormatErrorCode(ec));
             }
         });
     }
@@ -1337,7 +1341,7 @@ void P2PManager::handle_file_request(const nlohmann::json& payload, PeerContext*
                 self->m_state_manager->remove_dir_from_map(relative_path_str);
             } else {
                 if (ec != std::errc::no_such_file_or_directory) {
-                    g_logger->error("[Sync] -> 删除目录失败: {} Error: {}", relative_path_str, ec.message());
+                    g_logger->error("[Sync] ❌ 删除目录失败: {} | {}", relative_path_str, FormatErrorCode(ec));
                 } else {
                     self->m_state_manager->remove_dir_from_map(relative_path_str);
                 }

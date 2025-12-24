@@ -1,11 +1,11 @@
-#include "VeritasSync/Database.h"
+#include "VeritasSync/storage/Database.h"
 
 #include <sqlite3.h>
 
 #include <iostream>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 

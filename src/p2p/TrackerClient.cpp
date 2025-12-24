@@ -1,12 +1,12 @@
-﻿#include "VeritasSync/TrackerClient.h"
+#include "VeritasSync/p2p/TrackerClient.h"
 
 #include <boost/asio/detail/socket_ops.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/P2PManager.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/p2p/P2PManager.h"
 
 namespace VeritasSync {
 

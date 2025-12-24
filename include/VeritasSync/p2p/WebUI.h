@@ -24,13 +24,13 @@
 #include <thread>
 #include <vector>
 
-#include "VeritasSync/EncodingUtils.h"
+#include "VeritasSync/common/EncodingUtils.h"
 
 // 【移除】不再包含嵌入资源头文件
 // #include "embedded_resources.h"
 
-#include "VeritasSync/Config.h"
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/Config.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 

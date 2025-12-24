@@ -1,4 +1,4 @@
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/Logger.h"
 
 #include <spdlog/async.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -11,11 +11,16 @@ namespace VeritasSync {
 std::shared_ptr<spdlog::logger> g_logger;
 
 void init_logger() {
+    // 幂等性检查：如果已经初始化过，直接返回
+    if (g_logger) {
+        return;
+    }
+    
     try {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_level(spdlog::level::warn);
+        console_sink->set_level(spdlog::level::info);  // 调试级别: info
         auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", 1024 * 1024 * 5, 3);
-        file_sink->set_level(spdlog::level::warn);
+        file_sink->set_level(spdlog::level::info);     // 调试级别: info
 
         spdlog::init_thread_pool(8192, 1);
 
@@ -23,14 +28,15 @@ void init_logger() {
             std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},
                                                    spdlog::thread_pool(), spdlog::async_overflow_policy::block);
 
-        g_logger->set_level(spdlog::level::warn);
-        g_logger->flush_on(spdlog::level::warn);
+        g_logger->set_level(spdlog::level::info);      // 调试级别: info
+        g_logger->flush_on(spdlog::level::info);       // info 级别就刷新
 
         spdlog::register_logger(g_logger);
         spdlog::set_default_logger(g_logger);
     } catch (const spdlog::spdlog_ex& ex) {
         std::cerr << "Log initialization failed: " << ex.what() << std::endl;
-        exit(1);
+        // 在测试环境中不应该退出，改为静默处理
+        // exit(1);
     }
 }
 }  // namespace VeritasSync

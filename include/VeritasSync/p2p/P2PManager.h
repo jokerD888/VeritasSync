@@ -1,4 +1,4 @@
-﻿
+
 #pragma once
 #include <ikcp.h>
 #include <juice/juice.h>
@@ -18,17 +18,18 @@
 #include <thread>
 #include <vector>
 
-#include "VeritasSync/Config.h"
-#include "VeritasSync/CryptoLayer.h"
-#include "VeritasSync/Protocol.h"
-#include "VeritasSync/TransferManager.h"
+#include "VeritasSync/common/Config.h"
+#include "VeritasSync/common/CryptoLayer.h"
+#include "VeritasSync/sync/Protocol.h"
+#include "VeritasSync/sync/TransferManager.h"
 
 // --- miniupnpc 头文件 ---
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
 // --------------------------
 
-#include "VeritasSync/Protocol.h"
+
+#include "VeritasSync/sync/Protocol.h"
 
 namespace VeritasSync {
 

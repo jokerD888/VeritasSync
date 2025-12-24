@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <boost/asio/io_context.hpp>
 #include <filesystem>
@@ -10,9 +10,9 @@
 #include <string>
 #include <unordered_set>
 
-#include "VeritasSync/Database.h"
-#include "VeritasSync/FileFilter.h"
-#include "VeritasSync/Protocol.h"
+#include "VeritasSync/storage/Database.h"
+#include "VeritasSync/storage/FileFilter.h"
+#include "VeritasSync/sync/Protocol.h"
 
 namespace efsw {
     class FileWatcher;

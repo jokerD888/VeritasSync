@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <fstream>
 
-#include "VeritasSync/Hashing.h"
+#include "VeritasSync/common/Hashing.h"
 
 using namespace VeritasSync;
 

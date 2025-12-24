@@ -1,16 +1,16 @@
-﻿#include <atomic>
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
-#include "VeritasSync/Config.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/P2PManager.h"  // 如果这里需要引用类型定义
-#include "VeritasSync/SyncNode.h"    // 引入新类
-#include "VeritasSync/TrayIcon.h"
-#include "VeritasSync/WebUI.h"
+#include "VeritasSync/common/Config.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/p2p/P2PManager.h"  // 如果这里需要引用类型定义
+#include "VeritasSync/sync/SyncNode.h"    // 引入新类
+#include "VeritasSync/common/TrayIcon.h"
+#include "VeritasSync/p2p/WebUI.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN

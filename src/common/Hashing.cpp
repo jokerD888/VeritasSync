@@ -1,4 +1,4 @@
-﻿    #include "VeritasSync/Hashing.h"
+    #include "VeritasSync/common/Hashing.h"
 
 #include <openssl/sha.h>
 
@@ -10,7 +10,8 @@
 #include <thread>  // 用于 sleep
 #include <vector>
 
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 
@@ -30,24 +31,18 @@ namespace VeritasSync {
 
         // --- 处理文件锁定的重试逻辑 ---
         if (!file.is_open()) {
-            // 使用 logger 替换 std::cerr
+            std::string sys_err = GetLastSystemError();
             if (g_logger) {
-                g_logger->warn("[Hashing] 无法立即打开文件 (可能被锁定): {}. 250ms 后重试...", filePath.string());
-            } else {
-                std::cerr << "[Hashing] 无法立即打开文件 (可能被锁定): "
-                    << filePath.string() << ". 250ms 后重试..." << std::endl;
+                g_logger->warn("[Hashing] ⚠️ 文件被锁定, 250ms 后重试: {} | {}", PathToUtf8(filePath), sys_err);
             }
 
-            // 等待 250 毫秒
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            // 再次尝试打开
             file.open(filePath, std::ios::binary);
 
             if (!file.is_open()) {
+                std::string sys_err2 = GetLastSystemError();
                 if (g_logger) {
-                    g_logger->error("[Hashing] 无法打开文件 (重试后): {}", filePath.string());
-                } else {
-                    std::cerr << "[Hashing] 无法打开文件 (重试后): " << filePath.string() << std::endl;
+                    g_logger->error("[Hashing] ❌ 无法打开文件(重试后失败): {} | {}", PathToUtf8(filePath), sys_err2);
                 }
                 return "";  // 放弃
             }

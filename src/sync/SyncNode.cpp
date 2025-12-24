@@ -1,13 +1,13 @@
-#include "VeritasSync/SyncNode.h"
+#include "VeritasSync/sync/SyncNode.h"
 
 #include <filesystem>
 #include <iostream>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/P2PManager.h"
-#include "VeritasSync/StateManager.h"
-#include "VeritasSync/TrackerClient.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/p2p/P2PManager.h"
+#include "VeritasSync/storage/StateManager.h"
+#include "VeritasSync/p2p/TrackerClient.h"
 
 namespace VeritasSync {
 

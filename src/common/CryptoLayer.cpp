@@ -1,4 +1,4 @@
-#include "VeritasSync/CryptoLayer.h"
+#include "VeritasSync/common/CryptoLayer.h"
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-#include "VeritasSync/Logger.h"
+#include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 

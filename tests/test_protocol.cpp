@@ -2,8 +2,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "VeritasSync/Config.h"
-#include "VeritasSync/Protocol.h"
+#include "VeritasSync/common/Config.h"
+#include "VeritasSync/sync/Protocol.h"
 
 using namespace VeritasSync;
 using json = nlohmann::json;

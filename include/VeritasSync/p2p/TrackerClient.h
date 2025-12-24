@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp>

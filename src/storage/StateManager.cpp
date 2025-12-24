@@ -1,14 +1,14 @@
-﻿#include "VeritasSync/StateManager.h"
+#include "VeritasSync/storage/StateManager.h"
 
 #include <boost/asio.hpp>
 #include <efsw/efsw.hpp>
 #include <iostream>
 #include <thread>
 
-#include "VeritasSync/EncodingUtils.h"
-#include "VeritasSync/Hashing.h"
-#include "VeritasSync/Logger.h"
-#include "VeritasSync/P2PManager.h"
+#include "VeritasSync/common/EncodingUtils.h"
+#include "VeritasSync/common/Hashing.h"
+#include "VeritasSync/common/Logger.h"
+#include "VeritasSync/p2p/P2PManager.h"
 
 namespace VeritasSync {
 
@@ -80,7 +80,11 @@ namespace VeritasSync {
           m_sync_key(sync_key) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
-            std::filesystem::create_directory(m_root_path);
+            std::error_code ec;
+            std::filesystem::create_directory(m_root_path, ec);
+            if (ec) {
+                g_logger->error("[StateManager] ❌ 创建根目录失败: {} | {}", PathToUtf8(m_root_path), FormatErrorCode(ec));
+            }
         }
 
         // --- 初始化数据库 ---
