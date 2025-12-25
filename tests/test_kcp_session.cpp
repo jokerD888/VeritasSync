@@ -218,10 +218,10 @@ TEST_F(KcpSessionTest, TwoWayCommunication) {
     ASSERT_NE(session_b, nullptr);
     
     // A 发送消息给 B
-    session_a->send("Hello from A");
+    session_a->send(std::string("Hello from A"));
     
     // B 发送消息给 A
-    session_b->send("Hello from B");
+    session_b->send(std::string("Hello from B"));
     
     // 模拟网络传输和 KCP 更新循环
     for (int i = 0; i < 50; ++i) {

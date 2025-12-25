@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -9,6 +10,7 @@
 #include <set>
 #include <string>
 #include <unordered_set>
+#include <atomic>
 
 #include "VeritasSync/storage/Database.h"
 #include "VeritasSync/storage/FileFilter.h"

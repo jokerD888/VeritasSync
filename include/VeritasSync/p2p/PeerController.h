@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 
 #include <boost/asio/steady_timer.hpp>
@@ -105,6 +106,13 @@ public:
      * @return KCP waitsnd 值（用于流控）
      */
     int send_message(const char* data, size_t size);
+    
+    /**
+     * @brief 发送应用层消息 (span 版本)
+     */
+    int send_message(std::span<const char> data) {
+        return send_message(data.data(), data.size());
+    }
     
     /**
      * @brief 发送字符串消息

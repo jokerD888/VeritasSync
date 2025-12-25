@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -90,6 +91,13 @@ public:
     int input(const char* data, size_t size);
     
     /**
+     * @brief 输入底层收到的数据 (span 版本)
+     */
+    int input(std::span<const char> data) {
+        return input(data.data(), data.size());
+    }
+    
+    /**
      * @brief 发送应用层消息
      * 
      * KCP 会自动切片、重传，确保可靠到达
@@ -99,6 +107,13 @@ public:
      * @return 0 成功，其他失败
      */
     int send(const char* data, size_t size);
+    
+    /**
+     * @brief 发送应用层消息 (span 版本)
+     */
+    int send(std::span<const char> data) {
+        return send(data.data(), data.size());
+    }
     
     /**
      * @brief 发送字符串消息

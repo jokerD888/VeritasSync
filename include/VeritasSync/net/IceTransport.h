@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 
 namespace VeritasSync {
@@ -140,6 +141,13 @@ public:
      * @return 发送成功返回 0
      */
     int send(const char* data, size_t size);
+    
+    /**
+     * @brief 发送数据 (span 版本)
+     */
+    int send(std::span<const char> data) {
+        return send(data.data(), data.size());
+    }
     
     /**
      * @brief 获取当前状态

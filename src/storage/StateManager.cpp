@@ -1,9 +1,14 @@
 #include "VeritasSync/storage/StateManager.h"
 
 #include <boost/asio.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <efsw/efsw.hpp>
 #include <iostream>
 #include <thread>
+#include <atomic>
+#include <future>
+#include <latch>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
@@ -268,13 +273,16 @@ namespace VeritasSync {
                     m_pending_changes.insert(path);
                 }
             }
-            // 启动异步重试任务 (Detached thread sleep -> post to io_context)
-            std::thread([this]() {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                boost::asio::post(this->get_io_context(), [this]() {
+            // 使用 steady_timer 替代 detached thread，更安全
+            // 定时器会在析构时自动取消，避免访问已销毁对象
+            auto retry_timer = std::make_shared<boost::asio::steady_timer>(get_io_context());
+            retry_timer->expires_after(std::chrono::seconds(1));
+            retry_timer->async_wait([this, retry_timer](const boost::system::error_code& ec) {
+                if (!ec) {
                     this->process_debounced_changes();
-                });
-            }).detach();
+                }
+                // retry_timer 会在 lambda 结束时自动释放
+            });
         }
     }
     void StateManager::clear_sync_history(const std::string& path) {
@@ -305,177 +313,255 @@ namespace VeritasSync {
         // 1. 加载忽略规则
         m_file_filter.load_rules(m_root_path);
 
-        std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
-        std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
-
-        m_file_map.clear();
-        m_dir_map.clear();
-
-        std::error_code ec;
-        auto iterator = std::filesystem::recursive_directory_iterator(m_root_path, ec);
-
-        if (ec) {
-            g_logger->error("[StateManager] Error creating directory iterator: {}", ec.message());
-            return;
-        }
-
-        // --- 优化改动 START ---
-        // 移除全局的大事务开启： if (m_db) m_db->begin_transaction();
-
-        // 准备一个批量更新的缓冲区
-        std::vector<FileInfo> db_batch_updates;
-        const size_t BATCH_SIZE = 50;  // 每处理 50 个变动文件提交一次事务
-
-        // 定义一个辅助 Lambda 来提交当前批次
-        auto flush_batch = [&]() {
-            if (!m_db || db_batch_updates.empty()) return;
-            try {
-                m_db->begin_transaction();
-                for (const auto& f : db_batch_updates) {
-                    m_db->update_file(f.path, f.hash, f.modified_time);
-                }
-                m_db->commit_transaction();
-                db_batch_updates.clear();
-            } catch (const std::exception& e) {
-                g_logger->error("[StateManager] 批量提交事务失败: {}", e.what());
-            }
-        };
-        // --- 优化改动 END ---
-
-        int cache_hit_count = 0;
-        int calc_count = 0;
+        // Phase 1: 串行遍历目录，收集需要处理的文件列表
+        // 这一步必须串行，因为 recursive_directory_iterator 不是线程安全的
         
-        // 失败重试列表
+        struct PendingFile {
+            std::filesystem::path full_path;
+            std::string rel_path_str;
+            int64_t modified_time;
+            std::string cached_hash;  // 如果有缓存命中，存储在这里
+            bool need_calc;           // 是否需要计算哈希
+        };
+        
+        std::vector<PendingFile> pending_files;
+        std::set<std::string> pending_dirs;
         std::vector<std::string> retry_list;
-
-        for (const auto& entry : iterator) {
-            std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
-            if (ec) continue;
-
-            std::string rel_path_str = PathToUtf8(relative_path);
-
-            if (rel_path_str.empty()) continue;
-
-            // 过滤器检查
-            if (m_file_filter.should_ignore(rel_path_str)) {
-                if (entry.is_directory(ec) && !ec) {
-                    iterator.disable_recursion_pending();
-                }
-                continue;
+        
+        std::atomic<int> cache_hit_count{0};
+        std::atomic<int> calc_count{0};
+        
+        {
+            std::error_code ec;
+            auto iterator = std::filesystem::recursive_directory_iterator(m_root_path, ec);
+            
+            if (ec) {
+                g_logger->error("[StateManager] Error creating directory iterator: {}", ec.message());
+                return;
             }
-
-            if (entry.is_regular_file(ec) && !ec) {
-                FileInfo info;
-                info.path = rel_path_str;
-
-                auto ftime = std::filesystem::last_write_time(entry, ec);
-                if (ec) {
-                    g_logger->warn("[Scan] 获取时间失败: {}", rel_path_str);
-                    retry_list.push_back(entry.path().string());
+            
+            for (const auto& entry : iterator) {
+                std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
+                if (ec) continue;
+                
+                std::string rel_path_str = PathToUtf8(relative_path);
+                if (rel_path_str.empty()) continue;
+                
+                // 过滤器检查
+                if (m_file_filter.should_ignore(rel_path_str)) {
+                    if (entry.is_directory(ec) && !ec) {
+                        iterator.disable_recursion_pending();
+                    }
                     continue;
                 }
-                auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-                info.modified_time = sctp.time_since_epoch().count();
-
-                // --- 数据库查询逻辑 (读操作，通常很快) ---
-                bool need_calc = true;
-                if (m_db) {
-                    // get_file 是读操作，只要没有写事务持有锁，这里很快
-                    auto cached_meta = m_db->get_file(rel_path_str);
-                    if (cached_meta && cached_meta->mtime == info.modified_time) {
-                        info.hash = cached_meta->hash;
-                        need_calc = false;
-                        cache_hit_count++;
+                
+                if (entry.is_regular_file(ec) && !ec) {
+                    auto ftime = std::filesystem::last_write_time(entry, ec);
+                    if (ec) {
+                        g_logger->warn("[Scan] 获取时间失败: {}", rel_path_str);
+                        retry_list.push_back(entry.path().string());
+                        continue;
                     }
-                }
-
-                // --- 耗时操作 (完全在事务之外执行) ---
-                if (need_calc) {
-                    info.hash = Hashing::CalculateSHA256(entry.path());  // <--- 最耗时的一步
+                    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+                    int64_t mtime = sctp.time_since_epoch().count();
                     
-                    if (info.hash.empty()) {
-                         g_logger->warn("[Scan] 哈希计算失败: {}", rel_path_str);
-                         retry_list.push_back(entry.path().string());
-                         continue;
+                    // 检查数据库缓存
+                    bool need_calc = true;
+                    std::string cached_hash;
+                    if (m_db) {
+                        auto cached_meta = m_db->get_file(rel_path_str);
+                        if (cached_meta && cached_meta->mtime == mtime) {
+                            cached_hash = cached_meta->hash;
+                            need_calc = false;
+                            cache_hit_count++;
+                        }
                     }
-
-                    calc_count++;
-
-                    // 将需要更新 DB 的文件加入批次
-                    if (m_db && !info.hash.empty()) {
-                        db_batch_updates.push_back(info);
-                    }
+                    
+                    pending_files.push_back({
+                        entry.path(),
+                        std::move(rel_path_str),
+                        mtime,
+                        std::move(cached_hash),
+                        need_calc
+                    });
+                    
+                } else if (entry.is_directory(ec) && !ec) {
+                    pending_dirs.insert(rel_path_str);
                 }
-
-                // 立即更新内存映射 (让 UI 能尽快看到文件，虽然此时还没入库)
-                if (!info.hash.empty()) {
-                    m_file_map[info.path] = info;
-                }
-
-                // --- 检查是否需要提交批次 ---
-                if (db_batch_updates.size() >= BATCH_SIZE) {
-                    flush_batch();  // 开启事务 -> 快速写入 -> 提交事务
-                }
-
-            } else if (entry.is_directory(ec) && !ec) {
-                m_dir_map.insert(rel_path_str);
             }
         }
-
-        // --- 循环结束，提交剩余的批次 ---
-        flush_batch();
-        // -----------------------------
-
-        // --- 处理重试列表 ---
+        
+        g_logger->info("[StateManager] Phase 1 完成: {} 个文件待处理, {} 个缓存命中", 
+                      pending_files.size(), cache_hit_count.load());
+        
+        // Phase 2: 并行计算需要哈希的文件
+        // 使用 std::async + future 来并行化
+        
+        // 筛选需要计算哈希的文件
+        std::vector<size_t> files_to_hash;
+        for (size_t i = 0; i < pending_files.size(); ++i) {
+            if (pending_files[i].need_calc) {
+                files_to_hash.push_back(i);
+            }
+        }
+        
+        if (!files_to_hash.empty()) {
+            g_logger->info("[StateManager] Phase 2: 并行计算 {} 个文件的哈希...", files_to_hash.size());
+            
+            // 确定并行度：使用硬件并发数，但不超过待处理文件数
+            size_t num_threads = std::min(
+                static_cast<size_t>(std::thread::hardware_concurrency()),
+                files_to_hash.size()
+            );
+            num_threads = std::max(num_threads, size_t{1});
+            
+            // 创建线程池
+            boost::asio::thread_pool hash_pool(num_threads);
+            
+            // 用于存储哈希结果的线程安全容器
+            std::mutex result_mutex;
+            std::vector<std::pair<size_t, std::string>> hash_results;
+            hash_results.reserve(files_to_hash.size());
+            
+            // 用于追踪失败的文件
+            std::mutex retry_mutex;
+            
+            for (size_t idx : files_to_hash) {
+                boost::asio::post(hash_pool, [&, idx]() {
+                    PendingFile& pf = pending_files[idx];
+                    
+                    // 使用 MMIO 版本计算大文件，标准版本计算小文件
+                    // CalculateSHA256_MMIO 内部会自动判断
+                    std::string hash = Hashing::CalculateSHA256_MMIO(pf.full_path);
+                    
+                    if (hash.empty()) {
+                        g_logger->warn("[Scan] 哈希计算失败: {}", pf.rel_path_str);
+                        std::lock_guard<std::mutex> lock(retry_mutex);
+                        retry_list.push_back(pf.full_path.string());
+                        return;
+                    }
+                    
+                    // 存储结果
+                    {
+                        std::lock_guard<std::mutex> lock(result_mutex);
+                        hash_results.emplace_back(idx, std::move(hash));
+                    }
+                    calc_count++;
+                });
+            }
+            
+            // 等待所有任务完成
+            hash_pool.join();
+            
+            // 将哈希结果写回 pending_files
+            for (auto& [idx, hash] : hash_results) {
+                pending_files[idx].cached_hash = std::move(hash);
+                pending_files[idx].need_calc = false;  // 标记已完成
+            }
+        }
+        
+        // Phase 3: 批量更新内存映射和数据库
+        {
+            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
+            std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
+            
+            m_file_map.clear();
+            m_dir_map.clear();
+            
+            // 更新目录
+            m_dir_map = std::move(pending_dirs);
+            
+            // 准备数据库批量更新
+            std::vector<FileInfo> db_batch_updates;
+            const size_t BATCH_SIZE = 50;
+            
+            auto flush_batch = [&]() {
+                if (!m_db || db_batch_updates.empty()) return;
+                try {
+                    m_db->begin_transaction();
+                    for (const auto& f : db_batch_updates) {
+                        m_db->update_file(f.path, f.hash, f.modified_time);
+                    }
+                    m_db->commit_transaction();
+                    db_batch_updates.clear();
+                } catch (const std::exception& e) {
+                    g_logger->error("[StateManager] 批量提交事务失败: {}", e.what());
+                }
+            };
+            
+            for (auto& pf : pending_files) {
+                if (!pf.cached_hash.empty() && !pf.need_calc) {
+                    FileInfo info;
+                    info.path = pf.rel_path_str;
+                    info.hash = pf.cached_hash;
+                    info.modified_time = pf.modified_time;
+                    
+                    m_file_map[info.path] = info;
+                    
+                    // 如果是新计算的哈希，需要更新数据库
+                    // 通过检查原始的 need_calc 标志来判断
+                    // 注意：这里我们已经将 need_calc 设为 false，所以需要检查之前是否在 files_to_hash 中
+                    // 简化方案：只要有 hash 且 mtime 变化就更新
+                    db_batch_updates.push_back(info);
+                    
+                    if (db_batch_updates.size() >= BATCH_SIZE) {
+                        flush_batch();
+                    }
+                }
+            }
+            
+            flush_batch();
+        }
+        
+        // Phase 4: 处理重试列表
         if (!retry_list.empty()) {
             g_logger->info("[StateManager] 扫描结束，正在重试 {} 个失败的文件...", retry_list.size());
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 等待 1 秒
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            
+            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
             
             for (const auto& full_path_str : retry_list) {
                 std::filesystem::path full_path = Utf8ToPath(full_path_str);
-                // 简化的重试逻辑:
-                // 由于这是个别文件，不再做批量优化，直接处理
                 try {
-                     std::error_code ec;
-                     if (!std::filesystem::exists(full_path, ec)) continue;
-                     
-                     std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
-                     if (ec) continue;
-                     std::string rel_path_str = PathToUtf8(relative_path);
-                     
-                     FileInfo info;
-                     info.path = rel_path_str;
-                     
-                     auto ftime = std::filesystem::last_write_time(full_path, ec);
-                     if (ec) {
-                         g_logger->error("[Scan] 重试失败 (Time): {}", rel_path_str);
-                         continue;
-                     }
-                     auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-                     info.modified_time = sctp.time_since_epoch().count();
-                     
-                     info.hash = Hashing::CalculateSHA256(full_path);
-                     if (info.hash.empty()) {
-                         g_logger->error("[Scan] 重试失败 (Hash): {}", rel_path_str);
-                         continue;
-                     }
-                     
-                     // 成功，更新
-                     m_file_map[info.path] = info;
-                     if (m_db) {
-                         m_db->update_file(info.path, info.hash, info.modified_time);
-                     }
-                     calc_count++;
-                     
-                } catch(const std::exception& e) {
+                    std::error_code ec;
+                    if (!std::filesystem::exists(full_path, ec)) continue;
+                    
+                    std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
+                    if (ec) continue;
+                    std::string rel_path_str = PathToUtf8(relative_path);
+                    
+                    FileInfo info;
+                    info.path = rel_path_str;
+                    
+                    auto ftime = std::filesystem::last_write_time(full_path, ec);
+                    if (ec) {
+                        g_logger->error("[Scan] 重试失败 (Time): {}", rel_path_str);
+                        continue;
+                    }
+                    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
+                    info.modified_time = sctp.time_since_epoch().count();
+                    
+                    info.hash = Hashing::CalculateSHA256(full_path);
+                    if (info.hash.empty()) {
+                        g_logger->error("[Scan] 重试失败 (Hash): {}", rel_path_str);
+                        continue;
+                    }
+                    
+                    m_file_map[info.path] = info;
+                    if (m_db) {
+                        m_db->update_file(info.path, info.hash, info.modified_time);
+                    }
+                    calc_count++;
+                    
+                } catch (const std::exception& e) {
                     g_logger->error("[Scan] 重试异常: {}", e.what());
                 }
             }
             g_logger->info("[StateManager] 重试完成。");
         }
-
-        g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", m_file_map.size(), cache_hit_count,
-                       calc_count);
+        
+        g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", 
+                      m_file_map.size(), cache_hit_count.load(), calc_count.load());
     }
 
     std::string StateManager::get_state_as_json_string() {

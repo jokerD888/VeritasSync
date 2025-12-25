@@ -3,6 +3,10 @@
 
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
+#include <vector>
+#include <future>
+#include <chrono>
 
 #include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/common/Logger.h"
@@ -211,3 +215,199 @@ TEST_F(CryptoLayerTest, SameKeyProducesSameDecryption) {
     
     EXPECT_EQ(decrypted, plaintext);
 }
+
+// =====================================================
+// 移动语义测试 (新增优化相关)
+// =====================================================
+
+TEST_F(CryptoLayerTest, MoveConstruction) {
+    CryptoLayer source;
+    source.set_key("test_key");
+    std::string plaintext = "Move test";
+    
+    // 加密一些数据
+    std::string ciphertext = source.encrypt(plaintext);
+    ASSERT_FALSE(ciphertext.empty());
+    
+    // 移动构造
+    CryptoLayer target(std::move(source));
+    
+    // 目标应该能正常工作
+    EXPECT_TRUE(target.has_key());
+    std::string decrypted = target.decrypt(ciphertext);
+    EXPECT_EQ(decrypted, plaintext);
+}
+
+TEST_F(CryptoLayerTest, MoveAssignment) {
+    CryptoLayer source;
+    source.set_key("source_key");
+    std::string plaintext = "Assignment test";
+    std::string ciphertext = source.encrypt(plaintext);
+    
+    CryptoLayer target;
+    target = std::move(source);
+    
+    EXPECT_TRUE(target.has_key());
+    std::string decrypted = target.decrypt(ciphertext);
+    EXPECT_EQ(decrypted, plaintext);
+}
+
+// =====================================================
+// 多线程安全性测试 (新增优化相关)
+// =====================================================
+
+TEST_F(CryptoLayerTest, ThreadSafety_ConcurrentEncrypt) {
+    // 测试并发加密是否安全
+    const int NUM_THREADS = 10;
+    const int OPS_PER_THREAD = 100;
+    
+    std::vector<std::future<bool>> futures;
+    std::string plaintext = "Concurrent encryption test";
+    
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        futures.push_back(std::async(std::launch::async, [&]() {
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                std::string ciphertext = crypto.encrypt(plaintext);
+                if (ciphertext.empty()) return false;
+                
+                std::string decrypted = crypto.decrypt(ciphertext);
+                if (decrypted != plaintext) return false;
+            }
+            return true;
+        }));
+    }
+    
+    for (auto& f : futures) {
+        EXPECT_TRUE(f.get());
+    }
+}
+
+TEST_F(CryptoLayerTest, ThreadSafety_ConcurrentDecrypt) {
+    // 先加密一些数据
+    std::vector<std::string> ciphertexts;
+    std::string plaintext = "Concurrent decryption test";
+    for (int i = 0; i < 100; ++i) {
+        ciphertexts.push_back(crypto.encrypt(plaintext));
+    }
+    
+    // 并发解密
+    const int NUM_THREADS = 10;
+    std::vector<std::future<bool>> futures;
+    
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        futures.push_back(std::async(std::launch::async, [&, t]() {
+            for (int i = 0; i < 100; ++i) {
+                int idx = (t * 10 + i) % ciphertexts.size();
+                std::string decrypted = crypto.decrypt(ciphertexts[idx]);
+                if (decrypted != plaintext) return false;
+            }
+            return true;
+        }));
+    }
+    
+    for (auto& f : futures) {
+        EXPECT_TRUE(f.get());
+    }
+}
+
+TEST_F(CryptoLayerTest, ThreadSafety_MixedOperations) {
+    // 混合读写操作
+    const int NUM_THREADS = 8;
+    std::atomic<int> success_count{0};
+    std::atomic<int> failure_count{0};
+    std::string plaintext = "Mixed operations test";
+    
+    std::vector<std::thread> threads;
+    
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < 50; ++i) {
+                std::string ciphertext = crypto.encrypt(plaintext);
+                std::string decrypted = crypto.decrypt(ciphertext);
+                
+                if (decrypted == plaintext) {
+                    success_count++;
+                } else {
+                    failure_count++;
+                }
+            }
+        });
+    }
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+    
+    EXPECT_EQ(failure_count.load(), 0);
+    EXPECT_EQ(success_count.load(), NUM_THREADS * 50);
+}
+
+// =====================================================
+// 性能测试 (新增优化相关)
+// =====================================================
+
+TEST_F(CryptoLayerTest, Performance_ManySmallMessages) {
+    // 测试大量小消息的加解密性能
+    std::string plaintext = "Short message";
+    const int NUM_ITERATIONS = 1000;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        std::string ciphertext = crypto.encrypt(plaintext);
+        std::string decrypted = crypto.decrypt(ciphertext);
+        ASSERT_EQ(decrypted, plaintext);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    std::cout << "[Performance] " << NUM_ITERATIONS << " small messages in " << duration << "ms\n";
+    
+    // 应该在合理时间内完成 (< 5 秒)
+    EXPECT_LT(duration, 5000);
+}
+
+TEST_F(CryptoLayerTest, Performance_LargeData) {
+    // 测试大数据块的加解密性能
+    std::string plaintext(10 * 1024 * 1024, 'X');  // 10MB
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    std::string ciphertext = crypto.encrypt(plaintext);
+    std::string decrypted = crypto.decrypt(ciphertext);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    EXPECT_EQ(decrypted, plaintext);
+    
+    std::cout << "[Performance] 10MB data in " << duration << "ms\n";
+    
+    // 应该在合理时间内完成 (< 2 秒)
+    EXPECT_LT(duration, 2000);
+}
+
+// =====================================================
+// 密钥重置测试
+// =====================================================
+
+TEST_F(CryptoLayerTest, KeyReset_InvalidatesOldCiphertext) {
+    std::string plaintext = "Key reset test";
+    std::string ciphertext = crypto.encrypt(plaintext);
+    
+    // 验证可以解密
+    EXPECT_EQ(crypto.decrypt(ciphertext), plaintext);
+    
+    // 重置密钥
+    crypto.set_key("new_different_key");
+    
+    // 旧密文应该无法解密
+    std::string result = crypto.decrypt(ciphertext);
+    EXPECT_TRUE(result.empty() || result != plaintext);
+    
+    // 但新加密的数据应该能正常工作
+    std::string new_ciphertext = crypto.encrypt(plaintext);
+    EXPECT_EQ(crypto.decrypt(new_ciphertext), plaintext);
+}
+

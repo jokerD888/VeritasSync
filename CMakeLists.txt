@@ -219,6 +219,8 @@ add_executable(unit_tests
     tests/test_encoding_utils.cpp
     tests/test_file_filter.cpp
     tests/test_kcp_session.cpp
+    tests/test_parallel_scan.cpp
+    tests/test_modern_utils.cpp
     
     # --- 被测试的源文件 ---
     src/sync/SyncManager.cpp 
@@ -240,8 +242,11 @@ target_link_libraries(unit_tests PRIVATE
     nlohmann_json::nlohmann_json
     spdlog::spdlog 
     OpenSSL::Crypto
+    OpenSSL::SSL
     unofficial::sqlite3::sqlite3
     kcp::kcp
+    Boost::system
+    Boost::asio
 )
 
 # 注册测试
