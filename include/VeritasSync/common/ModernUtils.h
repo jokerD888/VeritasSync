@@ -20,6 +20,8 @@ namespace VeritasSync {
 /**
  * @brief 从 std::string 创建 byte span
  */
+ // 利用std::span 实现的一组工具函数，用于实现 高性能，零拷贝的内存视图管理
+
 inline std::span<const std::byte> as_bytes(const std::string& str) {
     return std::as_bytes(std::span{str.data(), str.size()});
 }

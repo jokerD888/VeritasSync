@@ -15,61 +15,47 @@ namespace VeritasSync {
 static const int GCM_IV_LEN = 12;
 static const int GCM_TAG_LEN = 16;
 
-// --- RAII 删除器 ---
-static void evp_ctx_deleter(EVP_CIPHER_CTX* ctx) {
-    if (ctx) {
-        EVP_CIPHER_CTX_free(ctx);
-    }
-}
-
 // --- 构造/析构 ---
-CryptoLayer::CryptoLayer() 
-    : m_encrypt_ctx(nullptr, evp_ctx_deleter)
-    , m_decrypt_ctx(nullptr, evp_ctx_deleter) {
-}
-
+CryptoLayer::CryptoLayer() = default;
 CryptoLayer::~CryptoLayer() = default;
 
 CryptoLayer::CryptoLayer(CryptoLayer&& other) noexcept
-    : m_key(std::move(other.m_key))
-    , m_encrypt_ctx(std::move(other.m_encrypt_ctx))
-    , m_decrypt_ctx(std::move(other.m_decrypt_ctx)) {
+    : m_key(std::move(other.m_key)) {
 }
 
 CryptoLayer& CryptoLayer::operator=(CryptoLayer&& other) noexcept {
     if (this != &other) {
         m_key = std::move(other.m_key);
-        m_encrypt_ctx = std::move(other.m_encrypt_ctx);
-        m_decrypt_ctx = std::move(other.m_decrypt_ctx);
     }
     return *this;
 }
 
-// --- 上下文缓存获取 ---
-EVP_CIPHER_CTX* CryptoLayer::get_encrypt_ctx() const {
-    std::lock_guard<std::mutex> lock(m_ctx_mutex);
-    if (!m_encrypt_ctx) {
-        m_encrypt_ctx.reset(EVP_CIPHER_CTX_new());
-        if (m_encrypt_ctx) {
-            // 预初始化加密算法（不设置 key 和 iv，只设置算法）
-            EVP_EncryptInit_ex(m_encrypt_ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL);
-            EVP_CIPHER_CTX_ctrl(m_encrypt_ctx.get(), EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
-        }
+// --- 性能核心：线程局部缓存实现 ---
+// 使用 thread_local 关键字，每个操作系统线程都会独立拥有一个上下文实例。
+// 生命周期在线程退出时自动结束，彻底解决多线程并发下的“锁竞争”和“频繁分配内存”问题。
+EVP_CIPHER_CTX* CryptoLayer::get_thread_encrypt_ctx() {
+    // std::unique_ptr 的模板参数要求存储一个“删除器对象”。
+    // 如果类型推导为“函数类型”，unique_ptr 内部会尝试声明一个函数成员，这在 C++ 中是非法的（类成员只能是变量或指针）。
+    // 所以，我们在模板参数里写 & 是为了辅助类型推导，确保 unique_ptr 知道它要存的是一个指针。
+    // 而在构造函数参数里，编译器已经知道你要传的是指针，所以它会帮你自动完成转换
+    thread_local std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> 
+        t_encrypt_ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    
+    if (!t_encrypt_ctx) [[unlikely]] {
+        t_encrypt_ctx.reset(EVP_CIPHER_CTX_new());
     }
-    return m_encrypt_ctx.get();
+    
+    return t_encrypt_ctx.get();
 }
 
-EVP_CIPHER_CTX* CryptoLayer::get_decrypt_ctx() const {
-    std::lock_guard<std::mutex> lock(m_ctx_mutex);
-    if (!m_decrypt_ctx) {
-        m_decrypt_ctx.reset(EVP_CIPHER_CTX_new());
-        if (m_decrypt_ctx) {
-            // 预初始化解密算法
-            EVP_DecryptInit_ex(m_decrypt_ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL);
-            EVP_CIPHER_CTX_ctrl(m_decrypt_ctx.get(), EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL);
-        }
+EVP_CIPHER_CTX* CryptoLayer::get_thread_decrypt_ctx() {
+    thread_local std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> 
+        t_decrypt_ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    if (!t_decrypt_ctx) {
+        t_decrypt_ctx.reset(EVP_CIPHER_CTX_new());
     }
-    return m_decrypt_ctx.get();
+    
+    return t_decrypt_ctx.get();
 }
 
 void CryptoLayer::set_key(const std::string& key_string) {
@@ -80,14 +66,9 @@ void CryptoLayer::set_key(const std::string& key_string) {
     SHA256_Final(hash, &sha256);
     m_key.assign(reinterpret_cast<const char*>(hash), SHA256_DIGEST_LENGTH);
     
-    // 重置缓存的上下文，下次使用时重新初始化
-    {
-        std::lock_guard<std::mutex> lock(m_ctx_mutex);
-        m_encrypt_ctx.reset();
-        m_decrypt_ctx.reset();
-    }
-    
-    g_logger->info("[Crypto] 加密密钥已设置 (SHA256 derived).");
+    // 注意：由于使用了 thread_local，这里的密钥更改是全局生效的，
+    // 但上下文状态会在下次 EncryptInit 时由新的密钥覆盖，无需手动重置上下文。
+    g_logger->info("[Crypto] 加密密钥已更新 (SHA256 derived).");
 }
 
 std::string CryptoLayer::encrypt(const std::string& plaintext) const {
@@ -96,132 +77,106 @@ std::string CryptoLayer::encrypt(const std::string& plaintext) const {
         return "";
     }
 
-    // 生成随机 IV
+    // 1. 生成高强度随机 IV
     unsigned char iv[GCM_IV_LEN];
     if (RAND_bytes(iv, sizeof(iv)) != 1) {
         g_logger->error("[Crypto] 加密失败：无法生成 IV。");
         return "";
     }
 
-    // 使用临时上下文以保证线程安全
-    // 注意：虽然有缓存机制，但 GCM 模式每次加密都需要新的 IV，
-    // 所以我们需要重新初始化。优化点在于避免重复分配 CTX 结构本身。
-    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(
-        EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    // 2. 获取线程私有的 CTX (带自愈能力且锁无关)
+    EVP_CIPHER_CTX* ctx = get_thread_encrypt_ctx();
+    if (!ctx) [[unlikely]] return "";
+
+    // 3. 执行加密初始化 (设置算法，设置IV长度，设置密钥，互不干扰，可以整合检查，使用 [[unlikely]] 优化常用分支性能)
+    bool ok = (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1);
+    ok &= (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL) == 1);
+    ok &= (EVP_EncryptInit_ex(ctx, NULL, NULL, 
+                               reinterpret_cast<const unsigned char*>(m_key.c_str()), iv) == 1);
     
-    if (!ctx) {
-        g_logger->error("[Crypto] 加密失败：无法创建上下文。");
+    if (!ok) [[unlikely]] {
+        g_logger->error("[Crypto] 加密引擎初始化失败 (OpenSSL 内部错误)。");
         return "";
     }
 
-    // 初始化加密操作
-    if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) {
-        return "";
-    }
-    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL) != 1) {
-        return "";
-    }
-    if (EVP_EncryptInit_ex(ctx.get(), NULL, NULL, 
-                           reinterpret_cast<const unsigned char*>(m_key.c_str()), iv) != 1) {
-        return "";
+    // 4. 获取/准备线程局部的加密刮刮纸 (减少内存申请与清零开销)
+    thread_local std::vector<unsigned char> t_encrypt_buf;
+    size_t needed_len = plaintext.length() + EVP_MAX_BLOCK_LENGTH;
+    if (t_encrypt_buf.size() < needed_len) [[unlikely]] {
+        t_encrypt_buf.resize(needed_len);
     }
 
+    // 5. 加密数据
     int out_len;
-    // 分配足够的缓冲区：输入长度 + 块大小 (AES block size = 16)
-    std::vector<unsigned char> ciphertext(plaintext.length() + EVP_MAX_BLOCK_LENGTH);
-
-    // 加密数据
-    if (EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &out_len, 
+    if (EVP_EncryptUpdate(ctx, t_encrypt_buf.data(), &out_len, 
                           reinterpret_cast<const unsigned char*>(plaintext.c_str()),
-                          static_cast<int>(plaintext.length())) != 1) {
-        return "";
-    }
+                          static_cast<int>(plaintext.length())) != 1)[[unlikely]] return "";
     int ciphertext_len = out_len;
 
-    // 结束加密
-    if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + out_len, &out_len) != 1) {
-        return "";
-    }
+    if (EVP_EncryptFinal_ex(ctx, t_encrypt_buf.data() + out_len, &out_len) != 1)[[unlikely]] return "";
     ciphertext_len += out_len;
 
-    // 获取 Tag
+    // 6. 获取 GCM Tag (认证签名)
     unsigned char tag[GCM_TAG_LEN];
-    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag) != 1) {
-        return "";
-    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag) != 1)[[unlikely]] return "";
 
-    // 拼接: IV + Ciphertext + Tag
-    std::string final_payload;
-    final_payload.reserve(GCM_IV_LEN + ciphertext_len + GCM_TAG_LEN);
-    final_payload.append(reinterpret_cast<const char*>(iv), GCM_IV_LEN);
-    final_payload.append(reinterpret_cast<const char*>(ciphertext.data()), ciphertext_len);
-    final_payload.append(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
+    // 7. 拼接最终 Payload
+    std::string result;
+    result.reserve(GCM_IV_LEN + ciphertext_len + GCM_TAG_LEN);
+    result.append(reinterpret_cast<const char*>(iv), GCM_IV_LEN);
+    result.append(reinterpret_cast<const char*>(t_encrypt_buf.data()), ciphertext_len);
+    result.append(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
 
-    return final_payload;
+    return result;
 }
 
 std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
-    if (m_key.empty()) {
-        g_logger->error("[Crypto] 解密失败：密钥未设置。");
-        return "";
-    }
+    if (m_key.empty() || ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) return "";
 
-    if (ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) {
-        g_logger->warn("[Crypto] 解密失败：数据包过短 ({} bytes)。", ciphertext.length());
-        return "";
-    }
+    // 1. 拆解数据包 (IV | Ciphertext | Tag)
+    const unsigned char* iv = reinterpret_cast<const unsigned char*>(ciphertext.data());
+    const unsigned char* tag_ptr = reinterpret_cast<const unsigned char*>(
+        ciphertext.data() + ciphertext.length() - GCM_TAG_LEN);
+    const unsigned char* encrypted_data = reinterpret_cast<const unsigned char*>(
+        ciphertext.data() + GCM_IV_LEN);
+    int encrypted_data_len = static_cast<int>(ciphertext.length() - GCM_IV_LEN - GCM_TAG_LEN);
 
-    // 拆解包结构
-    const unsigned char* iv = reinterpret_cast<const unsigned char*>(ciphertext.c_str());
-    const unsigned char* tag =
-        reinterpret_cast<const unsigned char*>(ciphertext.c_str() + ciphertext.length() - GCM_TAG_LEN);
-    const unsigned char* encrypted_data = reinterpret_cast<const unsigned char*>(ciphertext.c_str() + GCM_IV_LEN);
+    // 2. 获取线程私有 CTX
+    EVP_CIPHER_CTX* ctx = get_thread_decrypt_ctx();
+    if (!ctx) [[unlikely]] return "";
 
-    size_t overhead = GCM_IV_LEN + GCM_TAG_LEN;
-    if (ciphertext.length() <= overhead) return "";
-    int encrypted_data_len = static_cast<int>(ciphertext.length() - overhead);
-
-    // 使用独立上下文以保证线程安全
-    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(
-        EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    // 3. 执行解密初始化
+    bool ok = (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1);
+    ok &= (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL) == 1);
+    ok &= (EVP_DecryptInit_ex(ctx, NULL, NULL, 
+                               reinterpret_cast<const unsigned char*>(m_key.c_str()), iv) == 1);
     
-    if (!ctx) {
-        g_logger->error("[Crypto] 解密失败：无法创建上下文。");
+    if (!ok) [[unlikely]] {
+        g_logger->error("[Crypto] 解密引擎初始化失败 (OpenSSL 内部错误)。");
         return "";
     }
 
-    // 初始化解密操作
-    if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) return "";
-    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, GCM_IV_LEN, NULL) != 1) return "";
-    if (EVP_DecryptInit_ex(ctx.get(), NULL, NULL, 
-                           reinterpret_cast<const unsigned char*>(m_key.c_str()), iv) != 1)
-        return "";
+    // 4. 准备线程局部的解密刮刮纸
+    thread_local std::vector<unsigned char> t_decrypt_buf;
+    size_t needed_len = encrypted_data_len + EVP_MAX_BLOCK_LENGTH;
+    if (t_decrypt_buf.size() < needed_len) [[unlikely]] {
+        t_decrypt_buf.resize(needed_len);
+    }
 
+    // 5. 解密数据
     int out_len;
-    // 额外增加缓冲区，防止 OpenSSL 写入越界
-    std::vector<unsigned char> plaintext(encrypted_data_len + EVP_MAX_BLOCK_LENGTH + 32, 0);
-
-    // 解密数据
-    if (EVP_DecryptUpdate(ctx.get(), plaintext.data(), &out_len, encrypted_data, encrypted_data_len) != 1) {
-        g_logger->warn("[Crypto] 解密过程出错。");
-        return "";
-    }
+    if (EVP_DecryptUpdate(ctx, t_decrypt_buf.data(), &out_len, encrypted_data, encrypted_data_len) != 1)[[unlikely]] return "";
     int plaintext_len = out_len;
 
-    // 设置期望的 Tag
-    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, 
-                            const_cast<unsigned char*>(tag)) != 1) {
-        return "";
-    }
+    // 6. 设置预期的验证标签 (Tag)
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, const_cast<unsigned char*>(tag_ptr)) != 1)[[unlikely]] return "";
 
-    // 验证 Tag 并结束解密
-    int ret = EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + out_len, &out_len);
-
-    if (ret > 0) {
+    // 7. 验证签名并完成解密 (这一步极其关键，防止数据篡改)
+    if (EVP_DecryptFinal_ex(ctx, t_decrypt_buf.data() + out_len, &out_len) > 0) {
         plaintext_len += out_len;
-        return std::string(reinterpret_cast<const char*>(plaintext.data()), plaintext_len);
-    } else {
-        g_logger->warn("[Crypto] 解密失败：认证标签不匹配 (数据可能被篡改或密钥错误)。");
+        return std::string(reinterpret_cast<const char*>(t_decrypt_buf.data()), plaintext_len);
+    } else [[unlikely]]{
+        g_logger->warn("[Crypto] ❌ 解密失败：认证标签不匹配。数据可能已被篡改！");
         return "";
     }
 }

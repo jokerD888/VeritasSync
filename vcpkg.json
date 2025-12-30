@@ -15,6 +15,7 @@
         "miniupnpc",
         "gtest",
         "cpp-httplib",
+        "boost-interprocess",
         "sqlite3"
     ]
 }

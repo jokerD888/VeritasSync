@@ -28,44 +28,57 @@ class Database {
 public:
     Database(const std::filesystem::path& db_path);
     ~Database();
+    Database(const Database&) = delete;
+    Database& operator=(const Database&) = delete;
 
-    // 获取文件的元数据
-    // 如果不存在，返回 std::nullopt
-    std::optional<FileMetadata> get_file(const std::string& rel_path);
+    // 获取文件的元数据 (标记为 const，因为不改变 DB 状态)
+    std::optional<FileMetadata> get_file(const std::string& rel_path) const;
+    std::optional<SyncHistory> get_sync_history(const std::string& peer_id, const std::string& path) const;
+    std::string get_last_sent_hash(const std::string& peer_id, const std::string& path) const;
 
     // 更新或插入文件元数据 (Upsert)
     void update_file(const std::string& rel_path, const std::string& hash, int64_t mtime);
-
-    // 删除文件元数据
     void remove_file(const std::string& rel_path);
+    std::vector<std::string> get_all_file_paths() const;
 
-    // 开启/提交事务 (用于批量操作加速)
+    // 开启事务的安全 Guard
+    class TransactionGuard {
+    public:
+        TransactionGuard(Database& db);
+        ~TransactionGuard();
+        void commit();
+    private:
+        Database& m_db;
+        std::unique_lock<std::recursive_mutex> m_lock; // 自动管理锁的生命周期
+        bool m_committed = false;
+    };
+
     void begin_transaction();
     void commit_transaction();
+    void rollback_transaction();
     void update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash);
-    // 获取完整的同步历史（包含时间戳）
-    std::optional<SyncHistory> get_sync_history(const std::string& peer_id, const std::string& path);
-    std::string get_last_sent_hash(const std::string& peer_id, const std::string& path);
     void remove_sync_history(const std::string& path);
 
 private:
     void init_schema();
     void prepare_statements();
-    void finalize_statements();
 
     sqlite3* m_db = nullptr;
     std::string m_db_path;
 
-    sqlite3_stmt* m_stmt_hist_update = nullptr;
-    sqlite3_stmt* m_stmt_hist_get = nullptr;
+    // 使用 RAII 自动管理 SQL 语句资源
+    struct StmtDeleter { void operator()(sqlite3_stmt* s); };
+    using ScopedStmt = std::unique_ptr<sqlite3_stmt, StmtDeleter>;
 
-    // 预编译语句缓存，极大提升性能
-    sqlite3_stmt* m_stmt_get = nullptr;
-    sqlite3_stmt* m_stmt_update = nullptr;
-    sqlite3_stmt* m_stmt_delete = nullptr;
-    sqlite3_stmt* m_stmt_hist_delete = nullptr;
-
-    std::mutex m_mutex;  // 数据库连接通常不是线程安全的，加锁保护
+    ScopedStmt m_stmt_get;
+    ScopedStmt m_stmt_update;
+    ScopedStmt m_stmt_delete;
+    ScopedStmt m_stmt_hist_update;
+    ScopedStmt m_stmt_hist_get;
+    ScopedStmt m_stmt_hist_delete;
+    ScopedStmt m_stmt_get_all_paths;
+    
+    mutable std::recursive_mutex m_mutex; 
 };
 
 }  // namespace VeritasSync

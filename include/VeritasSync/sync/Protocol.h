@@ -44,8 +44,7 @@ namespace VeritasSync {
         static constexpr const char* TYPE_FILE_CHUNK = "file_chunk";
 
         // --- 增量更新所需 ---
-        static constexpr const char* TYPE_FILE_UPDATE =
-            "file_update";  // 文件新增或修改
+        static constexpr const char* TYPE_FILE_UPDATE = "file_update";  // 文件新增或修改
         static constexpr const char* TYPE_FILE_DELETE = "file_delete";  // 文件删除
 
         static constexpr const char* TYPE_DIR_CREATE = "dir_create";  // 目录创建

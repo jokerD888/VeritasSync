@@ -44,11 +44,12 @@ private:
     
     std::string m_key;
     
-    // 缓存的加密/解密上下文（使用 mutable 允许在 const 方法中修改）
-    // 注意：这些上下文在多线程环境中通过 thread_local 实现线程安全
-    mutable std::unique_ptr<EVP_CIPHER_CTX, void(*)(EVP_CIPHER_CTX*)> m_encrypt_ctx;
-    mutable std::unique_ptr<EVP_CIPHER_CTX, void(*)(EVP_CIPHER_CTX*)> m_decrypt_ctx;
-    mutable std::mutex m_ctx_mutex;  // 保护上下文初始化
+    // 性能优化：使用线程局部缓存 (Thread Local Storage)
+    // 理由：EVP_CIPHER_CTX 的创建和销毁非常耗时。
+    // 在多线程环境下，使用一把全局锁会造成严重的性能瓶颈。
+    // 通过 thread_local，每个线程拥有一套自用的加速上下文，彻底消除锁竞争。
+    static EVP_CIPHER_CTX* get_thread_encrypt_ctx();
+    static EVP_CIPHER_CTX* get_thread_decrypt_ctx();
 };
 
 }  // namespace VeritasSync

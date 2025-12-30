@@ -82,7 +82,8 @@ namespace VeritasSync {
                                const std::string& sync_key)
         : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
           m_p2p_manager(&p2p_manager),
-          m_sync_key(sync_key) {
+          m_sync_key(sync_key),
+          m_retry_timer(nullptr) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
             std::error_code ec;
@@ -104,10 +105,17 @@ namespace VeritasSync {
         // -------------------------
 
         if (enable_watcher) {
+            // --- 初始加载忽略规则 ---
+            m_file_filter.load_rules(m_root_path);
+
+            // 初始化重试计时器
+            m_retry_timer = std::make_unique<boost::asio::steady_timer>(get_io_context());
+
             m_file_watcher = std::make_unique<efsw::FileWatcher>();
             m_listener = std::make_unique<UpdateListener>(this);
+            // true表示递归监控
             m_file_watcher->addWatch(m_root_path.string(), m_listener.get(), true);
-            m_file_watcher->watch();
+            m_file_watcher->watch();        // 非阻塞监控
             g_logger->info("[StateManager] 已启动对目录 '{}' 的实时监控 (Source 模式)。", PathToUtf8(m_root_path));
         } else {
             g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用。");
@@ -117,6 +125,11 @@ namespace VeritasSync {
     StateManager::~StateManager() {
         if (m_file_watcher) {
             g_logger->info("[StateManager] 正在停止文件监控...");
+        }
+        
+        // --- 关键：安全关闭异步任务 ---
+        if (m_retry_timer) {
+            m_retry_timer->cancel();
         }
     }
     std::string StateManager::get_base_hash(const std::string& peer_id, const std::string& path) {
@@ -174,14 +187,26 @@ namespace VeritasSync {
 
         std::unordered_set<std::string> failed_changes;
 
-        m_file_filter.load_rules(m_root_path);
-
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
 
+        // --- 优化：按需重载规则 ---
+        // 只有当变动列表中包含 .veritasignore 时才重载正则，避免昂贵的重复编译
+        bool need_reload_filter = false;
+        for (const auto& full_path_str : changes_to_process) {
+            if (full_path_str.find(".veritasignore") != std::string::npos) {
+                need_reload_filter = true;
+                break;
+            }
+        }
+        if (need_reload_filter) {
+            g_logger->info("[StateManager] 检测到忽略规则变动，正在重载...");
+            m_file_filter.load_rules(m_root_path);
+        }
+
         // --- 开启事务 ---
-        // 虽然是增量，但如果一次有几百个文件变动，事务依然能显著加速
-        if (m_db) m_db->begin_transaction();
+        // 使用新实现的 TransactionGuard 替代旧的手动 begin/commit
+        Database::TransactionGuard trans_guard(*m_db); 
 
         for (const auto& full_path_str : changes_to_process) {
             try {
@@ -196,7 +221,7 @@ namespace VeritasSync {
                     continue;
                 }
 
-                const std::u8string u8_path_str = relative_path.u8string();
+                const std::u8string u8_path_str = relative_path.generic_u8string(); // 👈 使用 generic 确保统一使用 '/'
                 std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
 
                 if (m_file_filter.should_ignore(rel_path_str)) {
@@ -219,7 +244,7 @@ namespace VeritasSync {
                         auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                         info.modified_time = sctp.time_since_epoch().count();
 
-                        info.hash = Hashing::CalculateSHA256(full_path);
+                        info.hash = Hashing::CalculateSHA256_MMIO(full_path);
                         if (info.hash.empty()) {
                             g_logger->warn("[StateManager] 哈希计算失败 (可能被锁定) {}. 稍后重试。", rel_path_str);
                             failed_changes.insert(full_path_str);
@@ -262,7 +287,7 @@ namespace VeritasSync {
         }
 
         // --- 提交事务 ---
-        if (m_db) m_db->commit_transaction();
+        trans_guard.commit();
 
         // --- 处理失败重试 ---
         if (!failed_changes.empty()) {
@@ -273,16 +298,9 @@ namespace VeritasSync {
                     m_pending_changes.insert(path);
                 }
             }
-            // 使用 steady_timer 替代 detached thread，更安全
-            // 定时器会在析构时自动取消，避免访问已销毁对象
-            auto retry_timer = std::make_shared<boost::asio::steady_timer>(get_io_context());
-            retry_timer->expires_after(std::chrono::seconds(1));
-            retry_timer->async_wait([this, retry_timer](const boost::system::error_code& ec) {
-                if (!ec) {
-                    this->process_debounced_changes();
-                }
-                // retry_timer 会在 lambda 结束时自动释放
-            });
+            
+            // 使用统一的线程安全重试接口
+            schedule_retry(1);
         }
     }
     void StateManager::clear_sync_history(const std::string& path) {
@@ -322,6 +340,7 @@ namespace VeritasSync {
             int64_t modified_time;
             std::string cached_hash;  // 如果有缓存命中，存储在这里
             bool need_calc;           // 是否需要计算哈希
+            bool is_dirty = false;   // 👈 是否需要写回数据库
         };
         
         std::vector<PendingFile> pending_files;
@@ -343,14 +362,20 @@ namespace VeritasSync {
             for (const auto& entry : iterator) {
                 std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
                 if (ec) continue;
+
+                // 3. 路径标准化
+                // generic_u8string() 确保在 Windows 上也使用 '/'，实现跨平台一致性
+                std::u8string u8_rel_path = relative_path.generic_u8string();
+                std::string rel_path_str(reinterpret_cast<const char*>(u8_rel_path.c_str()), u8_rel_path.length());
                 
-                std::string rel_path_str = PathToUtf8(relative_path);
                 if (rel_path_str.empty()) continue;
                 
-                // 过滤器检查
+                // 4. 子树修剪 (Subtree Pruning) - 关键性能优化
                 if (m_file_filter.should_ignore(rel_path_str)) {
                     if (entry.is_directory(ec) && !ec) {
+                        // 如果当前目录被忽略，直接跳过其内部所有文件的遍历
                         iterator.disable_recursion_pending();
+                        g_logger->debug("[Scan] 修剪目录树: {}", rel_path_str);
                     }
                     continue;
                 }
@@ -367,12 +392,14 @@ namespace VeritasSync {
                     
                     // 检查数据库缓存
                     bool need_calc = true;
+                    bool is_dirty = true;
                     std::string cached_hash;
                     if (m_db) {
                         auto cached_meta = m_db->get_file(rel_path_str);
                         if (cached_meta && cached_meta->mtime == mtime) {
                             cached_hash = cached_meta->hash;
                             need_calc = false;
+                            is_dirty = false; // 命中了且时间戳一致，不脏
                             cache_hit_count++;
                         }
                     }
@@ -382,7 +409,8 @@ namespace VeritasSync {
                         std::move(rel_path_str),
                         mtime,
                         std::move(cached_hash),
-                        need_calc
+                        need_calc,
+                        is_dirty
                     });
                     
                 } else if (entry.is_directory(ec) && !ec) {
@@ -395,7 +423,7 @@ namespace VeritasSync {
                       pending_files.size(), cache_hit_count.load());
         
         // Phase 2: 并行计算需要哈希的文件
-        // 使用 std::async + future 来并行化
+        // 使用线程池 (boost::asio::thread_pool) 并行化计算，避免 std::async 的线程创建开销
         
         // 筛选需要计算哈希的文件
         std::vector<size_t> files_to_hash;
@@ -473,24 +501,21 @@ namespace VeritasSync {
             
             // 准备数据库批量更新
             std::vector<FileInfo> db_batch_updates;
-            const size_t BATCH_SIZE = 50;
+            const size_t BATCH_SIZE = 500; // 调大窗口，平衡性能与锁定时间
             
-            auto flush_batch = [&]() {
-                if (!m_db || db_batch_updates.empty()) return;
-                try {
-                    m_db->begin_transaction();
-                    for (const auto& f : db_batch_updates) {
-                        m_db->update_file(f.path, f.hash, f.modified_time);
-                    }
-                    m_db->commit_transaction();
-                    db_batch_updates.clear();
-                } catch (const std::exception& e) {
-                    g_logger->error("[StateManager] 批量提交事务失败: {}", e.what());
+            auto flush_to_db = [&]() {
+                if (db_batch_updates.empty()) return;
+                // 真正的窗口化提交：在这里开启事务，执行完立即提交释放锁
+                Database::TransactionGuard window_guard(*m_db);
+                for (const auto& f : db_batch_updates) {
+                    m_db->update_file(f.path, f.hash, f.modified_time);
                 }
+                window_guard.commit();
+                db_batch_updates.clear();
             };
-            
+
             for (auto& pf : pending_files) {
-                if (!pf.cached_hash.empty() && !pf.need_calc) {
+                if (!pf.cached_hash.empty()) {
                     FileInfo info;
                     info.path = pf.rel_path_str;
                     info.hash = pf.cached_hash;
@@ -498,66 +523,55 @@ namespace VeritasSync {
                     
                     m_file_map[info.path] = info;
                     
-                    // 如果是新计算的哈希，需要更新数据库
-                    // 通过检查原始的 need_calc 标志来判断
-                    // 注意：这里我们已经将 need_calc 设为 false，所以需要检查之前是否在 files_to_hash 中
-                    // 简化方案：只要有 hash 且 mtime 变化就更新
-                    db_batch_updates.push_back(info);
+                    if (pf.is_dirty) {
+                        db_batch_updates.push_back(info);
+                    }
                     
                     if (db_batch_updates.size() >= BATCH_SIZE) {
-                        flush_batch();
+                        flush_to_db();
                     }
                 }
             }
-            
-            flush_batch();
+            // 提交最后一批不满 BATCH_SIZE 的数据
+            flush_to_db();
         }
         
-        // Phase 4: 处理重试列表
-        if (!retry_list.empty()) {
-            g_logger->info("[StateManager] 扫描结束，正在重试 {} 个失败的文件...", retry_list.size());
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        // Phase 4: 清理数据库中的僵尸记录 (文件在磁盘已删但库里还有)
+        if (m_db) {
+            auto all_db_paths = m_db->get_all_file_paths();
+            std::vector<std::string> paths_to_remove;
             
-            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
-            
-            for (const auto& full_path_str : retry_list) {
-                std::filesystem::path full_path = Utf8ToPath(full_path_str);
-                try {
-                    std::error_code ec;
-                    if (!std::filesystem::exists(full_path, ec)) continue;
-                    
-                    std::filesystem::path relative_path = std::filesystem::relative(full_path, m_root_path, ec);
-                    if (ec) continue;
-                    std::string rel_path_str = PathToUtf8(relative_path);
-                    
-                    FileInfo info;
-                    info.path = rel_path_str;
-                    
-                    auto ftime = std::filesystem::last_write_time(full_path, ec);
-                    if (ec) {
-                        g_logger->error("[Scan] 重试失败 (Time): {}", rel_path_str);
-                        continue;
+            {
+                std::lock_guard<std::mutex> lock(m_file_map_mutex);
+                for (const auto& db_path : all_db_paths) {
+                    if (m_file_map.find(db_path) == m_file_map.end()) {
+                        paths_to_remove.push_back(db_path);
                     }
-                    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
-                    info.modified_time = sctp.time_since_epoch().count();
-                    
-                    info.hash = Hashing::CalculateSHA256(full_path);
-                    if (info.hash.empty()) {
-                        g_logger->error("[Scan] 重试失败 (Hash): {}", rel_path_str);
-                        continue;
-                    }
-                    
-                    m_file_map[info.path] = info;
-                    if (m_db) {
-                        m_db->update_file(info.path, info.hash, info.modified_time);
-                    }
-                    calc_count++;
-                    
-                } catch (const std::exception& e) {
-                    g_logger->error("[Scan] 重试异常: {}", e.what());
                 }
             }
-            g_logger->info("[StateManager] 重试完成。");
+            
+            if (!paths_to_remove.empty()) {
+                g_logger->info("[StateManager] 正在清理 {} 个数据库僵尸记录...", paths_to_remove.size());
+                Database::TransactionGuard cleanup_guard(*m_db);
+                for (const auto& p : paths_to_remove) {
+                    m_db->remove_file(p);
+                }
+                cleanup_guard.commit();
+            }
+        }
+        
+        // Phase 5: 处理扫描期间失败的项目 (改为非阻塞异步重试)
+        if (!retry_list.empty()) {
+            g_logger->warn("[StateManager] 扫描发现 {} 个锁定文件，已安排异步重试。", retry_list.size());
+            {
+                std::lock_guard<std::mutex> lock(m_changes_mutex);
+                for (const auto& path : retry_list) {
+                    m_pending_changes.insert(path);
+                }
+            }
+            
+            // 启动重试计时器处理这些遗留项目 (统一接口)
+            schedule_retry(2);
         }
         
         g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", 
@@ -634,5 +648,26 @@ namespace VeritasSync {
             files.push_back(info);
         }
         return files;
+    }
+
+    void StateManager::schedule_retry(int delay_seconds) {
+        if (!m_retry_timer) return;
+
+        // 【核心加固】通过 post 确保所有的计时器操作都在 io_context 的线程内线性执行
+        // 这样即使 scan_directory (主线程) 和之前挂起的回调同时触发重试，也不会发生竞态
+        boost::asio::post(get_io_context(), [this, delay_seconds]() {
+            if (!m_retry_timer) return;
+
+            // 1. 设置超时：这会自动取消该计时器之前所有挂起的异步操作
+            m_retry_timer->expires_after(std::chrono::seconds(delay_seconds));
+
+            // 2. 重新注册异步等待
+            m_retry_timer->async_wait([this](const boost::system::error_code& ec) {
+                // 如果是正常超时响应 (不是被 cancel 的)
+                if (!ec) {
+                    this->process_debounced_changes();
+                }
+            });
+        });
     }
 }  // namespace VeritasSync

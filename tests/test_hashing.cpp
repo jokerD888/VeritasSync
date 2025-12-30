@@ -189,6 +189,35 @@ TEST_F(HashingTest, MMIO_MatchesStandard_DifferentContent) {
     }
 }
 
+TEST_F(HashingTest, MMIO_HandlesLargeOffsets_Above4GB) {
+    // 快速创建一个刚好跨越 4GB 边界的文件进行验证 (4GB + 1MB)
+    const uint64_t BIG_SIZE = 4ULL * 1024 * 1024 * 1024 + 1024 * 1024;
+    std::string big_file = "over_4gb_test.tmp";
+
+    // 检查是否有足够的磁盘空间 (约 4.1GB)
+    std::error_code ec;
+    auto space = std::filesystem::space(".", ec);
+    if (!ec && space.available < BIG_SIZE + (1024 * 1024 * 50)) {
+        GTEST_SKIP() << "磁盘空间不足，跳过 4GB 超大文件测试";
+        return;
+    }
+
+    try {
+        // 使用高效的零填充创建文件
+        CreateZeroFile(big_file, BIG_SIZE);
+
+        std::string hash_std = Hashing::CalculateSHA256(big_file);
+        std::string hash_mmio = Hashing::CalculateSHA256_MMIO(big_file);
+
+        EXPECT_FALSE(hash_std.empty());
+        EXPECT_EQ(hash_std, hash_mmio) << "4GB 边界哈希不匹配，可能存在 32 位偏移溢出！";
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "创建大文件失败: " << e.what();
+    }
+    
+    std::filesystem::remove(big_file);
+}
+
 // =====================================================
 // 缓冲区哈希测试
 // =====================================================

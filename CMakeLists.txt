@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.15)
-
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 project(VeritasSync VERSION 1.0)
 
 if(MSVC)
@@ -48,7 +48,7 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 add_executable(veritas_sync WIN32
     veritas.rc
     src/main.cpp
-    src/platform/TrayIcon.cpp
+    src/common/TrayIcon.cpp
     src/common/Hashing.cpp
     src/common/CryptoLayer.cpp
     src/common/Logger.cpp

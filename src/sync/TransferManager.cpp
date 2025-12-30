@@ -51,6 +51,7 @@ struct UploadContext {
     std::string file_hash;
     int total_chunks = 0;
     int current_chunk = 0;
+    int open_retry_count = 0; // 新增：用于异步重试计数
 
     // 资源复用
     std::vector<char> buffer;
@@ -130,41 +131,51 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
         // --- 定义递归上传逻辑 ---
         auto upload_loop = [self, ctx, full_path](auto& loop_ref) -> void {
-            // 【核心修复】如果句柄关闭了（或刚开始），在此处重新打开
+            // 如果句柄由于刚开始或由于流控被关闭，在此处异步重开
             if (!ctx->file.is_open()) {
-                bool opened = false;
-                for (int retry = 0; retry < 5; ++retry) {
-                    ctx->file.clear();
-                    ctx->file.open(full_path, std::ios::binary | std::ios::in); // 以读方式打开
-                    if (ctx->file.is_open()) {
-                        opened = true;
-                        break;
-                    }
-                    // 如果是 EMFILE (24)，说明系统句柄耗尽，增加退让时间
+                ctx->file.clear(); // 关键：清除之前的错误状态位
+                ctx->file.open(full_path, std::ios::binary | std::ios::in);
+                
+                if (!ctx->file.is_open()) {
                     std::string sys_err = GetLastSystemError();
-                    int wait_ms = (errno == EMFILE || errno == ENFILE) ? 1000 : 200;
-                    if (retry < 4) {
-                        g_logger->warn("[Transfer] ⚠️ 文件打开失败(retry {}), 退让 {}ms: {} | {}", retry+1, wait_ms, ctx->path, sys_err);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+                    // 处理句柄耗尽 (EMFILE/ENFILE) 与 锁定 等待
+                    int wait_ms = (errno == 24 || errno == 23) ? 1000 : 200;
+                    
+                    if (ctx->open_retry_count < 5) {
+                        ctx->open_retry_count++;
+                        g_logger->warn("[Transfer] ⚠️ 文件打开失败(第{}次), 退让{}ms后重试: {} | {}", 
+                                      ctx->open_retry_count, wait_ms, ctx->path, sys_err);
+                        
+                        // 【异步退让核心】不阻塞当前线程，设置闹钟后立即返回
+                        ctx->timer.expires_after(std::chrono::milliseconds(wait_ms));
+                        ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
+                            if (!ec) {
+                                // 时间到了，把自己 post 会线程池继续干活
+                                boost::asio::post(self->m_worker_pool, [loop_ref]() {
+                                    loop_ref(loop_ref);
+                                });
+                            }
+                        });
+                        return; // 释放线程池资源
+                    } else {
+                        g_logger->error("[Transfer] ❌ 无法打开文件(重试5次后放弃): {} | {}", ctx->path, sys_err);
+                        {
+                            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                            self->m_sending_files.erase(ctx->path);
+                        }
+                        self->m_session_done++;
+                        return;
                     }
                 }
 
-                if (!opened) {
-                    std::string sys_err = GetLastSystemError();
-                    g_logger->error("[Transfer] ❌ 无法打开文件(重试5次后放弃): {} | {}", ctx->path, sys_err);
-                    {
-                        std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                        self->m_sending_files.erase(ctx->path);
-                    }
-                    self->m_session_done++;
-                    return;
-                }
+                // --- 打开成功，执行初次/恢复初始化 ---
+                ctx->open_retry_count = 0; // 重置计数器
 
-                // 首次打开时计算总数
+                // 首次打开时计算总块数
                 if (ctx->total_chunks == 0) {
                     ctx->file.seekg(0, std::ios::end);
                     std::streamsize size = ctx->file.tellg();
-                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + CHUNK_DATA_SIZE - 1) / CHUNK_DATA_SIZE) : 1;
+                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + TransferManager::CHUNK_DATA_SIZE - 1) / TransferManager::CHUNK_DATA_SIZE) : 1;
                     
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                     if (self->m_sending_files.count(ctx->path)) {
@@ -172,8 +183,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     }
                 }
                 
-                // 重新定位到当前块
-                ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * CHUNK_DATA_SIZE, std::ios::beg);
+                // 定位并继续
+                ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * TransferManager::CHUNK_DATA_SIZE, std::ios::beg);
             }
             // 使用 while 循环来处理非阻塞的情况，提高效率
             while (ctx->current_chunk < ctx->total_chunks) {

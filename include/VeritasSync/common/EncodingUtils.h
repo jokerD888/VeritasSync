@@ -14,9 +14,14 @@ namespace VeritasSync {
 // ---------------------------------------------------------
 // 1. 路径转换工具
 // ---------------------------------------------------------
+// 
+
 
 // 将 UTF-8 std::string 转换为 std::filesystem::path
 // 核心解决：Windows 下 path 默认构造函数视 string 为 ANSI (GBK)，必须转为 u8string 或 wstring
+// Utf8ToPath：
+// 痛点：在 Windows 下，std::filesystem::path 默认会将普通 std::string 视为本地编码（通常是 GBK）。如果你传一个 UTF-8 的路径给它，在 Windows 上会直接乱码，导致找不到文件。
+// 解决方案：利用 C++20 的 char8_t 进行桥接。std::u8string 显式告诉 path 对象：“我这段内存就是 UTF-8 的，请按照 Unicode 规范解析”。
 inline std::filesystem::path Utf8ToPath(const std::string& utf8_str) {
 #ifdef _WIN32
     // C++20 标准写法：通过 char8_t 显式告知这是 UTF-8
@@ -31,7 +36,9 @@ inline std::filesystem::path Utf8ToPath(const std::string& utf8_str) {
 // 核心解决：path.string() 在 Windows 上可能返回 GBK，导致乱码
 inline std::string PathToUtf8(const std::filesystem::path& path) {
 #ifdef _WIN32
+    // path.u8string() 是 C++20 系统库提供的方法，它保证返回的路径一定是 UTF-8 编码的。
     std::u8string u8_str = path.u8string();
+    // 物理层面：实际上，UTF-8 的字节流在内存里无论是叫 char 还是 char8_t，它们的二进制内容（即 0 和 1 的排列）是一模一样的。
     return std::string(reinterpret_cast<const char*>(u8_str.c_str()));
 #else
     return path.string();

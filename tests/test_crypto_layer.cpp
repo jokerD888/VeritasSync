@@ -411,3 +411,85 @@ TEST_F(CryptoLayerTest, KeyReset_InvalidatesOldCiphertext) {
     EXPECT_EQ(crypto.decrypt(new_ciphertext), plaintext);
 }
 
+// =====================================================
+// 压力与缓存一致性测试 (针对 thread_local 优化)
+// =====================================================
+
+TEST_F(CryptoLayerTest, ThreadSafety_MultipleInstancesConcurrent) {
+    // 验证多个实例在多个线程中穿插使用，是否会因为共享 thread_local 上下文而冲突
+    const int NUM_THREADS = 8;
+    const int NUM_INSTANCES = 4;
+    
+    std::vector<std::unique_ptr<CryptoLayer>> instances;
+    for(int i=0; i<NUM_INSTANCES; ++i) {
+        auto c = std::make_unique<CryptoLayer>();
+        c->set_key("instance_key_" + std::to_string(i));
+        instances.push_back(std::move(c));
+    }
+
+    std::vector<std::thread> threads;
+    std::atomic<bool> failed{false};
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < 200; ++i) {
+                // 每个线程随机挑选实例使用
+                int inst_idx = (t + i) % NUM_INSTANCES;
+                std::string plain = "Payload from thread " + std::to_string(t) + " iter " + std::to_string(i);
+                
+                std::string cipher = instances[inst_idx]->encrypt(plain);
+                std::string dec = instances[inst_idx]->decrypt(cipher);
+                
+                if (dec != plain) {
+                    failed = true;
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& t : threads) t.join();
+    EXPECT_FALSE(failed.load()) << "多线程多实例混合使用发现上下文状态污染！";
+}
+
+TEST_F(CryptoLayerTest, StressTest_Reuse) {
+    // 极高频率地创建、使用并销毁 CryptoLayer 对象
+    // 这在大容量同步场景下很常见，旨在测试 thread_local 是否稳定
+    for (int i = 0; i < 500; ++i) {
+        CryptoLayer temp_crypto;
+        temp_crypto.set_key("ephemeral_key_" + std::to_string(i));
+        
+        std::string plain = "Short-lived test data " + std::to_string(i);
+        std::string cipher = temp_crypto.encrypt(plain);
+        EXPECT_EQ(temp_crypto.decrypt(cipher), plain);
+    }
+}
+
+TEST_F(CryptoLayerTest, Performance_ThreadLocalEfficiency) {
+    // 对比测试：验证在多线程下，新架构是否真的能跑得更快（消除锁竞争）
+    const int NUM_THREADS = 8;
+    const int TOTAL_OPS = 2000;
+    std::string plaintext(1024, 'A'); // 1KB 数据
+
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    std::vector<std::thread> threads;
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&]() {
+            for (int i = 0; i < TOTAL_OPS / NUM_THREADS; ++i) {
+                std::string c = crypto.encrypt(plaintext);
+                crypto.decrypt(c);
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    std::cout << "[Performance] Concurrent Multi-thread context speed: " << ms << "ms for " << TOTAL_OPS << " ops\n";
+    
+    // 优化后的代码在 8 核机器上应该远低于 1 秒
+    EXPECT_LT(ms, 1000);
+}
+

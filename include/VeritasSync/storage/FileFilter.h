@@ -1,32 +1,40 @@
 #pragma once
 
 #include <filesystem>
-#include <mutex>
 #include <regex>
+#include <shared_mutex>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace VeritasSync {
 
+// C++20 异构查找支持：允许 std::unordered_set 使用 string_view 进行查找而无需创建临时 string
+struct StringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
+    size_t operator()(const std::string& s) const { return std::hash<std::string>{}(s); }
+};
+
 class FileFilter {
 public:
-    // 加载默认规则 (如 .git, .DS_Store)
     FileFilter();
 
-    // 从指定路径加载 .veritasignore 文件
-    // 如果文件不存在，则忽略
     void load_rules(const std::filesystem::path& root_path);
 
-    // 检查路径是否应该被忽略
-    // relative_path: 相对于同步根目录的路径 (例如 "src/main.cpp")
-    bool should_ignore(const std::string& relative_path) const;
+    // 检查路径是否应该被忽略 (使用 string_view 实现零拷贝)
+    // 注意：输入路径应已规范化为使用 '/' 作为分隔符
+    bool should_ignore(std::string_view path) const;
 
 private:
-    // 将 glob 模式 (如 "*.cpp") 转换为 regex 字符串
-    std::string glob_to_regex(const std::string& glob);
+    void classify_rule(const std::string& rule);
 
-    std::vector<std::regex> m_rules;
-    mutable std::mutex m_mutex;
+    std::unordered_set<std::string, StringHash, std::equal_to<>> m_ignored_exts; 
+    std::unordered_set<std::string, StringHash, std::equal_to<>> m_ignored_dirs; 
+    std::vector<std::regex> m_complex_rules;
+
+    mutable std::shared_mutex m_mutex;
 };
 
 }  // namespace VeritasSync

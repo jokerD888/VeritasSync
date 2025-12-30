@@ -1,6 +1,8 @@
 #include "VeritasSync/common/Hashing.h"
 
 #include <openssl/sha.h>
+#include <boost/interprocess/file_mapping.hpp>
+#include <boost/interprocess/mapped_region.hpp>
 
 #include <chrono>
 #include <fstream>
@@ -8,25 +10,22 @@
 #include <sstream>
 #include <thread>
 #include <vector>
+#include <format>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Logger.h"
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#endif
 
 namespace VeritasSync {
 
     // --- 辅助函数：将二进制哈希转换为十六进制字符串 ---
     static std::string HashToHexString(const unsigned char* hash, size_t length) {
-        std::stringstream ss;
+        std::string res;
+        res.reserve(length * 2); // 预留空间，避免频繁扩容
         for (size_t i = 0; i < length; ++i) {
-            ss << std::hex << std::setw(2) << std::setfill('0')
-               << static_cast<int>(hash[i]);
+            // {:02x} 表示 16 进制、2位宽、0填充
+            res += std::format("{:02x}", hash[i]);
         }
-        return ss.str();
+        return res;
     }
 
     // --- 缓冲区版本的 SHA256 (用于验证和小数据) ---
@@ -36,25 +35,26 @@ namespace VeritasSync {
         }
 
         SHA256_CTX sha256Context;
-        if (!SHA256_Init(&sha256Context)) {
+        if (!SHA256_Init(&sha256Context)) {     // 初始化上下文
             return "";
         }
 
-        if (!SHA256_Update(&sha256Context, data, length)) {
+        if (!SHA256_Update(&sha256Context, data, length)) {     // 处理数据
             return "";
         }
 
         unsigned char hash[SHA256_DIGEST_LENGTH];
-        if (!SHA256_Final(hash, &sha256Context)) {
+        if (!SHA256_Final(hash, &sha256Context)) {     // 计算最终哈希
             return "";
         }
 
         return HashToHexString(hash, SHA256_DIGEST_LENGTH);
     }
 
-#ifdef _WIN32
-    // --- Windows MMIO 实现 ---
+    // --- 跨平台 MMIO 实现 (使用 Boost.Interprocess) ---
     std::string Hashing::CalculateSHA256_MMIO(const std::filesystem::path& filePath) {
+        namespace bi = boost::interprocess;
+
         // 1. 检查文件是否存在且为常规文件
         std::error_code ec;
         if (!std::filesystem::exists(filePath, ec) || ec ||
@@ -79,127 +79,56 @@ namespace VeritasSync {
             return CalculateSHA256(filePath);
         }
 
-        // 2. 打开文件 (使用宽字符路径支持 Unicode)
-        HANDLE hFile = CreateFileW(
-            filePath.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ,  // 允许其他进程读取
-            NULL,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,  // 顺序访问优化
-            NULL
-        );
+        try {
+            // 2. 创建文件映射 (Boost 会根据平台自动处理宽字符路径或 UTF-8)
+            // 在 Windows 上，filePath.c_str() 返回 wchar_t*。
+            // 在 Linux 上，filePath.c_str() 返回 char*。
+            bi::file_mapping m_file(filePath.c_str(), bi::read_only);
 
-        if (hFile == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            if (g_logger) {
-                g_logger->debug("[Hashing] MMIO CreateFile 失败: {} (Error: {})", 
-                              PathToUtf8(filePath), err);
+            // 3. 初始化 SHA256 上下文
+            SHA256_CTX sha256Context;
+            if (!SHA256_Init(&sha256Context)) {
+                return "";
             }
-            // 回退到标准实现
-            return CalculateSHA256(filePath);
-        }
 
-        // 3. 创建文件映射
-        HANDLE hMapping = CreateFileMappingW(
-            hFile,
-            NULL,
-            PAGE_READONLY,
-            0, 0,  // 映射整个文件
-            NULL
-        );
+            // 4. 分块映射并计算哈希 (滑动窗口)
+            // 使用 256MB 的视图窗口，平衡内存使用和性能
+            constexpr uint64_t VIEW_SIZE = 256 * 1024 * 1024;
+            uint64_t offset = 0;
+            uint64_t remaining = file_size;
 
-        if (!hMapping) {
-            DWORD err = GetLastError();
-            CloseHandle(hFile);
-            if (g_logger) {
-                g_logger->debug("[Hashing] MMIO CreateFileMapping 失败: {} (Error: {})", 
-                              PathToUtf8(filePath), err);
-            }
-            // 回退到标准实现
-            return CalculateSHA256(filePath);
-        }
+            while (remaining > 0) {
+                size_t view_size = static_cast<size_t>((remaining > VIEW_SIZE) ? VIEW_SIZE : remaining);
 
-        // 4. 初始化 SHA256 上下文
-        SHA256_CTX sha256Context;
-        if (!SHA256_Init(&sha256Context)) {
-            CloseHandle(hMapping);
-            CloseHandle(hFile);
-            return "";
-        }
+                // 映射视图 (RAII 自动管理生命周期)
+                bi::mapped_region region(m_file, bi::read_only, offset, view_size);
 
-        // 5. 分块映射并计算哈希
-        // 使用 256MB 的视图窗口，平衡内存使用和性能
-        constexpr size_t VIEW_SIZE = 256 * 1024 * 1024;
-        size_t offset = 0;
-        size_t remaining = static_cast<size_t>(file_size);
-
-        bool success = true;
-        while (remaining > 0) {
-            size_t view_size = (remaining > VIEW_SIZE) ? VIEW_SIZE : remaining;
-
-            // 计算高位和低位偏移
-            DWORD offset_high = static_cast<DWORD>((offset >> 32) & 0xFFFFFFFF);
-            DWORD offset_low = static_cast<DWORD>(offset & 0xFFFFFFFF);
-
-            // 映射视图
-            void* pView = MapViewOfFile(
-                hMapping,
-                FILE_MAP_READ,
-                offset_high,
-                offset_low,
-                view_size
-            );
-
-            if (!pView) {
-                DWORD err = GetLastError();
-                if (g_logger) {
-                    g_logger->warn("[Hashing] MMIO MapViewOfFile 失败: {} offset={} (Error: {})", 
-                                 PathToUtf8(filePath), offset, err);
+                // 更新哈希
+                if (!SHA256_Update(&sha256Context, region.get_address(), region.get_size())) {
+                    return "";
                 }
-                success = false;
-                break;
+
+                offset += view_size;
+                remaining -= view_size;
             }
 
-            // 更新哈希
-            if (!SHA256_Update(&sha256Context, pView, view_size)) {
-                UnmapViewOfFile(pView);
-                success = false;
-                break;
+            // 5. 计算最终哈希
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            if (!SHA256_Final(hash, &sha256Context)) {
+                return "";
             }
 
-            // 取消映射
-            UnmapViewOfFile(pView);
+            return HashToHexString(hash, SHA256_DIGEST_LENGTH);
 
-            offset += view_size;
-            remaining -= view_size;
-        }
-
-        // 6. 清理资源
-        CloseHandle(hMapping);
-        CloseHandle(hFile);
-
-        if (!success) {
+        } catch (const std::exception& e) {
+            if (g_logger) {
+                g_logger->debug("[Hashing] Boost MMIO 失败: {} (Error: {})", 
+                              PathToUtf8(filePath), e.what());
+            }
             // 回退到标准实现
             return CalculateSHA256(filePath);
         }
-
-        // 7. 计算最终哈希
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        if (!SHA256_Final(hash, &sha256Context)) {
-            return "";
-        }
-
-        return HashToHexString(hash, SHA256_DIGEST_LENGTH);
     }
-
-#else
-    // --- 非 Windows 平台：直接使用标准实现 ---
-    std::string Hashing::CalculateSHA256_MMIO(const std::filesystem::path& filePath) {
-        return CalculateSHA256(filePath);
-    }
-
-#endif
 
     // --- 原始标准实现 (保留作为回退和小文件处理) ---
     std::string Hashing::CalculateSHA256(const std::filesystem::path& filePath) {
@@ -263,3 +192,4 @@ namespace VeritasSync {
     }
 
 }  // namespace VeritasSync
+ 

@@ -2,6 +2,7 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -80,6 +81,9 @@ namespace VeritasSync {
         void notify_change_detected(const std::string& full_path);
         void process_debounced_changes();
 
+        // 统一调度重试任务 (线程安全，内部使用 post)
+        void schedule_retry(int delay_seconds);
+
         // --- 成员变量 ---
         std::string m_sync_key;
         std::filesystem::path m_root_path;
@@ -103,6 +107,10 @@ namespace VeritasSync {
 
         // 过滤器实例
         FileFilter m_file_filter;
+
+        // --- 生命周期管理 ---
+        // 唯一的重试计时器，负责调度所有文件冲突后的再次处理任务
+        std::unique_ptr<boost::asio::steady_timer> m_retry_timer;
     };
 
 }  // namespace VeritasSync

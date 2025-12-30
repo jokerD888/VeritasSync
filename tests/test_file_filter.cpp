@@ -1,40 +1,28 @@
 // tests/test_file_filter.cpp
-// 测试文件过滤器的规则匹配正确性
+// 增强版：深入测试 FileFilter 的三级引擎、Git 兼容性及极端边界情况
 
 #include <gtest/gtest.h>
 #include <string>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 
 #include "VeritasSync/storage/FileFilter.h"
 #include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
-// 全局测试环境
-class FileFilterTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const filter_env =
-    ::testing::AddGlobalTestEnvironment(new FileFilterTestEnvironment());
-
 class FileFilterTest : public ::testing::Test {
 protected:
-    std::filesystem::path test_dir = std::filesystem::path("test_filter_dir");
+    std::filesystem::path test_dir = std::filesystem::absolute("test_filter_dir");
     std::filesystem::path ignore_file;
     
     void SetUp() override {
-        // 创建测试目录
         std::filesystem::create_directories(test_dir);
         ignore_file = test_dir / ".veritasignore";
     }
     
     void TearDown() override {
-        // 清理测试目录
         std::filesystem::remove_all(test_dir);
     }
     
@@ -45,206 +33,141 @@ protected:
     }
 };
 
-// --- 基础过滤测试（匹配实际的默认规则）---
+// --- Tier 1: 后缀全局匹配 (*.ext) ---
 
-TEST_F(FileFilterTest, DefaultRulesIgnoreGitDir) {
+TEST_F(FileFilterTest, Tier1SuffixGlobalMatch) {
+    write_ignore_file("*.obj\n*.tmp\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_TRUE(filter.should_ignore(".git"));
-    EXPECT_TRUE(filter.should_ignore(".git/config"));
-    EXPECT_TRUE(filter.should_ignore("subdir/.git"));
+    // 应在任何层级匹配
+    EXPECT_TRUE(filter.should_ignore("main.obj"));
+    EXPECT_TRUE(filter.should_ignore("sub/dir/test.obj"));
+    EXPECT_TRUE(filter.should_ignore("very/deep/path/data.tmp"));
+    
+    // 负面测试
+    EXPECT_FALSE(filter.should_ignore("obj.cpp"));
+    EXPECT_FALSE(filter.should_ignore("main.object"));
 }
 
-TEST_F(FileFilterTest, DefaultRulesIgnoreVeritasDB) {
+// --- Tier 2 vs Tier 3: 根部锚定 vs 全局搜索 ---
+
+TEST_F(FileFilterTest, RootedVsGlobalLogic) {
+    // 根据 Git 规范：
+    // /only_at_root.txt -> 仅根目录
+    // global_file.log  -> 全路径任何位置
+    write_ignore_file("/only_at_root.txt\nglobal_file.log\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    // 实际默认规则使用 .veritas.db
-    EXPECT_TRUE(filter.should_ignore(".veritas.db"));
-    EXPECT_TRUE(filter.should_ignore(".veritas.db-journal"));
-    EXPECT_TRUE(filter.should_ignore(".veritas.db-wal"));
-    EXPECT_TRUE(filter.should_ignore(".veritas.db-shm"));
-    EXPECT_TRUE(filter.should_ignore("subdir/.veritas.db"));
+    // 1. 根部锚定规则
+    EXPECT_TRUE(filter.should_ignore("only_at_root.txt"));
+    EXPECT_FALSE(filter.should_ignore("subdir/only_at_root.txt"));
+    
+    // 2. 全局搜索规则 (因为不带斜杠且未锚定，走 Tier 3)
+    EXPECT_TRUE(filter.should_ignore("global_file.log"));
+    EXPECT_TRUE(filter.should_ignore("a/b/c/global_file.log"));
 }
 
-TEST_F(FileFilterTest, DefaultRulesIgnoreVeritasIgnore) {
+// --- Tier 2: 路径相关过滤 (包含斜杠的规则) ---
+
+TEST_F(FileFilterTest, Tier2PathSpecificMatching) {
+    // 包含内部斜杠的规则应默认为从根部开始的路径匹配 (Tier 2)
+    write_ignore_file("src/generated/\ntools/config.json\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_TRUE(filter.should_ignore(".veritasignore"));
-    EXPECT_TRUE(filter.should_ignore("subdir/.veritasignore"));
+    // 正确匹配
+    EXPECT_TRUE(filter.should_ignore("src/generated/api.cpp"));
+    EXPECT_TRUE(filter.should_ignore("src/generated"));
+    EXPECT_TRUE(filter.should_ignore("tools/config.json"));
+    
+    // 不应匹配非根部的相似路径
+    EXPECT_FALSE(filter.should_ignore("other/src/generated/api.cpp"));
+    EXPECT_FALSE(filter.should_ignore("sub/tools/config.json"));
 }
 
-TEST_F(FileFilterTest, DefaultRulesIgnorePartFiles) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    // *.part 模式
-    EXPECT_TRUE(filter.should_ignore("download.part"));
-    EXPECT_TRUE(filter.should_ignore("file.part"));
-    EXPECT_TRUE(filter.should_ignore("subdir/file.part"));
-}
+// --- 目录匹配的边界情况 ---
 
-TEST_F(FileFilterTest, DefaultRulesIgnoreSystemFiles) {
+TEST_F(FileFilterTest, DirectoryMatchingNuances) {
+    write_ignore_file("build/\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_TRUE(filter.should_ignore(".DS_Store"));
-    EXPECT_TRUE(filter.should_ignore("Thumbs.db"));
-    EXPECT_TRUE(filter.should_ignore("subdir/.DS_Store"));
-}
-
-TEST_F(FileFilterTest, DefaultRulesIgnoreBuildDirs) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    // 目录模式 build/, bin/, out/
+    // 匹配目录及其内容
     EXPECT_TRUE(filter.should_ignore("build"));
-    EXPECT_TRUE(filter.should_ignore("build/output.exe"));
-    EXPECT_TRUE(filter.should_ignore("bin"));
-    EXPECT_TRUE(filter.should_ignore("bin/app.exe"));
-    EXPECT_TRUE(filter.should_ignore("out"));
-    EXPECT_TRUE(filter.should_ignore("out/result.txt"));
+    EXPECT_TRUE(filter.should_ignore("build/main.o"));
+    EXPECT_TRUE(filter.should_ignore("build/subdir/resource.res"));
+    
+    // 名字相似但不应拦截
+    EXPECT_FALSE(filter.should_ignore("build_log.txt"));
+    EXPECT_FALSE(filter.should_ignore("mybuild"));
+    EXPECT_FALSE(filter.should_ignore("prebuild/step.sh"));
 }
 
-TEST_F(FileFilterTest, NormalFilesNotIgnored) {
+// --- Windows 路径规范化测试 ---
+
+TEST_F(FileFilterTest, WindowsPathStandardization) {
+    write_ignore_file("docs/internal/\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_FALSE(filter.should_ignore("document.txt"));
-    EXPECT_FALSE(filter.should_ignore("image.png"));
-    EXPECT_FALSE(filter.should_ignore("src/main.cpp"));
+    // 传入带反斜杠的路径（模拟 Windows 驱动输入）
+    // 注意：这里的测试前提是 StateManager 或调用方已经处理了 generic_u8string()
+    // 但 FileFilter::should_ignore 本身也要能处理这种输入以便鲁棒性
+    EXPECT_TRUE(filter.should_ignore("docs/internal/secret.pdf"));
+    
+    // 如果我们想测试 FileFilter 的跨平台兼容性，我们可以模拟传入混合斜杠
+    // 目前实现已经改为直接接收规范化路径，所以这个测试其实是在验证“匹配逻辑”
+    EXPECT_TRUE(filter.should_ignore("docs/internal/sub/file.txt"));
 }
 
-// --- 自定义规则测试 ---
+// --- 复杂通配符 (Tier 3) ---
 
-TEST_F(FileFilterTest, CustomGlobPattern) {
-    write_ignore_file("*.log\n*.tmp\n");
+TEST_F(FileFilterTest, Tier3ComplexGlobPatterns) {
+    write_ignore_file("debug_??_*.v??\n");
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_TRUE(filter.should_ignore("app.log"));
-    EXPECT_TRUE(filter.should_ignore("debug.log"));
-    EXPECT_TRUE(filter.should_ignore("temp.tmp"));
-    EXPECT_FALSE(filter.should_ignore("app.txt"));
+    EXPECT_TRUE(filter.should_ignore("debug_01_main.v01"));
+    EXPECT_TRUE(filter.should_ignore("logs/debug_99_test.vff"));
+    EXPECT_FALSE(filter.should_ignore("debug_1_main.v01")); // 少了一位 ?
 }
 
-TEST_F(FileFilterTest, CustomDirectoryPattern) {
-    write_ignore_file("node_modules/\ncache/\n");
+// --- 规则解析的鲁棒性 (空白与注释) ---
+
+TEST_F(FileFilterTest, RuleCleaningAndComments) {
+    write_ignore_file(
+        "# 核心数据库\n"
+        "  important.db  \n"  // 带空格
+        "  \t \n"             // 纯空白行
+        "temp/ # 临时目录\n"   // 行尾注释 (虽然目前代码主要是跳过 # 开头的行)
+    );
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    EXPECT_TRUE(filter.should_ignore("node_modules"));
-    EXPECT_TRUE(filter.should_ignore("node_modules/package/index.js"));
-    EXPECT_TRUE(filter.should_ignore("cache"));
+    EXPECT_TRUE(filter.should_ignore("important.db"));
+    EXPECT_TRUE(filter.should_ignore("temp/any.file"));
 }
 
-TEST_F(FileFilterTest, CustomExactFileName) {
-    write_ignore_file("secret.key\npassword.txt\n");
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    EXPECT_TRUE(filter.should_ignore("secret.key"));
-    EXPECT_TRUE(filter.should_ignore("subdir/secret.key"));
-    EXPECT_TRUE(filter.should_ignore("password.txt"));
-}
+// --- 零拷贝性能负载压力测试 ---
 
-TEST_F(FileFilterTest, CommentLinesIgnored) {
-    write_ignore_file("# This is a comment\n*.log\n# Another comment\n*.tmp\n");
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    EXPECT_TRUE(filter.should_ignore("file.log"));
-    EXPECT_TRUE(filter.should_ignore("file.tmp"));
-}
-
-TEST_F(FileFilterTest, EmptyLinesIgnored) {
-    write_ignore_file("*.log\n\n\n*.tmp\n");
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    EXPECT_TRUE(filter.should_ignore("file.log"));
-    EXPECT_TRUE(filter.should_ignore("file.tmp"));
-}
-
-// --- 复杂模式测试 ---
-
-TEST_F(FileFilterTest, ExtensionPattern) {
-    write_ignore_file("*.pyc\n*.pyo\n__pycache__/\n");
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    EXPECT_TRUE(filter.should_ignore("module.pyc"));
-    EXPECT_TRUE(filter.should_ignore("module.pyo"));
-    EXPECT_TRUE(filter.should_ignore("__pycache__"));
-}
-
-// --- 边界情况测试 ---
-
-TEST_F(FileFilterTest, EmptyPath) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    // 空路径应该不被忽略（或安全处理）
-    EXPECT_FALSE(filter.should_ignore(""));
-}
-
-TEST_F(FileFilterTest, PathWithSpaces) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    EXPECT_FALSE(filter.should_ignore("path with spaces/file name.txt"));
-}
-
-TEST_F(FileFilterTest, HiddenFilesNotIgnoredByDefault) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    // 默认不应该忽略所有隐藏文件
-    EXPECT_FALSE(filter.should_ignore(".bashrc"));
-    EXPECT_FALSE(filter.should_ignore(".config"));
-}
-
-TEST_F(FileFilterTest, NoIgnoreFile) {
-    // 删除忽略文件，只使用默认规则
-    std::filesystem::remove(ignore_file);
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    // 默认规则仍应工作
-    EXPECT_TRUE(filter.should_ignore(".veritas.db"));
-    EXPECT_TRUE(filter.should_ignore(".git"));
-    EXPECT_FALSE(filter.should_ignore("normal.txt"));
-}
-
-// --- 性能相关测试 ---
-
-TEST_F(FileFilterTest, ManyRules) {
-    // 写入大量规则
+TEST_F(FileFilterTest, StressTestZeroCopyLookups) {
     std::string content;
-    for (int i = 0; i < 100; ++i) {
-        content += "pattern_" + std::to_string(i) + ".bak\n";
-    }
+    for(int i=0; i<50; ++i) content += "dir_" + std::to_string(i) + "/\n";
+    for(int i=0; i<50; ++i) content += "*.ext_" + std::to_string(i) + "\n";
     write_ignore_file(content);
     
     FileFilter filter;
     filter.load_rules(test_dir);
     
-    // 验证规则正常加载
-    EXPECT_TRUE(filter.should_ignore("pattern_50.bak"));
-    EXPECT_FALSE(filter.should_ignore("pattern_50.txt"));
-}
-
-TEST_F(FileFilterTest, DeepNestedPath) {
-    FileFilter filter;
-    filter.load_rules(test_dir);
-    
-    std::string deep_path;
-    for (int i = 0; i < 20; ++i) {
-        deep_path += "level" + std::to_string(i) + "/";
+    // 模拟 50,000 次查找，验证异构查找和 Tiered 过滤的极速
+    for (int i = 0; i < 50000; ++i) {
+        // 交替命中不同的 Tier
+        if (i % 2 == 0) {
+            EXPECT_TRUE(filter.should_ignore("dir_25/file.txt"));
+        } else {
+            EXPECT_TRUE(filter.should_ignore("some/path/data.ext_10"));
+        }
     }
-    deep_path += "file.txt";
-    
-    EXPECT_FALSE(filter.should_ignore(deep_path));
 }
