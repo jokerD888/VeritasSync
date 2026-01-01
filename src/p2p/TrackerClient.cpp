@@ -13,6 +13,10 @@ namespace VeritasSync {
 #ifdef _WIN32
 #include <windows.h>
 // 辅助函数：将系统错误码转换为 UTF-8 字符串
+/**
+ * @brief 将 boost::system::error_code 转换为 UTF-8 编码的错误消息字符串
+ * 主要解决 Windows 下系统错误信息是 GBK 导致日志乱码的问题
+ */
 std::string sys_err_to_utf8(const boost::system::error_code& ec) {
     // 获取系统默认语言的错误消息 (通常是 GBK)
     LPWSTR messageBuffer = nullptr;
@@ -43,45 +47,93 @@ std::string sys_err_to_utf8(const boost::system::error_code& ec) { return ec.mes
 #endif
 
 // --- 构造函数 ---
+/**
+ * @brief 构造函数：初始化成员变量并注册信令消息处理器
+ */
 TrackerClient::TrackerClient(std::string host, unsigned short port)
-    : m_io_context(),                                            // 初始化自己的 io_context
-      m_work_guard(boost::asio::make_work_guard(m_io_context)),  // 保持 io_context 运行
+    : m_io_context(),
+      m_work_guard(boost::asio::make_work_guard(m_io_context)),
+      m_resolver(m_io_context),
       m_socket(m_io_context),
-      m_retry_timer(m_io_context),  // socket 使用自己的 io_context
+      m_retry_timer(m_io_context),
       m_host(std::move(host)),
-      m_port(port) {}
+      m_port(port) {
+    register_handlers();
+}
 
+// 
+/**
+ * @brief 计划重连逻辑：在连接断开时清理资源并调度重连定时器
+ */
 void TrackerClient::schedule_reconnect() {
-    m_connected = false;
+    m_state = State::DISCONNECTED;
     // 立即关闭，确保 socket 状态重置
     if (m_socket.is_open()) {
         boost::system::error_code ignored_ec;
         m_socket.close(ignored_ec);
     }
+    
+    // 清理写队列，防止重连后发送旧包
+    m_write_queue.clear();
 
-    g_logger->warn("[TrackerClient] 连接断开，5秒后尝试重连...");
+    g_logger->warn("[TrackerClient] 连接断开，{}秒后尝试重连...", RECONNECT_INTERVAL.count());
 
-    m_retry_timer.expires_after(std::chrono::seconds(5));
-    //  捕获 self = shared_from_this() 而不是 this
+    m_retry_timer.expires_after(RECONNECT_INTERVAL);
     m_retry_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
-        if (!ec) {  // ec == operation_aborted 说明定时器被取消了
+        if (!ec) {
             self->do_connect();
         }
     });
 }
 
+/**
+ * @brief 析构函数：确保在对象销毁前停止所有异步操作和后台线程
+ */
 TrackerClient::~TrackerClient() {
-    // 请求 io_context 停止，并等待线程结束
+    stop();
+}
+
+/**
+ * @brief 停止客户端：取消定时器、关闭 Socket、停止 io_context 并阻塞等待后台线程退出
+ */
+void TrackerClient::stop() {
+    m_state = State::DISCONNECTED;
+    
+    // 取消定时器
+    m_retry_timer.cancel();
+    
+    // 关闭 Socket，这会中断所有挂起的读写操作
+    boost::system::error_code ec;
+    if (m_socket.is_open()) {
+        m_socket.shutdown(tcp::socket::shutdown_both, ec);
+        m_socket.close(ec);
+    }
+
+    // 停止 IO 上下文
     m_io_context.stop();
+    
+    // 等待线程退出
     if (m_thread.joinable()) {
         m_thread.join();
     }
 }
 
+/**
+ * @brief 设置 P2PManager 引用，用于在收到 Tracker 信令时分发给 P2P 引擎
+ */
 void TrackerClient::set_p2p_manager(P2PManager* p2p) { m_p2p_manager = p2p; }
 
-// --- connect 签名和实现 ---
+/**
+ * @brief 启动连接流程：建立后台线程（如果尚未启动）并开始异步连接 Tracker
+ * @param sync_key 同步密钥
+ * @param on_ready 注册成功后的回调，参数为当前已在线的对等点列表
+ */
 void TrackerClient::connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready) {
+    if (m_state != State::DISCONNECTED) {
+        g_logger->warn("[TrackerClient] 已经处于连接中或已连接状态。");
+        return;
+    }
+
     if (!m_p2p_manager) {
         g_logger->error("[TrackerClient] P2PManager 未设置。无法连接。");
         return;
@@ -90,31 +142,51 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
     m_on_ready_callback = std::move(on_ready);
 
     // --- 启动自己的线程 ---
-    m_thread = std::jthread([this]() {
-        g_logger->info("[TrackerClient] IO context 在后台线程运行...");
-        m_io_context.run();
-        g_logger->info("[TrackerClient] IO context 已停止。");
-    });
+    if (!m_thread.joinable()) { 
+        m_thread = std::jthread([this]() {
+            g_logger->info("[TrackerClient] IO context 在后台线程运行...");
+            m_io_context.run();
+            g_logger->info("[TrackerClient] IO context 已停止。");
+        });
+    }
 
     // 将 do_connect 任务 post 到自己的 io_context 线程
-    boost::asio::post(m_io_context, [this]() { do_connect(); });
+    boost::asio::post(m_io_context, [self = shared_from_this()]() { self->do_connect(); });
 }
 
+/**
+ * @brief 执行异步连接：首先进行域名解析，然后发起 TCP 连接
+ */
 void TrackerClient::do_connect() {
-    tcp::resolver resolver(m_io_context);
-    auto endpoints = resolver.resolve(m_host, std::to_string(m_port));
-    boost::asio::async_connect(m_socket, endpoints,
-                               [self = shared_from_this()](const boost::system::error_code& ec, const tcp::endpoint&) {
-                                   if (ec) {
-                                       g_logger->error("[TrackerClient] 连接 Tracker 失败: {}", sys_err_to_utf8(ec));
-                                       self->schedule_reconnect();
-                                       return;
-                                   }
-                                   g_logger->info("[TrackerClient] 已连接到 Tracker {}:{}", self->m_host, self->m_port);
-                                   self->do_register();
-                                   self->do_read_header();
-                               });
+    m_state = State::CONNECTING;
+    // 使用异步解析，回调签名更新为 (error_code, results_type)
+    m_resolver.async_resolve(
+        m_host, std::to_string(m_port),
+        [self = shared_from_this()](const boost::system::error_code& ec, tcp::resolver::results_type results) {
+            if (ec) {
+                g_logger->error("[TrackerClient] DNS 解析失败 ({}): {}", self->m_host, sys_err_to_utf8(ec));
+                self->schedule_reconnect();
+                return;
+            }
+
+            // async_connect 可以直接接受 results_type 集合
+            boost::asio::async_connect(
+                self->m_socket, results, [self](const boost::system::error_code& ec, const tcp::endpoint& endpoint) {
+                    if (ec) {
+                        g_logger->error("[TrackerClient] 连接 Tracker 失败: {}", sys_err_to_utf8(ec));
+                        self->schedule_reconnect();
+                        return;
+                    }
+                    g_logger->info("[TrackerClient] 已连接到 Tracker {}:{} ({})", self->m_host, self->m_port,
+                                   endpoint.address().to_string());
+                    self->do_register();
+                    self->do_read_header();
+                });
+        });
 }
+/**
+ * @brief 向 Tracker 发送注册消息，携带同步密钥以加入相应的同步网络
+ */
 void TrackerClient::do_register() {
     nlohmann::json payload;
     payload["sync_key"] = m_sync_key;
@@ -124,9 +196,11 @@ void TrackerClient::do_register() {
     do_write(msg.dump());
 }
 
+/**
+ * @brief 发送 P2P 信令消息（如 ICE Candidate, Offer/Answer）到指定的对等点
+ */
 void TrackerClient::send_signaling_message(const std::string& to_peer_id, const std::string& type,
                                            const std::string& sdp) {
-    // --- 确保 post 到自己的 io_context 线程 ---
     nlohmann::json payload;
     payload["from"] = m_self_id;
     payload["to"] = to_peer_id;
@@ -137,113 +211,172 @@ void TrackerClient::send_signaling_message(const std::string& to_peer_id, const 
     msg[SignalProto::MSG_PAYLOAD] = payload;
 
     std::string msg_str = msg.dump();
-    boost::asio::post(m_io_context, [this, msg_str]() { do_write(msg_str); });
+    boost::asio::post(m_io_context, [self = shared_from_this(), msg_str = std::move(msg_str)]() {
+        self->do_write(msg_str);
+    });
 }
+/**
+ * @brief 读取消息头：异步读取 4 字节的长度前缀（大端序）
+ */
 void TrackerClient::do_read_header() {
-    m_read_buffer.consume(m_read_buffer.size());
+    // 读取消息头固定长度4字节。注意：不调用 consume(size())，让 asio Streambuf 自动管理读取位置
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(4),
-                            [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
-                                if (ec) {
-                                    if (ec != boost::asio::error::eof) {
-                                        g_logger->error("[TrackerClient] 读取头部失败: {}", sys_err_to_utf8(ec));
-                                    } else {
-                                        g_logger->warn("[TrackerClient] Tracker 已断开连接。");
-                                    }
-                                    self->schedule_reconnect();
-                                    return;
-                                }
-                                std::istream is(&self->m_read_buffer);
-                                uint32_t msg_len_net;
-                                is.read(reinterpret_cast<char*>(&msg_len_net), 4);
-                                unsigned int msg_len =
-                                    boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
-                                if (msg_len > 65536) {
-                                    g_logger->error("[TrackerClient] 消息体过长 ({} bytes)。断开连接。", msg_len);
-                                    self->schedule_reconnect();
-                                    return;
-                                }
-                                self->do_read_body(msg_len);
-                            });
+        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+            if (ec) {
+                if (ec != boost::asio::error::eof && ec != boost::asio::error::operation_aborted) {
+                    g_logger->error("[TrackerClient] 读取头部失败: {}", sys_err_to_utf8(ec));
+                } else if (ec == boost::asio::error::eof) {
+                    g_logger->warn("[TrackerClient] Tracker 已断开连接。");
+                }
+                self->schedule_reconnect();
+                return;
+            }
+            std::istream is(&self->m_read_buffer);
+            uint32_t msg_len_net;
+            is.read(reinterpret_cast<char*>(&msg_len_net), 4);
+            unsigned int msg_len =
+                boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
+            if (msg_len > MAX_PACKET_SIZE) {
+                g_logger->error("[TrackerClient] 消息体过长 ({} bytes)。断开连接。", msg_len);
+                self->schedule_reconnect();
+                return;
+            }
+            self->do_read_body(msg_len);
+        });
 }
 
+/**
+ * @brief 读取消息体：根据头部指定的长度异步读取 JSON 数据包内容
+ */
 void TrackerClient::do_read_body(unsigned int msg_len) {
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(msg_len),
-                            [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
-                                if (ec) {
-                                    g_logger->error("[TrackerClient] 读取消息体失败: {}", ec.message());
-                                    self->schedule_reconnect();
-                                    return;
-                                }
-                                std::istream is(&self->m_read_buffer);
-                                std::string body(bytes, '\0');
-                                is.read(&body[0], bytes);
-                                try {
-                                    self->handle_message(nlohmann::json::parse(body));
-                                } catch (const std::exception& e) {
-                                    g_logger->error("[TrackerClient] 解析 JSON 失败: {}", e.what());
-                                }
-                                self->do_read_header();
-                            });
+        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+            if (ec) {
+                if (ec != boost::asio::error::operation_aborted) {
+                    g_logger->error("[TrackerClient] 读取消息体失败: {}", sys_err_to_utf8(ec));
+                }
+                self->schedule_reconnect();
+                return;
+            }
+            
+            try {
+                // 性能优化：直接从 istream 解析 JSON，避免中间字符串拷贝
+                std::istream is(&self->m_read_buffer);
+                self->handle_message(nlohmann::json::parse(is));
+            } catch (const std::exception& e) {
+                g_logger->error("[TrackerClient] 解析 JSON 失败: {}", e.what());
+            }
+            self->do_read_header();
+        });
 }
+/**
+ * @brief 分发消息：从 JSON 数据包中提取消息类型，并调用对应的处理器
+ */
 void TrackerClient::handle_message(const nlohmann::json& msg) {
     try {
         const std::string type = msg.at(SignalProto::MSG_TYPE).get<std::string>();
-        const auto& payload = msg.at(SignalProto::MSG_PAYLOAD);
-        if (type == SignalProto::TYPE_REG_ACK) {
-            m_connected = true;
-            m_self_id = payload.at("self_id").get<std::string>();
-            std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
-            g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
-
-            if (m_on_ready_callback) {
-                // --- 在 P2PManager 的 io_context 上调用回调 ---
-                boost::asio::post(m_p2p_manager->get_io_context(), [this, peers]() { m_on_ready_callback(peers); });
-            }
-        } else if (type == SignalProto::TYPE_PEER_JOIN) {
-            std::string peer_id = payload.at("peer_id").get<std::string>();
-            g_logger->info("[TrackerClient] 对等点 {} 已加入。", peer_id);
-            if (m_p2p_manager) {
-                // --- 在 P2PManager 的 io_context 上调用 ---
-                boost::asio::post(m_p2p_manager->get_io_context(),
-                                  [this, peer_id]() { m_p2p_manager->connect_to_peers({peer_id}); });
-            }
-        } else if (type == SignalProto::TYPE_PEER_LEAVE) {
-            std::string peer_id = payload.at("peer_id").get<std::string>();
-            g_logger->info("[TrackerClient] 对等点 {} 已离开。", peer_id);
-            if (m_p2p_manager) {
-                // --- 在 P2PManager 的 io_context 上调用 ---
-                boost::asio::post(m_p2p_manager->get_io_context(),
-                                  [this, peer_id]() { m_p2p_manager->handle_peer_leave(peer_id); });
-            }
-        } else if (type == SignalProto::TYPE_SIGNAL) {
-            std::string from = payload.at("from").get<std::string>();
-            std::string signal_type = payload.at("signal_type").get<std::string>();
-            std::string sdp = payload.at("sdp").get<std::string>();
-            if (m_p2p_manager) {
-                // --- 在 P2PManager 的 io_context 上调用 ---
-                boost::asio::post(m_p2p_manager->get_io_context(), [this, from, signal_type, sdp]() {
-                    m_p2p_manager->handle_signaling_message(from, signal_type, sdp);
-                });
-            }
+        auto it = m_handlers.find(type);
+        if (it != m_handlers.end()) {
+            it->second(msg.at(SignalProto::MSG_PAYLOAD));
+        } else {
+            g_logger->warn("[TrackerClient] 收到未知消息类型: {}", type);
         }
     } catch (const std::exception& e) {
-        g_logger->error("[TrackerClient] 处理消息失败: {}", e.what());
+        g_logger->error("[TrackerClient] 分发消息失败: {}", e.what());
     }
 }
 
+/**
+ * @brief 注册处理器：建立协议消息类型字符串与逻辑回调函数之间的映射
+ */
+void TrackerClient::register_handlers() {
+    m_handlers[SignalProto::TYPE_REG_ACK] = [this](const nlohmann::json& payload) {
+        m_state = State::CONNECTED;
+        m_self_id = payload.at("self_id").get<std::string>();
+        std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
+        g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
+
+        if (m_on_ready_callback) {
+            auto cb = std::move(m_on_ready_callback);
+            m_on_ready_callback = nullptr; // 显式置空
+            boost::asio::post(m_p2p_manager->get_io_context(),
+                              [cb, peers = std::move(peers)]() { cb(peers); });
+        }
+    };
+
+    m_handlers[SignalProto::TYPE_PEER_JOIN] = [this](const nlohmann::json& payload) {
+        std::string peer_id = payload.at("peer_id").get<std::string>();
+        g_logger->info("[TrackerClient] 对等点 {} 已加入。", peer_id);
+        if (m_p2p_manager) {
+            boost::asio::post(m_p2p_manager->get_io_context(),
+                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { p2p->connect_to_peers({id}); });
+        }
+    };
+
+    m_handlers[SignalProto::TYPE_PEER_LEAVE] = [this](const nlohmann::json& payload) {
+        std::string peer_id = payload.at("peer_id").get<std::string>();
+        g_logger->info("[TrackerClient] 对等点 {} 已离开。", peer_id);
+        if (m_p2p_manager) {
+            boost::asio::post(m_p2p_manager->get_io_context(),
+                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { p2p->handle_peer_leave(id); });
+        }
+    };
+
+    m_handlers[SignalProto::TYPE_SIGNAL] = [this](const nlohmann::json& payload) {
+        std::string from = payload.at("from").get<std::string>();
+        std::string signal_type = payload.at("signal_type").get<std::string>();
+        std::string sdp = payload.at("sdp").get<std::string>();
+        if (m_p2p_manager) {
+            boost::asio::post(m_p2p_manager->get_io_context(),
+                              [p2p = m_p2p_manager, f = std::move(from), t = std::move(signal_type), s = std::move(sdp)]() {
+                                  p2p->handle_signaling_message(f, t, s);
+                              });
+        }
+    };
+}
+
+/**
+ * @brief 序列化并写入消息：添加 4 字节大端序长度头，并放入异步发送队列
+ */
 void TrackerClient::do_write(const std::string& msg) {
     uint32_t len_net = boost::asio::detail::socket_ops::host_to_network_long(static_cast<uint32_t>(msg.length()));
-    m_write_buffer.resize(4 + msg.length());
-    std::memcpy(m_write_buffer.data(), &len_net, 4);
-    std::memcpy(m_write_buffer.data() + 4, msg.c_str(), msg.length());
-    boost::asio::async_write(m_socket, boost::asio::buffer(m_write_buffer),
-                             [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+    std::string packet;
+    packet.resize(4 + msg.length());
+    std::memcpy(&packet[0], &len_net, 4);
+    std::memcpy(&packet[4], msg.data(), msg.length());
+
+    bool write_in_progress = !m_write_queue.empty();
+    m_write_queue.push_back(std::move(packet));
+    if (!write_in_progress) {
+        start_write_next();
+    }
+}
+
+/**
+ * @brief 启动下一个写入任务：确信异步写入操作是串行执行的，防止数据混乱
+ */
+void TrackerClient::start_write_next() {
+    if (m_write_queue.empty()) return;
+
+    boost::asio::async_write(m_socket, boost::asio::buffer(m_write_queue.front()),
+                             [self = shared_from_this()](const boost::system::error_code& ec, std::size_t) {
                                  if (ec) {
-                                     g_logger->error("[TrackerClient] 写入失败: {}", ec.message());
-                                     self->schedule_reconnect();
+                                     if (ec != boost::asio::error::operation_aborted) {
+                                         g_logger->error("[TrackerClient] 写入失败: {}", sys_err_to_utf8(ec));
+                                         self->schedule_reconnect();
+                                     }
+                                     return;
+                                 }
+
+                                 self->m_write_queue.pop_front();
+                                 if (!self->m_write_queue.empty()) {
+                                     self->start_write_next();
                                  }
                              });
 }
+/**
+ * @brief 安全关闭 Socket：将关闭操作 Post 到异步线程以避免竞态
+ */
 void TrackerClient::close_socket() {
     // --- post 到自己的 io_context ---
     boost::asio::post(m_io_context, [this]() {

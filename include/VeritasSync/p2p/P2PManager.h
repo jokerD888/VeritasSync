@@ -84,7 +84,7 @@ class StateManager;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
 public:
-    boost::asio::io_context& get_io_context();
+    virtual boost::asio::io_context& get_io_context();
     // --- create 不再需要参数 ---
     static std::shared_ptr<P2PManager> create();
 
@@ -100,27 +100,27 @@ public:
 
     static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
 
-    ~P2PManager();
+    virtual ~P2PManager();
 
-    void connect_to_peers(const std::vector<std::string>& peer_addresses);
+    virtual void connect_to_peers(const std::vector<std::string>& peer_addresses);
 
     // --- 广播方法 ---
-    void broadcast_current_state();
-    void broadcast_file_update(const FileInfo& file_info);
-    void broadcast_file_delete(const std::string& relative_path);
-    void broadcast_dir_create(const std::string& relative_path);
-    void broadcast_dir_delete(const std::string& relative_path);
+    virtual void broadcast_current_state();
+    virtual void broadcast_file_update(const FileInfo& file_info);
+    virtual void broadcast_file_delete(const std::string& relative_path);
+    virtual void broadcast_dir_create(const std::string& relative_path);
+    virtual void broadcast_dir_delete(const std::string& relative_path);
 
     // --- 由 TrackerClient 调用 ---
-    void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
-                                  const std::string& payload);
-    void handle_peer_leave(const std::string& peer_id);
+    virtual void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
+                                          const std::string& payload);
+    virtual void handle_peer_leave(const std::string& peer_id);
 
     std::vector<TransferStatus> get_active_transfers();
 
     TransferManager::SessionStats get_transfer_stats();
 
-private:
+protected:
     P2PManager();
     void init();
 

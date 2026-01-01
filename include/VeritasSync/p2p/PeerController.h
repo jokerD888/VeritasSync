@@ -30,15 +30,19 @@ enum class PeerState {
 
 /**
  * @brief PeerController 回调接口
+ 
+PeerController 不直接依赖 TrackerClient 或 SyncManager
+通过回调反向通知，保持模块独立性
+
  */
 struct PeerControllerCallbacks {
-    // Peer 状态变化
+    // ① 状态变化通知（上层可更新 UI 或触发逻辑）
     std::function<void(PeerState state)> on_state_changed;
     
-    // 需要发送信令消息 (通过 TrackerClient)
+    // ② 需要发送信令（如 ICE 候选或 SDP，通过 TrackerClient 转发）
     std::function<void(const std::string& signal_type, const std::string& payload)> on_signal_needed;
     
-    // 收到应用层消息 (解密后的完整消息)
+    // ③ 收到应用层消息（解密后的完整消息）
     std::function<void(const std::string& message)> on_message_received;
 };
 

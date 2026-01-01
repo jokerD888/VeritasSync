@@ -221,6 +221,11 @@ add_executable(unit_tests
     tests/test_kcp_session.cpp
     tests/test_parallel_scan.cpp
     tests/test_modern_utils.cpp
+    tests/test_tracker_client.cpp
+    tests/test_database_advanced.cpp
+    tests/test_state_manager_enhanced.cpp
+    tests/test_transfer_manager_async.cpp
+    tests/test_common_utils_robustness.cpp
     
     # --- 被测试的源文件 ---
     src/sync/SyncManager.cpp 
@@ -230,6 +235,10 @@ add_executable(unit_tests
     src/storage/Database.cpp
     src/storage/FileFilter.cpp
     src/net/KcpSession.cpp
+    src/p2p/TrackerClient.cpp
+    src/p2p/P2PManager.cpp
+    src/storage/StateManager.cpp
+    src/sync/TransferManager.cpp
 )
 
 # 包含头文件路径
@@ -247,6 +256,10 @@ target_link_libraries(unit_tests PRIVATE
     kcp::kcp
     Boost::system
     Boost::asio
+    LibJuice::LibJuice
+    miniupnpc::miniupnpc
+    Snappy::snappy
+    efsw::efsw
 )
 
 # 注册测试

@@ -70,6 +70,27 @@ bool IceTransport::initialize(const IceConfig& config) {
     return true;
 }
 
+/*
+
+客户端 A                      信令服务器                    客户端 B
+   │                              │                            │
+   ├─ gather_candidates() ────────┤                            │
+   │   生成本地候选                │                            │
+   ├─ on_local_candidate ─────────┤                            │
+   │   × N 次                      │                            │
+   ├─ on_gathering_done ──────────┼─ 转发 SDP ───────────────→│
+   │                              │                            ├─ set_remote_description()
+   │                              │                            ├─ add_remote_candidate() × N
+   │                              │                            │
+   │←──── 转发 SDP ───────────────┼─ on_gathering_done ───────┤
+   ├─ set_remote_description()    │                            │
+   ├─ add_remote_candidate() × N  │                            │
+   │                              │                            │
+   ├─ STUN 连接性检查 ←─────────────────────────────────────→│
+   │   (P2P 直连尝试)              │                            │
+   ├─ on_state_changed(Connected) │                            │
+   │                              │                            │
+*/
 // --- 公共接口 ---
 void IceTransport::gather_candidates() {
     if (m_agent) {
@@ -133,6 +154,9 @@ bool IceTransport::is_connected() const {
 }
 
 // --- 静态回调 (libjuice 线程) ---
+// 这样的设计模式也叫 适配器模式 (Adapter Pattern)，将 libjuice 的 C 风格回调适配为 C++ 的 std::function 回调，让上层代码更加现代和安全！
+
+// 对应 IceTransportCallbacks::on_state_changed
 void IceTransport::on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self) {
@@ -140,6 +164,7 @@ void IceTransport::on_juice_state_changed(juice_agent_t* agent, juice_state_t st
     }
 }
 
+// 对应 IceTransportCallbacks::on_local_candidate
 void IceTransport::on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_local_candidate && sdp) {
@@ -152,6 +177,7 @@ void IceTransport::on_juice_candidate(juice_agent_t* agent, const char* sdp, voi
     }
 }
 
+// 对应 IceTransportCallbacks::on_gathering_done
 void IceTransport::on_juice_gathering_done(juice_agent_t* agent, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_gathering_done) {
@@ -160,6 +186,7 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* agent, void* user_ptr)
     }
 }
 
+// 对应 IceTransportCallbacks::on_data_received
 void IceTransport::on_juice_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_data_received) {

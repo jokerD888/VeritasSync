@@ -24,8 +24,10 @@ namespace efsw {
 
 namespace VeritasSync {
     class P2PManager;
+    class StateManagerEnhancedTest;
 
     class StateManager {
+        friend class StateManagerEnhancedTest;
     public:
         // 构造函数接收一个 P2PManager 的引用
         StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher,

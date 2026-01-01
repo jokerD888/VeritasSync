@@ -23,23 +23,58 @@ struct KcpConfig {
     int resend = 2;       // 快速重传次数
     int nc = 1;           // 0: 启用流控, 1: 关闭流控
     
-    // 窗口大小
-    int snd_wnd = 4096;
-    int rcv_wnd = 4096;
+    // 窗口大小（单位：包数，非字节数）
+    // KCP 默认 MSS = 1400 字节/包
+    // 实际缓冲区大小 = wnd × MSS
+    // 例如：4096 × 1400 ≈ 5.47 MB
+    int snd_wnd = 4096;   // 发送窗口：同时发送的最大包数
+    int rcv_wnd = 4096;   // 接收窗口：同时接收的最大包数
     
     // 最小 RTO
     int min_rto = 10;
+    
+    // MTU 配置（适配不同网络环境）
+    // 标准以太网: 1500, PPPoE: 1492, 移动网络: 1280-1400
+    int mtu = 1400;
 };
 
 /**
  * @brief KcpSession 回调接口
  */
 struct KcpSessionCallbacks {
-    // KCP 需要发送原始 UDP 数据的回调
-    // 由上层负责通过 ICE 通道发送
+    /**
+     * KCP 需要发送原始 UDP 数据的回调
+     * 由上层负责通过 ICE 通道发送
+     * 
+     * ⚠️ 警告：此回调在 KCP 内部持锁状态下触发
+     * 请勿在回调中调用 KcpSession 的任何方法，否则会死锁
+     * 正确做法：直接转发到底层传输层（如 IceTransport::send）
+     * 
+     * 示例（正确）：
+     *   on_output = [&ice](const char* data, int len) {
+     *       return ice->send(data, len);  // ✅ 安全
+     *   };
+     * 
+     * 示例（错误）：
+     *   on_output = [&session](const char* data, int len) {
+     *       session->get_wait_send_count();  // ❌ 死锁！
+     *       return 0;
+     *   };
+     */
     std::function<int(const char* data, int len)> on_output;
     
-    // 收到完整的应用层消息的回调
+    /**
+     * 收到完整的应用层消息的回调
+     * 
+     * ✅ 安全：此回调在锁外执行，可以安全调用 send() 等方法
+     * 
+     * 示例：
+     *   on_message_received = [&session](const std::string& msg) {
+     *       if (msg == "PING") {
+     *           session->send("PONG");  // ✅ 安全，不会死锁
+     *       }
+     *   };
+     */
     std::function<void(const std::string& message)> on_message_received;
 };
 
@@ -128,6 +163,16 @@ public:
      * @param current_ms 当前时间戳 (毫秒)
      */
     void update(uint32_t current_ms);
+    
+    /**
+     * @brief 获取下次需要调用 update() 的时间戳
+     * 
+     * 用于动态调整定时器，减少无效的 CPU 占用
+     * 
+     * @param current_ms 当前时间戳 (毫秒)
+     * @return 下次更新的时间戳
+     */
+    uint32_t check(uint32_t current_ms) const;
     
     /**
      * @brief 接收应用层消息

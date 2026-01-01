@@ -15,13 +15,13 @@ namespace VeritasSync {
  * @brief ICE 连接状态
  */
 enum class IceState {
-    New,
-    Gathering,
-    Connecting,
-    Connected,
-    Completed,
-    Failed,
-    Disconnected
+    New,          // 初始状态
+    Gathering,    // 正在收集本地候选地址
+    Connecting,   // 正在尝试连接
+    Connected,    // 已连接
+    Completed,    // 连接优化完成
+    Failed,       // 连接失败
+    Disconnected  // 连接断开
 };
 
 /**

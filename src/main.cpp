@@ -20,7 +20,8 @@
 #endif
 
 // --- 全局变量：管理活跃节点 ---
-std::vector<std::unique_ptr<VeritasSync::SyncNode>> g_active_nodes;
+// 注意：SyncNode 现在必须使用 shared_ptr（支持 enable_shared_from_this）
+std::vector<std::shared_ptr<VeritasSync::SyncNode>> g_active_nodes;
 std::mutex g_nodes_mutex;
 
 // --- 全局停止标志 (用于优雅关闭) ---
@@ -66,18 +67,20 @@ int main(int argc, char* argv[]) {
         VeritasSync::g_logger->info("[Main] 收到动态添加任务请求: {}", new_task.sync_key);
         std::lock_guard<std::mutex> lock(g_nodes_mutex);
 
-        auto node = std::make_unique<VeritasSync::SyncNode>(new_task, current_cfg);
+        // 使用工厂方法创建 SyncNode（必须是 shared_ptr）
+        auto node = VeritasSync::SyncNode::create(new_task, current_cfg);
         node->start();
-        g_active_nodes.push_back(std::move(node));
+        g_active_nodes.push_back(node);
     });
 
     // --- 启动初始任务 ---
     {
         std::lock_guard<std::mutex> lock(g_nodes_mutex);
         for (const auto& task : config.tasks) {
-            auto node = std::make_unique<VeritasSync::SyncNode>(task, config);
+            // 使用工厂方法创建 SyncNode（必须是 shared_ptr）
+            auto node = VeritasSync::SyncNode::create(task, config);
             node->start();
-            g_active_nodes.push_back(std::move(node));
+            g_active_nodes.push_back(node);
         }
     }
 

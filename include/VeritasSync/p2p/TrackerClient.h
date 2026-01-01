@@ -2,11 +2,13 @@
 #include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace VeritasSync {
@@ -23,34 +25,39 @@ constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
 constexpr const char* TYPE_SIGNAL = "SIGNAL";
 }  // namespace SignalProto
 
-// --- 2. 添加 using ---
 using boost::asio::ip::tcp;
 
 class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
    public:
+    enum class State { DISCONNECTED, CONNECTING, REGISTERING, CONNECTED };
+
+    static constexpr size_t MAX_PACKET_SIZE = 1024 * 1024;  // 1MB
+    static constexpr std::chrono::seconds RECONNECT_INTERVAL{5};
+
     TrackerClient(std::string host, unsigned short port);
     ~TrackerClient();
 
     void set_p2p_manager(P2PManager* p2p);
 
     void connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready);
+    void stop();
 
     void send_signaling_message(const std::string& to_peer_id, const std::string& type, const std::string& sdp);
     std::string get_self_id() const { return m_self_id; }
 
-    bool is_connected() const { return m_connected; }
+    bool is_connected() const { return m_state == State::CONNECTED; }
 
 private:
     void do_connect();
     void do_register();
     void do_read_header();
-    void handle_read_header(const boost::system::error_code& ec, std::size_t bytes);
     void do_read_body(unsigned int msg_len);
-    void handle_read_body(const boost::system::error_code& ec, std::size_t bytes);
 
     void handle_message(const nlohmann::json& msg);
+    void register_handlers();
 
     void do_write(const std::string& msg);
+    void start_write_next();
     void schedule_reconnect();
     void close_socket();
 
@@ -58,7 +65,7 @@ private:
     std::jthread m_thread;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
 
-    // --- 3. 现在 tcp::socket 是已知的 ---
+    tcp::resolver m_resolver;
     tcp::socket m_socket;
 
     std::string m_host;
@@ -70,11 +77,14 @@ private:
 
     P2PManager* m_p2p_manager = nullptr;
     boost::asio::streambuf m_read_buffer;
-    std::vector<char> m_write_buffer;
+    std::deque<std::string> m_write_queue;
 
     boost::asio::steady_timer m_retry_timer;
 
-    std::atomic<bool> m_connected{false};
+    using MessageHandler = std::function<void(const nlohmann::json&)>;
+    std::unordered_map<std::string, MessageHandler> m_handlers;
+
+    std::atomic<State> m_state{State::DISCONNECTED};
 };
 
 }  // namespace VeritasSync
