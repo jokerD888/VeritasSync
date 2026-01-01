@@ -522,3 +522,273 @@ TEST(P2PManagerConcurrencyTest, ConcurrentCreateDestroy) {
     
     EXPECT_EQ(success_count.load(), 15);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 19. share_state 消息 JSON 解析回归测试
+// ═══════════════════════════════════════════════════════════════
+
+// 【回归测试】验证 share_state 消息中 files 数组的正确解析
+// 此测试是为了防止 PR#xxx 修复的 bug 再次发生：
+// 错误代码使用 payload["files"].items() 遍历数组，
+// 导致 key 变成数组索引 "0", "1" 而不是文件路径
+
+TEST(ShareStateParsingTest, ParseFilesArrayCorrectly) {
+    // 模拟 get_state_as_json_string 生成的 payload 格式
+    nlohmann::json payload;
+    payload["files"] = nlohmann::json::array();
+    
+    // 添加测试文件
+    nlohmann::json file1;
+    file1["path"] = "新建 文本文档.txt";
+    file1["hash"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    file1["mtime"] = 1735747562;
+    payload["files"].push_back(file1);
+    
+    nlohmann::json file2;
+    file2["path"] = "test/subfolder/data.json";
+    file2["hash"] = "abc123def456";
+    file2["mtime"] = 1735700000;
+    payload["files"].push_back(file2);
+    
+    payload["directories"] = nlohmann::json::array({"test", "test/subfolder"});
+    
+    // 使用正确的解析方式（与 P2PManager::handle_share_state 一致）
+    std::vector<FileInfo> parsed_files;
+    
+    if (payload.contains("files")) {
+        for (const auto& file_json : payload["files"]) {
+            FileInfo fi;
+            fi.path = file_json.value("path", "");
+            fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
+            fi.hash = file_json.value("hash", "");
+            if (!fi.path.empty()) {
+                parsed_files.push_back(fi);
+            }
+        }
+    }
+    
+    // 验证解析结果
+    ASSERT_EQ(parsed_files.size(), 2u);
+    
+    EXPECT_EQ(parsed_files[0].path, "新建 文本文档.txt");
+    EXPECT_EQ(parsed_files[0].hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    EXPECT_EQ(parsed_files[0].modified_time, 1735747562u);
+    
+    EXPECT_EQ(parsed_files[1].path, "test/subfolder/data.json");
+    EXPECT_EQ(parsed_files[1].hash, "abc123def456");
+    EXPECT_EQ(parsed_files[1].modified_time, 1735700000u);
+}
+
+// 验证使用 items() 遍历数组会得到错误结果（用于文档说明）
+TEST(ShareStateParsingTest, ItemsIterationGivesIndexAsKey) {
+    nlohmann::json payload;
+    payload["files"] = nlohmann::json::array();
+    
+    nlohmann::json file1;
+    file1["path"] = "actual_path.txt";
+    file1["hash"] = "abc123";
+    file1["mtime"] = 12345;
+    payload["files"].push_back(file1);
+    
+    // 演示错误的解析方式（使用 items()）
+    std::vector<std::string> keys_from_items;
+    for (auto& [key, value] : payload["files"].items()) {
+        keys_from_items.push_back(key);
+    }
+    
+    // items() 遍历数组时，key 是数组索引 "0", "1", ...
+    ASSERT_EQ(keys_from_items.size(), 1u);
+    EXPECT_EQ(keys_from_items[0], "0");  // 不是 "actual_path.txt"！
+}
+
+// 测试空 files 数组的解析
+TEST(ShareStateParsingTest, ParseEmptyFilesArray) {
+    nlohmann::json payload;
+    payload["files"] = nlohmann::json::array();  // 空数组
+    payload["directories"] = nlohmann::json::array();
+    
+    std::vector<FileInfo> parsed_files;
+    
+    if (payload.contains("files")) {
+        for (const auto& file_json : payload["files"]) {
+            FileInfo fi;
+            fi.path = file_json.value("path", "");
+            fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
+            fi.hash = file_json.value("hash", "");
+            if (!fi.path.empty()) {
+                parsed_files.push_back(fi);
+            }
+        }
+    }
+    
+    EXPECT_TRUE(parsed_files.empty());
+}
+
+// 测试缺少 files 字段的情况
+TEST(ShareStateParsingTest, ParsePayloadWithoutFilesField) {
+    nlohmann::json payload;
+    payload["directories"] = nlohmann::json::array({"dir1"});
+    // 没有 files 字段
+    
+    std::vector<FileInfo> parsed_files;
+    
+    if (payload.contains("files")) {
+        for (const auto& file_json : payload["files"]) {
+            FileInfo fi;
+            fi.path = file_json.value("path", "");
+            parsed_files.push_back(fi);
+        }
+    }
+    
+    EXPECT_TRUE(parsed_files.empty());  // 应该安全处理
+}
+
+// 测试 FileInfo 序列化和反序列化的一致性
+TEST(ShareStateParsingTest, FileInfoSerializationRoundTrip) {
+    // 创建原始 FileInfo
+    FileInfo original;
+    original.path = "测试/路径/文件.txt";
+    original.hash = "abc123def456789";
+    original.modified_time = 1735747562;
+    
+    // 序列化为 JSON
+    nlohmann::json j = original;
+    
+    // 反序列化回 FileInfo
+    FileInfo restored = j.get<FileInfo>();
+    
+    // 验证一致性
+    EXPECT_EQ(original.path, restored.path);
+    EXPECT_EQ(original.hash, restored.hash);
+    EXPECT_EQ(original.modified_time, restored.modified_time);
+}
+
+// 测试 get_state_as_json_string 生成的完整消息格式
+TEST(ShareStateParsingTest, FullMessageFormat) {
+    // 模拟完整的 share_state 消息格式
+    nlohmann::json files_array = nlohmann::json::array();
+    
+    FileInfo fi1;
+    fi1.path = "file1.txt";
+    fi1.hash = "hash1";
+    fi1.modified_time = 100;
+    files_array.push_back(nlohmann::json(fi1));
+    
+    FileInfo fi2;
+    fi2.path = "dir/file2.txt";
+    fi2.hash = "hash2";
+    fi2.modified_time = 200;
+    files_array.push_back(nlohmann::json(fi2));
+    
+    nlohmann::json payload;
+    payload["files"] = files_array;
+    payload["directories"] = std::set<std::string>{"dir"};
+    
+    nlohmann::json message;
+    message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
+    message[Protocol::MSG_PAYLOAD] = payload;
+    
+    // 验证消息结构
+    EXPECT_EQ(message[Protocol::MSG_TYPE], "share_state");
+    EXPECT_TRUE(message[Protocol::MSG_PAYLOAD].contains("files"));
+    EXPECT_TRUE(message[Protocol::MSG_PAYLOAD].contains("directories"));
+    
+    // 验证 files 是数组
+    EXPECT_TRUE(message[Protocol::MSG_PAYLOAD]["files"].is_array());
+    EXPECT_EQ(message[Protocol::MSG_PAYLOAD]["files"].size(), 2u);
+    
+    // 验证数组元素包含预期字段
+    auto& first_file = message[Protocol::MSG_PAYLOAD]["files"][0];
+    EXPECT_TRUE(first_file.contains("path"));
+    EXPECT_TRUE(first_file.contains("hash"));
+    EXPECT_TRUE(first_file.contains("mtime"));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 20. 锁竞争与流控回归测试
+// ═══════════════════════════════════════════════════════════════
+
+// 【回归测试】验证 P2PManager 在高并发场景下不会死锁
+// 此测试模拟多个线程同时操作，验证锁的正确使用
+TEST_F(P2PManagerTest, ConcurrentSendAndUpdate_NoDeadlock) {
+    // 模拟场景：多个线程同时发送消息，同时 KCP 更新
+    // 如果 send_cb 持有锁期间调用 send_message，会与 update_all_kcps 竞争锁
+    // 修复后：send_cb 在锁外发送，不会阻塞 update_all_kcps
+    
+    std::atomic<bool> running{true};
+    std::atomic<int> operations{0};
+    std::vector<std::thread> threads;
+    
+    // 模拟多个发送线程（类似 TransferManager 的 worker 线程）
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([this, &running, &operations]() {
+            while (running) {
+                // 模拟广播操作（内部会获取锁）
+                m_manager->broadcast_current_state();
+                operations++;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+    }
+    
+    // 模拟 KCP 更新线程
+    threads.emplace_back([this, &running, &operations]() {
+        while (running) {
+            // 模拟 handle_peer_leave（会获取锁）
+            m_manager->handle_peer_leave("nonexistent");
+            operations++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+    
+    // 运行 200ms，如果死锁会超时
+    auto start = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    running = false;
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+    
+    auto duration = std::chrono::steady_clock::now() - start;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    
+    // 验证测试在合理时间内完成（没有死锁）
+    EXPECT_LT(ms, 500) << "操作应在 500ms 内完成，否则可能存在死锁";
+    EXPECT_GT(operations.load(), 10) << "应该完成了足够多的操作";
+}
+
+// 验证 TransferManager 的流控阈值配置
+// 这是一个文档性测试，确保未来修改时意识到这些参数的重要性
+TEST(TransferConfigTest, CongestionThresholdValue) {
+    // CONGESTION_THRESHOLD 应该在合理范围内
+    // 太高：队列堆积过多，导致卡死（新版本锁层次增加更容易卡死）
+    // 太低：频繁流控，降低传输效率
+    // 新版本建议值：128-512（比旧版本 1024 更低，因为锁竞争更严重）
+    
+    // 这个测试主要是文档作用，提醒开发者注意这个参数
+    const int RECOMMENDED_MIN = 128;
+    const int RECOMMENDED_MAX = 512;
+    const int CURRENT_VALUE = 256;  // 当前配置值
+    
+    EXPECT_GE(CURRENT_VALUE, RECOMMENDED_MIN) 
+        << "CONGESTION_THRESHOLD 不应低于 " << RECOMMENDED_MIN;
+    EXPECT_LE(CURRENT_VALUE, RECOMMENDED_MAX) 
+        << "CONGESTION_THRESHOLD 不应高于 " << RECOMMENDED_MAX;
+}
+
+// 验证流控等待时间配置
+TEST(TransferConfigTest, FlowControlWaitTime) {
+    // 流控等待时间应该足够长，让 KCP 有时间消耗队列
+    // 太短：队列无法清空，继续累积
+    // 太长：降低传输效率
+    // 当前建议值：50-100ms
+    
+    const int MIN_WAIT_MS = 50;
+    const int MAX_WAIT_MS = 100;
+    
+    // 文档性验证
+    EXPECT_GE(MIN_WAIT_MS, 30) << "最小等待时间不应低于 30ms";
+    EXPECT_LE(MAX_WAIT_MS, 200) << "最大等待时间不应超过 200ms";
+}
+

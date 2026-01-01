@@ -123,7 +123,7 @@ void P2PManager::broadcast_current_state() {
 
         // 【重构】使用 m_peers 替代 m_peers_by_agent
         boost::asio::post(self->m_io_context, [self, encrypted_msg = std::move(encrypted_msg)]() {
-            std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+            std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
             int sent_count = 0;
             for (auto& [peer_id, controller] : self->m_peers) {
                 if (controller->is_connected()) {
@@ -220,15 +220,26 @@ void P2PManager::set_turn_config(std::string host, uint16_t port, std::string us
 
 void P2PManager::init() {
     // 【重构】TransferManager 回调使用 PeerController
+    // 【修复】减少锁持有时间，避免与 update_all_kcps 的锁竞争
     auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id,
                                                   const std::string& encrypted_data) -> int {
         auto self = weak_self.lock();
         if (!self) return 0;
 
-        std::lock_guard<std::mutex> lock(self->m_peers_mutex);
-        auto it = self->m_peers.find(peer_id);
-        if (it != self->m_peers.end() && it->second->is_connected()) {
-            return it->second->send_message(encrypted_data);
+        // 先在锁内复制 controller，然后在锁外发送
+        // 这样避免持有锁期间执行耗时的发送操作，减少锁竞争
+        std::shared_ptr<PeerController> controller;
+        {
+            std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
+            auto it = self->m_peers.find(peer_id);
+            if (it != self->m_peers.end() && it->second->is_connected()) {
+                controller = it->second;
+            }
+        }
+        
+        // 锁外发送
+        if (controller && controller->is_valid()) {
+            return controller->send_message(encrypted_data);
         }
         return 0;
     };
@@ -251,7 +262,7 @@ P2PManager::~P2PManager() {
         m_thread.join();
     }
     // 【重构】清理所有 PeerController
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：清空
     for (auto& [peer_id, controller] : m_peers) {
         controller->close();
     }
@@ -278,14 +289,29 @@ void P2PManager::update_all_kcps() {
 
     bool has_activity = false;
     
+    // 【关键修复】先在锁内复制需要更新的 controller 列表
+    // 然后在锁外调用 update_kcp()，避免死锁
+    // 死锁场景：
+    //   update_all_kcps() 持有 m_peers_mutex
+    //   -> controller->update_kcp()
+    //   -> m_kcp->receive() 触发回调
+    //   -> handle_peer_message() 尝试获取 m_peers_mutex → 死锁！
+    std::vector<std::shared_ptr<PeerController>> controllers_to_update;
     {
-        std::lock_guard<std::mutex> lock(m_peers_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
         for (auto& [peer_id, controller] : m_peers) {
             if (controller->is_connected()) {
-                controller->update_kcp(current_time_ms);
-                if (controller->get_kcp_wait_send() > 0) {
-                    has_activity = true;
-                }
+                controllers_to_update.push_back(controller);
+            }
+        }
+    }
+    
+    // 在锁外更新 KCP（回调可以安全地获取锁）
+    for (auto& controller : controllers_to_update) {
+        if (controller->is_valid()) {
+            controller->update_kcp(current_time_ms);
+            if (controller->get_kcp_wait_send() > 0) {
+                has_activity = true;
             }
         }
     }
@@ -311,7 +337,7 @@ void P2PManager::update_all_kcps() {
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：插入peer
 
     if (!m_tracker_client) {
         g_logger->error("[ICE] TrackerClient is null, 无法获取 self_id。");
@@ -394,7 +420,7 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
         if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
             std::shared_ptr<PeerController> controller;
             {
-                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
                 auto it = m_peers.find(peer_id);
                 if (it != m_peers.end()) {
                     controller = it->second;
@@ -425,7 +451,7 @@ void P2PManager::handle_peer_message(const std::string& peer_id, const std::stri
     // 查找对应的 PeerController
     std::shared_ptr<PeerController> controller;
     {
-        std::lock_guard<std::mutex> lock(m_peers_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
         auto it = m_peers.find(peer_id);
         if (it == m_peers.end()) {
             g_logger->warn("[KCP] 收到来自未知对等点 {} 的消息", peer_id);
@@ -447,7 +473,7 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id,
                                           const std::string& payload) {
     std::shared_ptr<PeerController> controller;
     {
-        std::lock_guard<std::mutex> lock(m_peers_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
         auto it = m_peers.find(from_peer_id);
         if (it == m_peers.end()) {
             g_logger->warn("[ICE] 收到来自未知对等点 {} 的信令消息。", from_peer_id);
@@ -471,7 +497,7 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id,
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::handle_peer_leave(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：删除peer
     auto it = m_peers.find(peer_id);
     if (it != m_peers.end()) {
         g_logger->info("[P2P] 对等点 {} 已断开连接，正在清理...", peer_id);
@@ -504,7 +530,7 @@ void P2PManager::schedule_reconnect(const std::string& peer_id) {
         
         // 检查是否已经重新连接
         {
-            std::lock_guard<std::mutex> lock(m_peers_mutex);
+            std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：删除peer
             auto it = m_peers.find(peer_id);
             if (it != m_peers.end() && it->second->is_connected()) {
                 g_logger->info("[ICE] 对等点 {} 已重新连接，取消重连。", peer_id);
@@ -535,7 +561,7 @@ void P2PManager::send_over_kcp(const std::string& msg) {
         g_logger->error("[KCP] 错误：加密失败，广播消息未发送");
         return;
     }
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
     int sent_count = 0;
     for (auto& [peer_id, controller] : m_peers) {
         if (controller->is_connected()) {
@@ -565,7 +591,7 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer
 }
 
 void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
     auto it = m_peers.find(peer_id);
     if (it != m_peers.end() && it->second->is_connected()) {
         send_over_kcp_peer(msg, it->second.get());
@@ -666,12 +692,15 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
         
         try {
             if (payload.contains("files")) {
-                for (auto& [path, info] : payload["files"].items()) {
+                // 正确解析方式：files 是一个数组，每个元素包含 path/hash/mtime
+                for (const auto& file_json : payload["files"]) {
                     FileInfo fi;
-                    fi.path = path;
-                    fi.modified_time = info.value("mtime", static_cast<uint64_t>(0));
-                    fi.hash = info.value("hash", "");
-                    remote_files.push_back(fi);
+                    fi.path = file_json.value("path", "");
+                    fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
+                    fi.hash = file_json.value("hash", "");
+                    if (!fi.path.empty()) {
+                        remote_files.push_back(fi);
+                    }
                 }
             }
             if (payload.contains("directories")) {
@@ -760,7 +789,7 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
                            file_actions.files_to_request.size());
 
             boost::asio::post(self->m_io_context, [self, peer_id, reqs = std::move(file_actions.files_to_request)]() {
-                std::lock_guard<std::mutex> lock(self->m_peers_mutex);
+                std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
                 auto it = self->m_peers.find(peer_id);
                 if (it == self->m_peers.end() || !it->second->is_connected()) return;
 
@@ -790,7 +819,7 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerControlle
         uint64_t sid = from_peer->sync_session_id.load();
         
         boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
-             std::lock_guard<std::mutex> lock(m_peers_mutex);
+             std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
              auto it = m_peers.find(pid);
              if (it != m_peers.end() && it->second->sync_session_id.load() == sid) {
                  if (it->second->sync_timeout_timer) {
@@ -902,7 +931,7 @@ void P2PManager::handle_file_delete(const nlohmann::json& payload, PeerControlle
         std::string pid = from_peer->get_peer_id();
         uint64_t sid = from_peer->sync_session_id.load();
         boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
-             std::lock_guard<std::mutex> lock(m_peers_mutex);
+             std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
              auto it = m_peers.find(pid);
              if (it != m_peers.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
                  it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
@@ -954,7 +983,7 @@ void P2PManager::handle_dir_create(const nlohmann::json& payload, PeerController
         std::string pid = from_peer->get_peer_id();
         uint64_t sid = from_peer->sync_session_id.load();
         boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
-             std::lock_guard<std::mutex> lock(m_peers_mutex);
+             std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
              auto it = m_peers.find(pid);
              if (it != m_peers.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
                  it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
@@ -1002,7 +1031,7 @@ void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerController
         std::string pid = from_peer->get_peer_id();
         uint64_t sid = from_peer->sync_session_id.load();
         boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
-             std::lock_guard<std::mutex> lock(m_peers_mutex);
+             std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
              auto it = m_peers.find(pid);
              if (it != m_peers.end() && it->second->sync_session_id.load() == sid && it->second->sync_timeout_timer) {
                  it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
@@ -1246,7 +1275,7 @@ void P2PManager::handle_sync_begin(const nlohmann::json& payload, PeerController
             [this, self = shared_from_this(), peer_id, session_id](const boost::system::error_code& ec) {
                 if (ec) return;  // 被取消
                 
-                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
                 auto it = m_peers.find(peer_id);
                 if (it == m_peers.end()) return;
                 
@@ -1300,7 +1329,7 @@ void P2PManager::handle_sync_ack(const nlohmann::json& payload, PeerController* 
             // 重新获取 controller 的 shared_ptr
             std::shared_ptr<PeerController> controller;
             {
-                std::lock_guard<std::mutex> lock(m_peers_mutex);
+                std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
                 auto it = m_peers.find(peer_id);
                 if (it != m_peers.end()) {
                     controller = it->second;

@@ -58,8 +58,9 @@ struct UploadContext {
     std::string compressed_data;
     boost::asio::steady_timer timer;
 
-    // 流控阈值
-    const int CONGESTION_THRESHOLD = 4096;
+    // 流控阈值：当 KCP 发送队列超过此值时触发流控等待
+    // 注意：旧版本 (b1148f9) 使用 1024，新版本因锁层次增加，需要更早触发流控
+    const int CONGESTION_THRESHOLD = 256;
 
     UploadContext(boost::asio::io_context& ioc) : timer(ioc), buffer(TransferManager::CHUNK_DATA_SIZE) {
         compressed_data.reserve(TransferManager::CHUNK_DATA_SIZE * 2);
@@ -236,7 +237,9 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     // 这确保了只有当前正在活跃读写的线程（通常只有几个）会占用句柄。
                     ctx->file.close();
 
-                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * 1.5) ? 20 : 5;
+                    // 增加等待时间，给 KCP 更多时间消耗发送队列
+                    // 新版本锁层次增加，需要更长的等待时间
+                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * 4) ? 200 : 100;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
                     ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
                         if (!ec) {

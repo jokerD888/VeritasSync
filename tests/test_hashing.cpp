@@ -232,12 +232,17 @@ TEST_F(HashingTest, BufferHash_MatchesFileHash) {
 }
 
 TEST_F(HashingTest, BufferHash_EmptyData) {
-    // 空数据应该返回空字符串
-    std::string hash = Hashing::CalculateSHA256_Buffer("", 0);
-    EXPECT_EQ(hash, "");
+    // 空数据的 SHA256 是一个固定的已知值 (RFC 6234)
+    // SHA256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    const std::string EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     
+    // 空字符串，长度为0
+    std::string hash = Hashing::CalculateSHA256_Buffer("", 0);
+    EXPECT_EQ(hash, EMPTY_SHA256);
+    
+    // nullptr + 0 长度也应该返回空数据的哈希
     hash = Hashing::CalculateSHA256_Buffer(nullptr, 0);
-    EXPECT_EQ(hash, "");
+    EXPECT_EQ(hash, EMPTY_SHA256);
 }
 
 TEST_F(HashingTest, BufferHash_KnownValues) {

@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
@@ -146,8 +147,9 @@ protected:
     SyncMode m_mode = SyncMode::OneWay;
 
     // 【重构】新的 Peer 管理方式
+    // 使用 shared_mutex: 读操作(查找)可并行，写操作(增删)互斥
     std::map<std::string, std::shared_ptr<PeerController>> m_peers;
-    std::mutex m_peers_mutex;
+    mutable std::shared_mutex m_peers_mutex;
     
     // 【重构】注释旧的双向映射
 #if 0

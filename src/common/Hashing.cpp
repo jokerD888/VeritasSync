@@ -30,17 +30,20 @@ namespace VeritasSync {
 
     // --- 缓冲区版本的 SHA256 (用于验证和小数据) ---
     std::string Hashing::CalculateSHA256_Buffer(const char* data, size_t length) {
-        if (!data || length == 0) {
-            return "";
-        }
+        // 注意：即使 length == 0，也应该计算有效的 SHA256
+        // 空数据的 SHA256 是一个固定值：e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        // 之前的 bug：返回 "" 会被 StateManager 误判为"哈希失败"，导致空文件无限重试
 
         SHA256_CTX sha256Context;
         if (!SHA256_Init(&sha256Context)) {     // 初始化上下文
             return "";
         }
 
-        if (!SHA256_Update(&sha256Context, data, length)) {     // 处理数据
-            return "";
+        // 只有当有数据时才更新，但 length == 0 时跳过更新也是合法的
+        if (data && length > 0) {
+            if (!SHA256_Update(&sha256Context, data, length)) {     // 处理数据
+                return "";
+            }
         }
 
         unsigned char hash[SHA256_DIGEST_LENGTH];
