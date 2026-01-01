@@ -219,6 +219,8 @@ add_executable(unit_tests
     tests/test_encoding_utils.cpp
     tests/test_file_filter.cpp
     tests/test_kcp_session.cpp
+    tests/test_peer_controller.cpp
+    tests/test_p2p_manager.cpp
     tests/test_parallel_scan.cpp
     tests/test_modern_utils.cpp
     tests/test_tracker_client.cpp
@@ -235,6 +237,8 @@ add_executable(unit_tests
     src/storage/Database.cpp
     src/storage/FileFilter.cpp
     src/net/KcpSession.cpp
+    src/net/IceTransport.cpp
+    src/p2p/PeerController.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/storage/StateManager.cpp

@@ -1,7 +1,5 @@
 
 #pragma once
-#include <ikcp.h>
-#include <juice/juice.h>
 
 #include <array>
 #include <boost/asio.hpp>
@@ -22,14 +20,12 @@
 #include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/sync/TransferManager.h"
+#include "VeritasSync/p2p/PeerController.h"
 
 // --- miniupnpc 头文件 ---
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
 // --------------------------
-
-
-#include "VeritasSync/sync/Protocol.h"
 
 namespace VeritasSync {
 
@@ -45,47 +41,11 @@ enum class SyncRole { Source, Destination };
 
 class StateManager;
 class P2PManager;
-class TrackerClient;  // 前向声明
-
-struct PeerContext {
-    std::string peer_id;
-    juice_agent_t* agent = nullptr;
-    ikcpcb* kcp = nullptr;
-    std::shared_ptr<P2PManager> p2p_manager_ptr;
-
-    // --- 连接类型跟踪 ---
-    ConnectionType current_type = ConnectionType::None;
-    // --------------------
-
-    // 记录连接建立时的系统时间戳
-    int64_t connected_at_ts = 0;
-
-    // --- 连接有效性标志（用于安全中断 flood 等异步任务）---
-    std::atomic<bool> is_valid{true};
-    // --------------------
-
-    // --- 同步会话状态 ---
-    std::atomic<uint64_t> sync_session_id{0};      // 当前同步会话 ID
-    std::atomic<size_t> expected_file_count{0};    // 预期文件数
-    std::atomic<size_t> expected_dir_count{0};     // 预期目录数
-    std::atomic<size_t> received_file_count{0};    // 已收到文件数
-    std::atomic<size_t> received_dir_count{0};     // 已收到目录数
-    // ----------------------
-
-    PeerContext(std::string id, juice_agent_t* ag, std::shared_ptr<P2PManager> manager_ptr);
-    ~PeerContext();
-    void setup_kcp(uint32_t conv);
-    
-    // --- 1.2.1 修复：每个会话独立的超时定时器 ---
-    std::shared_ptr<boost::asio::steady_timer> sync_timeout_timer;
-};
-
-class StateManager;
+class TrackerClient;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
 public:
     virtual boost::asio::io_context& get_io_context();
-    // --- create 不再需要参数 ---
     static std::shared_ptr<P2PManager> create();
 
     void set_encryption_key(const std::string& key_string);
@@ -97,8 +57,6 @@ public:
     void set_mode(SyncMode mode) { m_mode = mode; }
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
-
-    static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
 
     virtual ~P2PManager();
 
@@ -128,29 +86,38 @@ protected:
     void schedule_kcp_update();
     void update_all_kcps();
 
-    // --- 上层应用逻辑 ---
+    // --- 上层应用逻辑（使用 PeerController）---
     void send_over_kcp(const std::string& msg);
-    void send_over_kcp_peer(const std::string& msg, PeerContext* peer);
+    void send_over_kcp_peer(const std::string& msg, PeerController* peer);
     void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
-    void handle_kcp_message(const std::string& msg, PeerContext* from_peer);
+    void handle_kcp_message(const std::string& msg, PeerController* from_peer);
 
-    // --- 消息处理器 ---
-    void handle_share_state(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_file_update(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_file_delete(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_file_request(const nlohmann::json& payload, PeerContext* from_peer);
+    // --- 消息处理器（使用 PeerController）---
+    void handle_share_state(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_file_update(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_file_delete(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_file_request(const nlohmann::json& payload, PeerController* from_peer);
 
-    void handle_dir_create(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_dir_delete(const nlohmann::json& payload, PeerContext* from_peer);
+    void handle_dir_create(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer);
 
-    // --- 同步会话管理 ---
-    void handle_sync_begin(const nlohmann::json& payload, PeerContext* from_peer);
-    void handle_sync_ack(const nlohmann::json& payload, PeerContext* from_peer);
-    void send_sync_begin(PeerContext* peer, uint64_t session_id, size_t file_count, size_t dir_count);
-    void send_sync_ack(PeerContext* peer, uint64_t session_id, size_t received_files, size_t received_dirs);
-    void perform_flood_sync(std::shared_ptr<PeerContext> ctx, uint64_t session_id);
+    // --- 同步会话管理（使用 PeerController）---
+    void handle_sync_begin(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_sync_ack(const nlohmann::json& payload, PeerController* from_peer);
+    void send_sync_begin(PeerController* peer, uint64_t session_id, size_t file_count, size_t dir_count);
+    void send_sync_ack(PeerController* peer, uint64_t session_id, size_t received_files, size_t received_dirs);
+    void perform_flood_sync(std::shared_ptr<PeerController> controller, uint64_t session_id);
     // -----------------------
 
+    // 【重构】新增：PeerController 回调处理
+    void handle_peer_state_changed(const std::string& peer_id, PeerState state);
+    void handle_peer_message(const std::string& peer_id, const std::string& message);
+    
+    // 【重构】新增：创建 ICE 配置
+    IceConfig create_ice_config() const;
+
+    // 【重构】移除旧的 libjuice 回调
+#if 0
     // --- libjuice 回调 (C 风格) ---
     static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
     static void on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr);
@@ -162,6 +129,7 @@ protected:
     void handle_juice_candidate(juice_agent_t* agent, const char* sdp);
     void handle_juice_gathering_done(juice_agent_t* agent);
     void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
+#endif
 
     // --- UPnP 辅助函数 ---
     void init_upnp();
@@ -177,11 +145,17 @@ protected:
     SyncRole m_role = SyncRole::Source;
     SyncMode m_mode = SyncMode::OneWay;
 
+    // 【重构】新的 Peer 管理方式
+    std::map<std::string, std::shared_ptr<PeerController>> m_peers;
+    std::mutex m_peers_mutex;
+    
+    // 【重构】注释旧的双向映射
+#if 0
     // --- 关键：双向映射 ---
     std::map<juice_agent_t*, std::shared_ptr<PeerContext>> m_peers_by_agent;
     std::map<std::string, std::shared_ptr<PeerContext>> m_peers_by_id;
-    std::mutex m_peers_mutex;
     // -----------------------
+#endif
 
     CryptoLayer m_crypto;
 
@@ -197,7 +171,8 @@ protected:
     uint16_t m_turn_port = 3478;
     std::string m_turn_username;
     std::string m_turn_password;
-    juice_turn_server_t m_turn_server_config;
+    // 【重构】移除 libjuice 特定结构
+    // juice_turn_server_t m_turn_server_config;
 
     // --- KCP更新频率自适应 ---
     uint32_t m_kcp_update_interval_ms = 20;  // 默认20ms，在10-100ms之间动态调整
