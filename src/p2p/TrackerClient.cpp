@@ -124,6 +124,11 @@ void TrackerClient::stop() {
 void TrackerClient::set_p2p_manager(P2PManager* p2p) { m_p2p_manager = p2p; }
 
 /**
+ * @brief 设置设备 ID，用于 Tracker 注册时识别设备身份
+ */
+void TrackerClient::set_device_id(const std::string& device_id) { m_device_id = device_id; }
+
+/**
  * @brief 启动连接流程：建立后台线程（如果尚未启动）并开始异步连接 Tracker
  * @param sync_key 同步密钥
  * @param on_ready 注册成功后的回调，参数为当前已在线的对等点列表
@@ -185,11 +190,18 @@ void TrackerClient::do_connect() {
         });
 }
 /**
- * @brief 向 Tracker 发送注册消息，携带同步密钥以加入相应的同步网络
+ * @brief 向 Tracker 发送注册消息，携带同步密钥和设备 ID 以加入相应的同步网络
  */
 void TrackerClient::do_register() {
     nlohmann::json payload;
     payload["sync_key"] = m_sync_key;
+    
+    // 【关键】发送配置文件中的设备 ID，而非依赖 Tracker 分配 ip:port
+    if (!m_device_id.empty()) {
+        payload["device_id"] = m_device_id;
+        g_logger->debug("[TrackerClient] 使用设备 ID: {}", m_device_id);
+    }
+    
     nlohmann::json msg;
     msg[SignalProto::MSG_TYPE] = SignalProto::TYPE_REGISTER;
     msg[SignalProto::MSG_PAYLOAD] = payload;

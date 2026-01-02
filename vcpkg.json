@@ -16,6 +16,7 @@
         "gtest",
         "cpp-httplib",
         "boost-interprocess",
-        "sqlite3"
+        "sqlite3",
+        "boost-uuid"
     ]
 }
