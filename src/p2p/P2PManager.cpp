@@ -114,20 +114,16 @@ void P2PManager::broadcast_current_state() {
         json_packet.push_back(MSG_TYPE_JSON);
         json_packet.append(json_state);
 
-        std::string encrypted_msg = self->m_crypto.encrypt(json_packet);
-
-        if (encrypted_msg.empty()) {
-            g_logger->error("[Worker] 加密失败，放弃广播。");
-            return;
-        }
+        // 加密已下沉到 PeerController
+        std::string& final_msg = json_packet;
 
         // 使用 m_peers 替代 m_peers_by_agent
-        boost::asio::post(self->m_io_context, [self, encrypted_msg = std::move(encrypted_msg)]() {
+        boost::asio::post(self->m_io_context, [self, final_msg]() {
             std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
             int sent_count = 0;
             for (auto& [peer_id, controller] : self->m_peers) {
                 if (controller->is_connected()) {
-                    controller->send_message(encrypted_msg);
+                    controller->send_message(final_msg);
                     sent_count++;
                 }
             }
@@ -239,12 +235,13 @@ void P2PManager::init() {
         
         // 锁外发送
         if (controller && controller->is_valid()) {
-            return controller->send_message(encrypted_data);
+            // TransferManager 发来的是明文
+            return controller->send_message(encrypted_data); 
         }
-        return 0;
+        return -1;  // 【断点续传】连接已断开，返回 -1 通知发送方提前终止
     };
     // 创建 TransferManager 传输管理器
-    m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_worker_pool, m_crypto, send_cb);
+    m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_worker_pool, send_cb);
     // 启动io线程
     m_thread = std::jthread([this]() {
         g_logger->info("[P2P] IO context 在后台线程运行...");
@@ -385,6 +382,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
             peer_id,
             m_io_context,
             create_ice_config(),
+            m_crypto,
             std::move(callbacks)
         );
 
@@ -576,21 +574,19 @@ void P2PManager::send_over_kcp(const std::string& msg) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
-    std::string encrypted_msg = m_crypto.encrypt(json_packet);
-    if (encrypted_msg.empty()) {
-        g_logger->error("[KCP] 错误：加密失败，广播消息未发送");
-        return;
-    }
+    // 加密已下沉到 PeerController
+    std::string& final_msg = json_packet; 
+
     std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
     int sent_count = 0;
     for (auto& [peer_id, controller] : m_peers) {
         if (controller->is_connected()) {
-            controller->send_message(encrypted_msg);
+            controller->send_message(final_msg);
             sent_count++;
         }
     }
     if (sent_count > 0) {
-        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", sent_count, encrypted_msg.length());
+        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", sent_count, final_msg.length());
     }
 }
 // 发给特定对等点
@@ -602,12 +598,10 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
-    std::string encrypted_msg = m_crypto.encrypt(json_packet);
-    if (encrypted_msg.empty()) {
-        g_logger->error("[KCP] 错误：加密失败，单播消息未发送至 {}", peer->get_peer_id());
-        return;
-    }
-    peer->send_message(encrypted_msg);
+    // 加密已下沉到 PeerController
+    std::string& final_msg = json_packet; 
+
+    peer->send_message(final_msg);
 }
 // 通过 peer_id 安全发送（会在锁内查找）
 void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id) {
@@ -623,11 +617,11 @@ void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::stri
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from_peer) {
-    std::string decrypted_msg = m_crypto.decrypt(msg);
-    if (decrypted_msg.empty()) {
-        g_logger->warn("[KCP] 解密失败 ({} bytes 原始数据)", msg.size());
-        return;
-    }
+    // 解密已下沉到 PeerController，这里收到的是明文
+    const std::string& decrypted_msg = msg;
+
+    if (decrypted_msg.empty()) return;
+
     uint8_t msg_type = decrypted_msg[0];
     std::string payload(decrypted_msg.begin() + 1, decrypted_msg.end());
 
@@ -1599,14 +1593,15 @@ void P2PManager::broadcast_goodbye() {
     msg[Protocol::MSG_PAYLOAD] = nlohmann::json::object();
     
     std::string msg_str = msg.dump();
-    std::string encrypted_msg = m_crypto.encrypt(msg_str);
+    // 加密已下沉到 PeerController
+    std::string& final_msg = msg_str;
     
     std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
     int sent_count = 0;
     
     for (auto& [peer_id, controller] : m_peers) {
         if (controller->is_connected()) {
-            controller->send_message(encrypted_msg);
+            controller->send_message(final_msg);
             controller->flush_kcp();  // 强制刷新
             sent_count++;
             g_logger->info("[P2P] 向 {} 发送 goodbye", peer_id);

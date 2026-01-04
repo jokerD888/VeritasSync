@@ -7,7 +7,6 @@
 #include <boost/asio/steady_timer.hpp>
 #include <thread>
 
-#include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
@@ -72,9 +71,8 @@ struct UploadContext {
 TransferManager::SessionStats TransferManager::get_session_stats() const {
     return {m_session_total.load(), m_session_done.load()};
 }
-TransferManager::TransferManager(StateManager* sm, boost::asio::thread_pool& pool, CryptoLayer& crypto,
-                                 SendCallback send_cb)
-    : m_state_manager(sm), m_worker_pool(pool), m_crypto(crypto), m_send_callback(std::move(send_cb)) {}
+TransferManager::TransferManager(StateManager* sm, boost::asio::thread_pool& pool, SendCallback send_cb)
+    : m_state_manager(sm), m_worker_pool(pool), m_send_callback(std::move(send_cb)) {}
 
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
@@ -249,12 +247,22 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
                 binary_packet.append(std::move(packet_payload));
 
-                // 加密
-                std::string encrypted_msg = self->m_crypto.encrypt(binary_packet);
-                if (encrypted_msg.empty()) break;  // 错误处理
+                // 加密已下沉到 PeerController (KCP 层)
+                // 这里直接发送明文数据包
+                int pending = self->m_send_callback(ctx->peer_id, binary_packet);
 
-                // 发送并获取积压量
-                int pending = self->m_send_callback(ctx->peer_id, encrypted_msg);
+                // 【断点续传】检测连接是否已断开
+                if (pending < 0) {
+                    g_logger->warn("[Transfer] 连接已断开，终止发送: {} (已发送 {}/{} 块)", 
+                                  ctx->path, ctx->current_chunk, ctx->total_chunks);
+                    ctx->file.close();
+                    {
+                        std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
+                        self->m_sending_files.erase(ctx->path);
+                    }
+                    self->m_session_done++;
+                    return;  // 提前退出，避免 CPU 浪费
+                }
 
                 // 更新进度
                 ctx->current_chunk++;

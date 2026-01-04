@@ -153,9 +153,11 @@ private:
         }
     };
 
-    tcp::acceptor m_acceptor;
     std::vector<std::weak_ptr<Session>> m_sessions;
     std::mutex m_sessions_mutex;
+    
+public:
+    tcp::acceptor m_acceptor;
 };
 
 class TrackerClientTest : public ::testing::Test {
@@ -163,11 +165,15 @@ protected:
     boost::asio::io_context m_server_ctx;
     std::unique_ptr<MockTrackerServer> m_server;
     std::jthread m_server_thread;
-    unsigned short m_port = 9999;
+    unsigned short m_port = 0;
 
     void SetUp() override {
         init_logger();
         m_server = std::make_unique<MockTrackerServer>(m_server_ctx, m_port);
+        // 如果端口是 0，获取实际绑定的端口
+        if (m_port == 0) {
+            m_port = m_server->m_acceptor.local_endpoint().port();
+        }
         m_server_thread = std::jthread([this]() { m_server_ctx.run(); });
     }
 

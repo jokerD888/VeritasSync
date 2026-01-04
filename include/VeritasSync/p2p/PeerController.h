@@ -13,6 +13,7 @@
 
 #include "VeritasSync/net/IceTransport.h"
 #include "VeritasSync/net/KcpSession.h"
+#include "VeritasSync/common/CryptoLayer.h"
 
 namespace VeritasSync {
 
@@ -86,6 +87,7 @@ public:
         const std::string& peer_id,
         boost::asio::io_context& io_context,
         const IceConfig& ice_config,
+        CryptoLayer& crypto,
         PeerControllerCallbacks callbacks);
     
     ~PeerController();
@@ -197,6 +199,7 @@ private:
         const std::string& self_id,
         const std::string& peer_id,
         boost::asio::io_context& io_context,
+        CryptoLayer& crypto,
         PeerControllerCallbacks callbacks);
     
     /// 第一阶段初始化：创建 IceTransport
@@ -226,6 +229,7 @@ private:
     bool m_is_offer_side;    // 是否是 Offer 方
     
     boost::asio::io_context& m_io_context;
+    CryptoLayer& m_crypto;
     PeerControllerCallbacks m_callbacks;
     
     std::shared_ptr<IceTransport> m_ice;

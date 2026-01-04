@@ -43,7 +43,8 @@ public:
     };
 
     // 构造函数注入所有依赖
-    TransferManager(StateManager* sm, boost::asio::thread_pool& pool, CryptoLayer& crypto, SendCallback send_cb);
+    // 构造函数注入所有依赖
+    TransferManager(StateManager* sm, boost::asio::thread_pool& pool, SendCallback send_cb);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
@@ -122,7 +123,6 @@ public:
 private:
     StateManager* m_state_manager;
     boost::asio::thread_pool& m_worker_pool;
-    CryptoLayer& m_crypto;
     SendCallback m_send_callback;
 
     struct ReceivingFile {

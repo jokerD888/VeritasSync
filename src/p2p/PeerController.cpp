@@ -15,6 +15,7 @@ std::shared_ptr<PeerController> PeerController::create(
     const std::string& peer_id,
     boost::asio::io_context& io_context,
     const IceConfig& ice_config,
+    CryptoLayer& crypto,
     PeerControllerCallbacks callbacks) {
     
     // 使用内部派生类绕过 private 构造函数
@@ -23,12 +24,13 @@ std::shared_ptr<PeerController> PeerController::create(
             const std::string& self, 
             const std::string& peer, 
             boost::asio::io_context& ioc, 
+            CryptoLayer& cry,
             PeerControllerCallbacks cb)
-            : PeerController(self, peer, ioc, std::move(cb)) {}
+            : PeerController(self, peer, ioc, cry, std::move(cb)) {}
     };
     
     auto controller = std::make_shared<PeerControllerMaker>(
-        self_id, peer_id, io_context, std::move(callbacks));
+        self_id, peer_id, io_context, crypto, std::move(callbacks));
     
     // 第一阶段：创建 IceTransport（但不绑定回调）
     if (!controller->initialize_ice(ice_config)) {
@@ -49,11 +51,13 @@ PeerController::PeerController(
     const std::string& self_id,
     const std::string& peer_id,
     boost::asio::io_context& io_context,
+    CryptoLayer& crypto,
     PeerControllerCallbacks callbacks)
     : m_self_id(self_id)
     , m_peer_id(peer_id)
     , m_is_offer_side(self_id < peer_id)  // 自动判断角色
     , m_io_context(io_context)
+    , m_crypto(crypto)
     , m_callbacks(std::move(callbacks)) {
 }
 
@@ -367,10 +371,25 @@ void PeerController::on_ice_gathering_done(const std::string& local_desc) {
 void PeerController::on_ice_data_received(const char* data, size_t size) {
     if (!m_is_valid.load()) return;
     
+    // 【加密层下沉】
+    // 1. 尝试解密
+    std::string ciphertext(data, size);
+    std::string plaintext = m_crypto.decrypt(ciphertext);
+
+    // 2. 解密失败 = 丢包 (KCP 会超时重传)
+    // 这种机制确保了只有合法且完整的数据包才能进入 KCP 状态机
+    if (plaintext.empty()) {
+        if (g_logger) {
+            g_logger->warn("[PeerController] ❌ 解密失败或 Tag 不匹配，丢弃数据包 ({} bytes)", size);
+        }
+        return;
+    }
+
     // ICE 收到的数据喂给 KCP
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_kcp) {
-        m_kcp->input(data, size);
+        // 3. 将明文喂给 KCP
+        m_kcp->input(plaintext.data(), plaintext.size());
     }
 }
 
@@ -384,12 +403,25 @@ int PeerController::on_kcp_output(const char* data, int len) {
     
     if (!m_is_valid.load()) return -1;
     
+    // 【加密层下沉】
+    // 1. 加密整个 KCP 包 (Header + Content)
+    std::string plaintext(data, len);
+    std::string ciphertext = m_crypto.encrypt(plaintext);
+
+    if (ciphertext.empty()) {
+        if (g_logger) {
+            g_logger->error("[PeerController] ❌ 加密失败，无法发送");
+        }
+        return -1;
+    }
+
     // 注意：这里不能加 m_mutex 锁，因为可能在 send() 中被调用，
     // 而 send() 已经持有锁，会导致死锁。
     // 但 m_ice 是 shared_ptr，线程安全。
     auto ice = m_ice;  // 拷贝一份，避免析构时的竞态
     if (ice) {
-        return ice->send(data, len);
+        // 2. 发送密文
+        return ice->send(ciphertext.data(), ciphertext.size());
     }
     return -1;
 }

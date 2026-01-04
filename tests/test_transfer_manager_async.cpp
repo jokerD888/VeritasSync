@@ -50,7 +50,7 @@ protected:
             return 0; 
         };
         
-        tm = std::make_shared<TransferManager>(sm.get(), worker_pool, crypto, send_cb);
+        tm = std::make_shared<TransferManager>(sm.get(), worker_pool, send_cb);
     }
 
     void TearDown() override {

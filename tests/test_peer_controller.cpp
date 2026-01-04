@@ -13,6 +13,7 @@
 
 #include "VeritasSync/p2p/PeerController.h"
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/common/CryptoLayer.h"
 
 using namespace VeritasSync;
 
@@ -74,6 +75,7 @@ protected:
     std::unique_ptr<boost::asio::executor_work_guard<
         boost::asio::io_context::executor_type>> m_work_guard;
     std::thread m_io_thread;
+    CryptoLayer m_crypto;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -91,6 +93,7 @@ TEST_F(PeerControllerTest, CreateController) {
         "peer_id_456",
         m_io_context,
         create_ice_config(),
+        m_crypto,
         std::move(callbacks)
     );
     
@@ -108,13 +111,13 @@ TEST_F(PeerControllerTest, OfferSideDetermination) {
     
     // self_id < peer_id -> offer side
     auto controller1 = PeerController::create(
-        "aaa", "zzz", m_io_context, create_ice_config(), callbacks);
+        "aaa", "zzz", m_io_context, create_ice_config(), m_crypto, callbacks);
     ASSERT_NE(controller1, nullptr);
     EXPECT_TRUE(controller1->is_offer_side());
     
     // self_id > peer_id -> answer side
     auto controller2 = PeerController::create(
-        "zzz", "aaa", m_io_context, create_ice_config(), callbacks);
+        "zzz", "aaa", m_io_context, create_ice_config(), m_crypto, callbacks);
     ASSERT_NE(controller2, nullptr);
     EXPECT_FALSE(controller2->is_offer_side());
 }
@@ -125,7 +128,7 @@ TEST_F(PeerControllerTest, CloseController) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     EXPECT_TRUE(controller->is_valid());
@@ -149,11 +152,11 @@ TEST_F(PeerControllerTest, ConvIdConsistencyBetweenPeers) {
     
     // 模拟 A 连接 B
     auto controller_a = PeerController::create(
-        "peer_A", "peer_B", m_io_context, create_ice_config(), callbacks);
+        "peer_A", "peer_B", m_io_context, create_ice_config(), m_crypto, callbacks);
     
     // 模拟 B 连接 A
     auto controller_b = PeerController::create(
-        "peer_B", "peer_A", m_io_context, create_ice_config(), callbacks);
+        "peer_B", "peer_A", m_io_context, create_ice_config(), m_crypto, callbacks);
     
     ASSERT_NE(controller_a, nullptr);
     ASSERT_NE(controller_b, nullptr);
@@ -177,7 +180,7 @@ TEST_F(PeerControllerTest, InitialState) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -195,7 +198,7 @@ TEST_F(PeerControllerTest, SyncSessionStateInitialization) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -223,7 +226,7 @@ TEST_F(PeerControllerTest, SignalingTypeForOfferSide) {
     
     // self_id < peer_id -> offer side
     auto controller = PeerController::create(
-        "aaa", "zzz", m_io_context, create_ice_config(), std::move(callbacks));
+        "aaa", "zzz", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     EXPECT_TRUE(controller->is_offer_side());
@@ -245,7 +248,7 @@ TEST_F(PeerControllerTest, HandleSignalingMessage) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -270,7 +273,7 @@ TEST_F(PeerControllerTest, SendMessageWithoutConnection) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -289,7 +292,7 @@ TEST_F(PeerControllerTest, GetIceTransportAndKcpSession) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -308,7 +311,7 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerManagement) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -332,7 +335,7 @@ TEST_F(PeerControllerTest, ConcurrentStateQueries) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -371,7 +374,7 @@ TEST_F(PeerControllerTest, ConcurrentCloseAndQueries) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -408,7 +411,7 @@ TEST_F(PeerControllerTest, AtomicConnectedAtTs) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -430,7 +433,7 @@ TEST_F(PeerControllerTest, EmptyPeerIds) {
     
     // 空的 peer ID 应该仍能创建（虽然不推荐）
     auto controller = PeerController::create(
-        "", "", m_io_context, create_ice_config(), std::move(callbacks));
+        "", "", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     // 可能创建成功也可能失败，取决于 IceTransport 的行为
     // 这里只验证不会崩溃
@@ -443,7 +446,7 @@ TEST_F(PeerControllerTest, SameSelfAndPeerIds) {
     
     // 相同的 self 和 peer ID
     auto controller = PeerController::create(
-        "same_id", "same_id", m_io_context, create_ice_config(), std::move(callbacks));
+        "same_id", "same_id", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -460,7 +463,7 @@ TEST_F(PeerControllerTest, EmptyCallbacks) {
     // 不设置任何回调
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -482,7 +485,7 @@ TEST_F(PeerControllerTest, CallbacksArePostedToIoContext) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -510,7 +513,7 @@ TEST_F(PeerControllerTest, UpdateKcpWithoutConnection) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -528,7 +531,7 @@ TEST_F(PeerControllerTest, UpdateKcpRapidCalls) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -551,7 +554,7 @@ TEST_F(PeerControllerTest, MultipleCloseCallsAreSafe) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     EXPECT_TRUE(controller->is_valid());
@@ -577,7 +580,7 @@ TEST_F(PeerControllerTest, CloseAfterInitiateConnection) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -599,7 +602,7 @@ TEST_F(PeerControllerTest, OperationsAfterClose) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     controller->close();
@@ -620,7 +623,7 @@ TEST_F(PeerControllerTest, SendMessageOnClosedController) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     controller->close();
@@ -641,7 +644,7 @@ TEST_F(PeerControllerTest, StateConsistencyAfterOperations) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -687,9 +690,9 @@ TEST_F(PeerControllerTest, ConvIdWithVariousIds) {
     
     for (const auto& [self_id, peer_id] : test_cases) {
         auto ctrl_a = PeerController::create(
-            self_id, peer_id, m_io_context, create_ice_config(), callbacks);
+            self_id, peer_id, m_io_context, create_ice_config(), m_crypto, callbacks);
         auto ctrl_b = PeerController::create(
-            peer_id, self_id, m_io_context, create_ice_config(), callbacks);
+            peer_id, self_id, m_io_context, create_ice_config(), m_crypto, callbacks);
         
         ASSERT_NE(ctrl_a, nullptr);
         ASSERT_NE(ctrl_b, nullptr);
@@ -719,6 +722,7 @@ TEST_F(PeerControllerTest, RapidCreateAndDestroy) {
             "peer_" + std::to_string(i),
             m_io_context,
             create_ice_config(),
+            m_crypto,
             callbacks
         );
         
@@ -744,6 +748,7 @@ TEST_F(PeerControllerTest, ConcurrentCreateCloseAndQuery) {
                     "peer_" + std::to_string(i),
                     m_io_context,
                     create_ice_config(),
+                    m_crypto,
                     std::move(callbacks)
                 );
                 
@@ -781,7 +786,7 @@ TEST_F(PeerControllerTest, SyncSessionCounters) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -812,7 +817,7 @@ TEST_F(PeerControllerTest, ConcurrentCounterIncrements) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -845,7 +850,7 @@ TEST_F(PeerControllerTest, ConnectedAtTimestamp) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -870,7 +875,7 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerInitiallyNull) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -884,7 +889,7 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerAssignment) {
     callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), std::move(callbacks));
+        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     
@@ -916,7 +921,7 @@ TEST_F(PeerControllerTest, VeryLongIds) {
     std::string long_peer_id(256, 'b');
     
     auto controller = PeerController::create(
-        long_self_id, long_peer_id, m_io_context, create_ice_config(), std::move(callbacks));
+        long_self_id, long_peer_id, m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     EXPECT_EQ(controller->get_self_id(), long_self_id);
@@ -932,7 +937,7 @@ TEST_F(PeerControllerTest, UnicodeIds) {
     std::string unicode_peer = "用户二";
     
     auto controller = PeerController::create(
-        unicode_self, unicode_peer, m_io_context, create_ice_config(), std::move(callbacks));
+        unicode_self, unicode_peer, m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
     
     ASSERT_NE(controller, nullptr);
     EXPECT_EQ(controller->get_self_id(), unicode_self);
@@ -952,7 +957,7 @@ TEST_F(PeerControllerTest, EmptyIceConfig) {
     
     // 空配置可能导致创建失败，但不应崩溃
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, empty_config, std::move(callbacks));
+        "self", "peer", m_io_context, empty_config, m_crypto, std::move(callbacks));
     
     // 可能返回 nullptr，但绝不能崩溃
     // 如果创建成功，应该是有效的
@@ -975,7 +980,7 @@ TEST_F(PeerControllerTest, IceConfigWithTurn) {
     config.turn_password = "pass";
     
     auto controller = PeerController::create(
-        "self", "peer", m_io_context, config, std::move(callbacks));
+        "self", "peer", m_io_context, config, m_crypto, std::move(callbacks));
     
     // 即使 TURN 服务器不可达，创建也应该成功
     ASSERT_NE(controller, nullptr);
