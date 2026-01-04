@@ -228,6 +228,7 @@ add_executable(unit_tests
     tests/test_state_manager_enhanced.cpp
     tests/test_transfer_manager_async.cpp
     tests/test_common_utils_robustness.cpp
+    tests/test_resume_transfer.cpp
     
     # --- 被测试的源文件 ---
     src/sync/SyncManager.cpp 

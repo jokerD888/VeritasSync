@@ -80,7 +80,18 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     if (peer_id.empty()) return;
 
     std::string requested_path_str = request_payload.at("path").get<std::string>();
-    g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", requested_path_str, peer_id);
+    
+    // 【断点续传】解析可选参数
+    uint32_t start_chunk = request_payload.value("start_chunk", 0u);
+    std::string expected_hash = request_payload.value("expected_hash", "");
+    uint64_t expected_size = request_payload.value("expected_size", 0ull);
+    
+    if (start_chunk > 0) {
+        g_logger->info("[Transfer] 收到续传请求: {} -> {} (start_chunk={})", 
+                      requested_path_str, peer_id, start_chunk);
+    } else {
+        g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", requested_path_str, peer_id);
+    }
 
     // 1. UI 占位
     {
@@ -98,7 +109,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     ctx->path = requested_path_str;
 
     // 2. 启动异步任务链
-    boost::asio::post(m_worker_pool, [self = shared_from_this(), ctx]() {
+    boost::asio::post(m_worker_pool, [self = shared_from_this(), ctx, start_chunk, expected_hash, expected_size]() {
         // --- 准备阶段 ---
         if (!self->m_state_manager) return;
 
@@ -126,6 +137,31 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
             self->m_session_done++;
             return;
         }
+        
+        // 【断点续传】校验并设置起始位置
+        uint32_t actual_start_chunk = 0;
+        if (start_chunk > 0) {
+            // 获取当前文件信息进行校验
+            std::string current_hash = ctx->file_hash;
+            uint64_t current_size = std::filesystem::file_size(full_path, fs_ec);
+            
+            bool hash_match = expected_hash.empty() || (current_hash == expected_hash);
+            bool size_match = (expected_size == 0) || (current_size == expected_size);
+            
+            if (!hash_match) {
+                g_logger->warn("[Transfer] 续传校验失败: hash 不匹配，从头开始发送 {} (本地: {}..., 期望: {}...)", 
+                              ctx->path, current_hash.substr(0, 8), expected_hash.substr(0, 8));
+            } else if (!size_match) {
+                g_logger->warn("[Transfer] 续传校验失败: size 不匹配，从头开始发送 {} (本地: {}, 期望: {})", 
+                              ctx->path, current_size, expected_size);
+            } else {
+                actual_start_chunk = start_chunk;
+                g_logger->info("[Transfer] 续传校验通过: {} 从 chunk #{} 开始", ctx->path, actual_start_chunk);
+            }
+        }
+        
+        // 设置起始块
+        ctx->current_chunk = static_cast<int>(actual_start_chunk);
 
         // --- 直接进入循环，由循环内部负责按需打开和关闭句柄 ---
 
@@ -302,7 +338,10 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
 
         auto it = self->m_receiving_files.find(file_path_str);
-        if (it == self->m_receiving_files.end()) {
+        bool is_new_task = (it == self->m_receiving_files.end());
+        bool need_open_stream = is_new_task;
+        
+        if (is_new_task) {
             // 新下载任务
             std::filesystem::path relative_path = Utf8ToPath(file_path_str);
             std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
@@ -322,18 +361,35 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             ReceivingFile new_file;
             new_file.temp_path = temp_path.string();
             new_file.total_chunks = total_chunks;
-            new_file.file_stream.open(temp_path, std::ios::binary | std::ios::out);
-
-            if (!new_file.file_stream.is_open()) {
-                std::string sys_err = GetLastSystemError();
-                g_logger->error("[Transfer] ❌ 无法创建临时文件: {} | {}", PathToUtf8(temp_path), sys_err);
-                return;
-            }
+            new_file.peer_id = peer_id;  // 【断点续传】保存 peer_id
 
             auto res = self->m_receiving_files.insert({file_path_str, std::move(new_file)});
             it = res.first;
             self->m_session_total++;
             g_logger->info("[Transfer] 开始接收: {} ({} 块)", file_path_str, total_chunks);
+        } else {
+            // 已有记录（可能是预注册的或续传的）
+            // 更新 peer_id 和 total_chunks
+            it->second.peer_id = peer_id;
+            if (it->second.total_chunks == 0) {
+                it->second.total_chunks = total_chunks;
+            }
+            
+            // 如果 temp_path 为空（预注册状态），需要初始化
+            if (it->second.temp_path.empty()) {
+                std::filesystem::path relative_path = Utf8ToPath(file_path_str);
+                std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+                if (full_path.has_parent_path()) {
+                    std::error_code dir_ec;
+                    std::filesystem::create_directories(full_path.parent_path(), dir_ec);
+                }
+                std::filesystem::path temp_path = full_path;
+                temp_path += ".veritas_tmp";
+                it->second.temp_path = temp_path.string();
+                need_open_stream = true;
+                self->m_session_total++;
+                g_logger->info("[Transfer] 开始接收（从预注册）: {} ({} 块)", file_path_str, total_chunks);
+            }
         }
 
         ReceivingFile& recv_file = it->second;
@@ -357,20 +413,39 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         // 【修改】使用 now 变量更新活跃时间 (喂狗)
         recv_file.last_active = now;
 
-        if (recv_file.file_stream.is_open()) {
-            size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
-            recv_file.file_stream.seekp(offset);
-            recv_file.file_stream.write(uncompressed_data.data(), uncompressed_data.size());
+        // 【断点续传】如果文件流未打开，需要打开或重新打开
+        if (!recv_file.file_stream.is_open()) {
+            std::filesystem::path temp_path = Utf8ToPath(recv_file.temp_path);
             
-            // 检查写入是否成功
-            if (recv_file.file_stream.fail()) {
+            if (need_open_stream && !std::filesystem::exists(temp_path)) {
+                // 新任务，创建新文件
+                recv_file.file_stream.open(temp_path, std::ios::binary | std::ios::out);
+            } else {
+                // 续传任务，以读写模式打开现有文件
+                recv_file.file_stream.open(temp_path, std::ios::binary | std::ios::in | std::ios::out);
+            }
+            
+            if (!recv_file.file_stream.is_open()) {
                 std::string sys_err = GetLastSystemError();
-                g_logger->error("[Transfer] ❌ 文件写入失败 (chunk {}): {} | {}", chunk_index, file_path_str, sys_err);
-                recv_file.file_stream.close();
+                g_logger->error("[Transfer] ❌ 无法打开临时文件: {} | {}", recv_file.temp_path, sys_err);
                 return;
             }
-            recv_file.received_chunks++;
+            g_logger->debug("[Transfer] 打开文件流: {}", recv_file.temp_path);
         }
+        
+        // 写入数据
+        size_t offset = static_cast<size_t>(chunk_index) * CHUNK_DATA_SIZE;
+        recv_file.file_stream.seekp(offset);
+        recv_file.file_stream.write(uncompressed_data.data(), uncompressed_data.size());
+        
+        // 检查写入是否成功
+        if (recv_file.file_stream.fail()) {
+            std::string sys_err = GetLastSystemError();
+            g_logger->error("[Transfer] ❌ 文件写入失败 (chunk {}): {} | {}", chunk_index, file_path_str, sys_err);
+            recv_file.file_stream.close();
+            return;
+        }
+        recv_file.received_chunks++;
 
         // 4. 检查完成
         if (recv_file.received_chunks >= recv_file.total_chunks) {
@@ -471,21 +546,155 @@ void TransferManager::cleanup_stale_buffers() {
     std::lock_guard<std::mutex> lock(m_transfer_mutex);
     auto now = std::chrono::steady_clock::now();
 
-    for (auto it = m_receiving_files.begin(); it != m_receiving_files.end();) {
-        // 10分钟彻底清理
+    for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ++it) {
+        // 10分钟超时：只关闭文件流，保留记录和临时文件以便续传
         auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.last_active);
         if (duration.count() > 10) {
-            g_logger->warn("[Transfer] ⏰ 接收超时 (僵尸清理): {}", it->first);
-            if (it->second.file_stream.is_open()) it->second.file_stream.close();
-            std::error_code rm_ec;
-            std::filesystem::remove(it->second.temp_path, rm_ec);
-            if (rm_ec) {
-                g_logger->warn("[Transfer] 清理临时文件失败: {} | {}", it->second.temp_path, FormatErrorCode(rm_ec));
+            if (it->second.file_stream.is_open()) {
+                g_logger->warn("[Transfer] ⏰ 接收超时，关闭文件流（保留状态等待续传）: {}", it->first);
+                it->second.file_stream.close();
             }
+            // 【断点续传】不删除记录和临时文件，由 cancel_receives_for_peer 或后续校验决定
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 断点续传相关方法
+// ═══════════════════════════════════════════════════════════════
+
+void TransferManager::cancel_receives_for_peer(const std::string& peer_id) {
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    
+    int cancelled_count = 0;
+    for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ) {
+        if (it->second.peer_id == peer_id) {
+            g_logger->info("[Transfer] 清理来自 {} 的未完成任务: {} ({}/{})", 
+                          peer_id, it->first, 
+                          it->second.received_chunks, it->second.total_chunks);
+            
+            // 关闭文件流
+            if (it->second.file_stream.is_open()) {
+                it->second.file_stream.close();
+            }
+            
+            // 删除临时文件
+            std::error_code ec;
+            std::filesystem::remove(it->second.temp_path, ec);
+            if (ec) {
+                g_logger->warn("[Transfer] 删除临时文件失败: {} | {}", 
+                              it->second.temp_path, FormatErrorCode(ec));
+            }
+            
             it = m_receiving_files.erase(it);
+            cancelled_count++;
         } else {
             ++it;
         }
+    }
+    
+    if (cancelled_count > 0) {
+        g_logger->info("[Transfer] 已清理 {} 的 {} 个未完成任务", peer_id, cancelled_count);
+    }
+}
+
+std::optional<TransferManager::ResumeInfo> TransferManager::check_resume_eligibility(
+    const std::string& path,
+    const std::string& remote_hash,
+    uint64_t remote_size) {
+    
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    
+    auto it = m_receiving_files.find(path);
+    if (it == m_receiving_files.end()) {
+        return std::nullopt;  // 没有未完成任务
+    }
+    
+    ReceivingFile& rf = it->second;
+    
+    // 检查是否已完成
+    if (rf.total_chunks > 0 && rf.received_chunks >= rf.total_chunks) {
+        g_logger->debug("[Transfer] 文件已完成，无需续传: {}", path);
+        return std::nullopt;
+    }
+    
+    // 检查是否有有效进度
+    if (rf.received_chunks == 0) {
+        g_logger->debug("[Transfer] 尚未收到任何块，无需续传: {}", path);
+        return std::nullopt;
+    }
+    
+    // 检查临时文件是否存在
+    if (!std::filesystem::exists(rf.temp_path)) {
+        g_logger->warn("[Transfer] 临时文件已不存在，无法续传: {}", path);
+        m_receiving_files.erase(it);
+        return std::nullopt;
+    }
+    
+    // 校验源文件是否变化（hash）
+    if (!rf.expected_hash.empty() && !remote_hash.empty() && rf.expected_hash != remote_hash) {
+        g_logger->warn("[Transfer] 源文件 hash 已变化，需要重新传输: {} (本地记录: {}..., 远程: {}...)", 
+                      path, rf.expected_hash.substr(0, 8), remote_hash.substr(0, 8));
+        // 删除旧的临时文件和记录
+        if (rf.file_stream.is_open()) rf.file_stream.close();
+        std::error_code ec;
+        std::filesystem::remove(rf.temp_path, ec);
+        m_receiving_files.erase(it);
+        return std::nullopt;
+    }
+    
+    // 校验源文件是否变化（size）
+    if (rf.expected_size > 0 && remote_size > 0 && rf.expected_size != remote_size) {
+        g_logger->warn("[Transfer] 源文件大小已变化，需要重新传输: {} (本地记录: {}, 远程: {})", 
+                      path, rf.expected_size, remote_size);
+        if (rf.file_stream.is_open()) rf.file_stream.close();
+        std::error_code ec;
+        std::filesystem::remove(rf.temp_path, ec);
+        m_receiving_files.erase(it);
+        return std::nullopt;
+    }
+    
+    // 可以续传
+    g_logger->info("[Transfer] ✅ 可以续传: {} ({}/{} chunks, {:.1f}%)", 
+                  path, rf.received_chunks, rf.total_chunks,
+                  rf.total_chunks > 0 ? (100.0 * rf.received_chunks / rf.total_chunks) : 0.0);
+    
+    return ResumeInfo{
+        path,
+        rf.received_chunks,
+        rf.total_chunks,
+        rf.expected_hash,
+        rf.expected_size,
+        rf.temp_path
+    };
+}
+
+void TransferManager::register_expected_metadata(
+    const std::string& path,
+    const std::string& peer_id,
+    const std::string& hash,
+    uint64_t size) {
+    
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    
+    auto it = m_receiving_files.find(path);
+    if (it != m_receiving_files.end()) {
+        // 更新已有记录的元数据
+        it->second.peer_id = peer_id;
+        it->second.expected_hash = hash;
+        it->second.expected_size = size;
+        g_logger->debug("[Transfer] 更新接收任务元数据: {} (hash={}..., size={})", 
+                       path, hash.substr(0, 8), size);
+    } else {
+        // 创建新的占位记录（actual file_stream 和 temp_path 在 handle_chunk 时填充）
+        ReceivingFile rf;
+        rf.peer_id = peer_id;
+        rf.expected_hash = hash;
+        rf.expected_size = size;
+        rf.last_active = std::chrono::steady_clock::now();
+        m_receiving_files[path] = std::move(rf);
+        g_logger->debug("[Transfer] 预注册接收任务: {} (hash={}..., size={})", 
+                       path, hash.substr(0, 8), size);
     }
 }
 

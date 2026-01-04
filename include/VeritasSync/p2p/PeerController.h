@@ -175,6 +175,18 @@ public:
     /// 同步超时定时器
     std::shared_ptr<boost::asio::steady_timer> sync_timeout_timer;
     
+    // --- 断点续传相关 ---
+    
+    /// 是否收到过 goodbye 消息（标记对端是主动退出而非掉线）
+    std::atomic<bool> is_graceful_shutdown{false};
+    
+    /**
+     * @brief 强制刷新 KCP 发送缓冲区
+     * 
+     * 在发送 goodbye 消息后调用，确保消息立即发送
+     */
+    void flush_kcp();
+    
     // --- 兼容旧代码 (后续应移除) ---
     
     std::shared_ptr<IceTransport> get_ice_transport() const;

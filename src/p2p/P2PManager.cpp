@@ -499,11 +499,27 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id,
 void P2PManager::handle_peer_leave(const std::string& peer_id) {
     std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：删除peer
     auto it = m_peers.find(peer_id);
-    if (it != m_peers.end()) {
-        g_logger->info("[P2P] 对等点 {} 已断开连接，正在清理...", peer_id);
-        it->second->close();
-        m_peers.erase(it);
+    
+    if (it == m_peers.end()) {
+        // 可能已经通过 goodbye 处理过
+        g_logger->debug("[P2P] peer_leave: {} 已不在连接池中", peer_id);
+        return;
     }
+    
+    auto& controller = it->second;
+    
+    if (controller->is_graceful_shutdown.load()) {
+        // 【情况 1】之前收到过 goodbye，是主动退出，已经处理过
+        g_logger->debug("[P2P] peer_leave: {} 是主动退出（已收到 goodbye），跳过清理", peer_id);
+    } else {
+        // 【情况 2】没收到 goodbye，是网络断开/崩溃，保留传输状态等待续传
+        g_logger->info("[P2P] {} 掉线（未收到 goodbye），保留传输状态等待续传", peer_id);
+        // 注意：不调用 m_transfer_manager->cancel_receives_for_peer()
+    }
+    
+    // 清理 PeerController（无论哪种情况都要做）
+    controller->close();
+    m_peers.erase(it);
 }
 
 void P2PManager::schedule_reconnect(const std::string& peer_id) {
@@ -640,6 +656,9 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
                 handle_sync_begin(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_SYNC_ACK) {
                 handle_sync_ack(json_payload, from_peer);
+            } else if (json_msg_type == Protocol::TYPE_GOODBYE) {
+                // 【断点续传】处理对端正常退出通知
+                handle_goodbye(from_peer);
             } else {
                 g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
                                m_role == SyncRole::Source ? "Source" : "Destination");
@@ -692,12 +711,13 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
         
         try {
             if (payload.contains("files")) {
-                // 正确解析方式：files 是一个数组，每个元素包含 path/hash/mtime
+                // 正确解析方式：files 是一个数组，每个元素包含 path/hash/mtime/size
                 for (const auto& file_json : payload["files"]) {
                     FileInfo fi;
                     fi.path = file_json.value("path", "");
                     fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
                     fi.hash = file_json.value("hash", "");
+                    fi.size = file_json.value("size", static_cast<uint64_t>(0));  // 【断点续传】添加 size
                     if (!fi.path.empty()) {
                         remote_files.push_back(fi);
                     }
@@ -787,8 +807,16 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
         if (!file_actions.files_to_request.empty()) {
             g_logger->info("[KCP] 计划向 {} 请求 {} 个缺失/过期的文件。", peer_id,
                            file_actions.files_to_request.size());
+            
+            // 构建文件路径到 FileInfo 的映射，用于获取 hash/size
+            std::map<std::string, FileInfo> remote_file_map;
+            for (const auto& fi : remote_files) {
+                remote_file_map[fi.path] = fi;
+            }
 
-            boost::asio::post(self->m_io_context, [self, peer_id, reqs = std::move(file_actions.files_to_request)]() {
+            boost::asio::post(self->m_io_context, [self, peer_id, 
+                              reqs = std::move(file_actions.files_to_request),
+                              remote_file_map = std::move(remote_file_map)]() {
                 std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
                 auto it = self->m_peers.find(peer_id);
                 if (it == self->m_peers.end() || !it->second->is_connected()) return;
@@ -797,7 +825,37 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
                 for (const auto& file_path : reqs) {
                     nlohmann::json request_msg;
                     request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-                    request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
+                    
+                    // 【断点续传】获取远程文件信息
+                    std::string remote_hash;
+                    uint64_t remote_size = 0;
+                    auto fit = remote_file_map.find(file_path);
+                    if (fit != remote_file_map.end()) {
+                        remote_hash = fit->second.hash;
+                        remote_size = fit->second.size;
+                    }
+                    
+                    // 【断点续传】检查是否可以续传
+                    auto resume_info = self->m_transfer_manager->check_resume_eligibility(
+                        file_path, remote_hash, remote_size);
+                    
+                    if (resume_info) {
+                        // 可以续传
+                        request_msg[Protocol::MSG_PAYLOAD] = {
+                            {"path", file_path},
+                            {"start_chunk", resume_info->received_chunks},
+                            {"expected_hash", resume_info->expected_hash},
+                            {"expected_size", resume_info->expected_size}
+                        };
+                        g_logger->info("[P2P] 发送续传请求: {} 从 chunk #{} 开始", 
+                                      file_path, resume_info->received_chunks);
+                    } else {
+                        // 新传输，预注册元数据
+                        self->m_transfer_manager->register_expected_metadata(
+                            file_path, peer_id, remote_hash, remote_size);
+                        request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
+                    }
+                    
                     self->send_over_kcp_peer(request_msg.dump(), peer_ctrl);
                 }
             });
@@ -907,7 +965,27 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerControlle
         if (should_request) {
             nlohmann::json request_msg;
             request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-            request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
+            
+            // 【断点续传】检查是否可以续传
+            auto resume_info = m_transfer_manager->check_resume_eligibility(
+                remote_info.path, remote_info.hash, remote_info.size);
+            
+            if (resume_info) {
+                // 可以续传
+                request_msg[Protocol::MSG_PAYLOAD] = {
+                    {"path", remote_info.path},
+                    {"start_chunk", resume_info->received_chunks},
+                    {"expected_hash", resume_info->expected_hash},
+                    {"expected_size", resume_info->expected_size}
+                };
+                g_logger->info("[P2P] 发送续传请求: {} 从 chunk #{} 开始", 
+                              remote_info.path, resume_info->received_chunks);
+            } else {
+                // 新传输，预注册元数据
+                m_transfer_manager->register_expected_metadata(
+                    remote_info.path, peer_id, remote_info.hash, remote_info.size);
+                request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
+            }
             
             // 【注意】必须发回到 IO 线程发送 KCP確保线程安全
             std::string msg_str = request_msg.dump();
@@ -1439,6 +1517,98 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerController> controller, 
 
     g_logger->info("[P2P] 向 {} 推送文件状态完成 ({} 个文件, {} 个目录, session: {})", 
                    peer_id, files.size(), dirs.size(), session_id);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 断点续传相关方法
+// ═══════════════════════════════════════════════════════════════
+
+void P2PManager::shutdown_gracefully() {
+    g_logger->info("[P2P] 正在进行优雅关闭...");
+    
+    // 1. 广播 goodbye 给所有对端
+    broadcast_goodbye();
+    
+    // 2. 等待发送完成
+    wait_for_kcp_flush(500);  // 最多等待 500ms
+    
+    g_logger->info("[P2P] 优雅关闭完成");
+}
+
+void P2PManager::broadcast_goodbye() {
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_GOODBYE;
+    msg[Protocol::MSG_PAYLOAD] = nlohmann::json::object();
+    
+    std::string msg_str = msg.dump();
+    std::string encrypted_msg = m_crypto.encrypt(msg_str);
+    
+    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+    int sent_count = 0;
+    
+    for (auto& [peer_id, controller] : m_peers) {
+        if (controller->is_connected()) {
+            controller->send_message(encrypted_msg);
+            controller->flush_kcp();  // 强制刷新
+            sent_count++;
+            g_logger->info("[P2P] 向 {} 发送 goodbye", peer_id);
+        }
+    }
+    
+    g_logger->info("[P2P] goodbye 已发送给 {} 个对等点", sent_count);
+}
+
+void P2PManager::wait_for_kcp_flush(int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() 
+                    + std::chrono::milliseconds(timeout_ms);
+    
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool all_flushed = true;
+        
+        {
+            std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+            for (auto& [peer_id, controller] : m_peers) {
+                if (controller->get_kcp_wait_send() > 0) {
+                    all_flushed = false;
+                    break;
+                }
+            }
+        }
+        
+        if (all_flushed) {
+            g_logger->debug("[P2P] 所有 KCP 发送队列已清空");
+            return;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    
+    g_logger->warn("[P2P] KCP flush 超时，部分消息可能未送达");
+}
+
+void P2PManager::handle_goodbye(PeerController* from_peer) {
+    if (!from_peer) return;
+    
+    std::string peer_id = from_peer->get_peer_id();
+    g_logger->info("[P2P] 收到来自 {} 的 goodbye（程序正常关闭）", peer_id);
+    
+    // 标记为主动退出
+    from_peer->is_graceful_shutdown.store(true);
+    
+    // 清理该 peer 的所有传输状态
+    if (m_transfer_manager) {
+        m_transfer_manager->cancel_receives_for_peer(peer_id);
+    }
+    
+    // 清理 PeerController
+    {
+        std::unique_lock<std::shared_mutex> lock(m_peers_mutex);
+        auto it = m_peers.find(peer_id);
+        if (it != m_peers.end()) {
+            it->second->close();
+            m_peers.erase(it);
+        }
+    }
 }
 
 }  // namespace VeritasSync

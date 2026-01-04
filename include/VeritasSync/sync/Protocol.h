@@ -12,24 +12,26 @@ namespace VeritasSync {
         std::string path;             // 文件的相对路径
         std::string hash;             // 文件的SHA-256哈希值
         std::uint64_t modified_time;  // 文件的最后修改时间 (例如，自纪元以来的秒数)
+        std::uint64_t size = 0;       // 文件大小（字节），用于断点续传校验
 
         // 为了方便，重载一下比较操作符
         bool operator==(const FileInfo& other) const {
             return path == other.path && hash == other.hash &&
-                modified_time == other.modified_time;
+                modified_time == other.modified_time && size == other.size;
         }
     };
 
     // --- nlohmann/json 集成魔法 ---
     inline void to_json(nlohmann::json& j, const FileInfo& info) {
         j = nlohmann::json{
-            {"path", info.path}, {"hash", info.hash}, {"mtime", info.modified_time} };
+            {"path", info.path}, {"hash", info.hash}, {"mtime", info.modified_time}, {"size", info.size} };
     }
 
     inline void from_json(const nlohmann::json& j, FileInfo& info) {
         j.at("path").get_to(info.path);
         j.at("hash").get_to(info.hash);
         j.at("mtime").get_to(info.modified_time);
+        info.size = j.value("size", static_cast<std::uint64_t>(0));  // 兼容旧版本，默认为 0
     }
 
     // --- 协议消息类型定义 ---
@@ -56,6 +58,10 @@ namespace VeritasSync {
         static constexpr const char* TYPE_SYNC_ACK = "sync_ack";      // 确认收到的数量，请求补发
         static constexpr const char* TYPE_SYNC_COMPLETE = "sync_complete";  // 同步完成确认
         // -----------------------
+
+        // --- 断点续传相关 ---
+        static constexpr const char* TYPE_GOODBYE = "goodbye";  // 程序正常退出通知
+        // --------------------
     };
 
 }  // namespace VeritasSync

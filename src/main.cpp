@@ -217,6 +217,17 @@ int main(int argc, char* argv[]) {
     // std::jthread 析构时会自动 join，无需手动调用
     // 但如果需要提前等待，可以调用 ui_thread.join()
     
+    // 【断点续传】优雅关闭：广播 goodbye 给所有对端
+    {
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
+        for (const auto& node : g_active_nodes) {
+            auto p2p = node->get_p2p();
+            if (p2p) {
+                p2p->shutdown_gracefully();
+            }
+        }
+    }
+    
     // 清理同步节点
     {
         std::lock_guard<std::mutex> lock(g_nodes_mutex);

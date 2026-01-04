@@ -284,6 +284,18 @@ std::shared_ptr<KcpSession> PeerController::get_kcp_session() const {
     return m_kcp;
 }
 
+void PeerController::flush_kcp() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_kcp && m_kcp->is_valid()) {
+        // 获取当前时间戳并触发 flush
+        auto now = std::chrono::steady_clock::now();
+        uint32_t current_ms = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count() & 0xFFFFFFFF);
+        m_kcp->update(current_ms);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ICE 回调处理
 // ═══════════════════════════════════════════════════════════════

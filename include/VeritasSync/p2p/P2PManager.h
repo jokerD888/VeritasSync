@@ -74,6 +74,15 @@ public:
     virtual void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
                                           const std::string& payload);
     virtual void handle_peer_leave(const std::string& peer_id);
+    
+    // --- 断点续传相关 ---
+    
+    /**
+     * @brief 优雅关闭：广播 goodbye 消息并等待发送完成
+     * 
+     * 在程序正常退出时调用，确保对端能区分"主动退出"和"掉线"
+     */
+    void shutdown_gracefully();
 
     std::vector<TransferStatus> get_active_transfers();
 
@@ -116,6 +125,11 @@ protected:
     
     // 【重构】新增：创建 ICE 配置
     IceConfig create_ice_config() const;
+    
+    // --- 断点续传相关 ---
+    void broadcast_goodbye();
+    void wait_for_kcp_flush(int timeout_ms = 500);
+    void handle_goodbye(PeerController* from_peer);
 
     // 【重构】移除旧的 libjuice 回调
 #if 0

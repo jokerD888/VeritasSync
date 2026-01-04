@@ -250,6 +250,12 @@ namespace VeritasSync {
                             failed_changes.insert(full_path_str);
                             continue;
                         }
+                        
+                        // 【断点续传】获取文件大小
+                        info.size = std::filesystem::file_size(full_path, ec);
+                        if (ec) {
+                            info.size = 0;  // 获取失败时设为 0
+                        }
 
                         // 更新内存
                         m_file_map[info.path] = info;
@@ -340,7 +346,8 @@ namespace VeritasSync {
             int64_t modified_time;
             std::string cached_hash;  // 如果有缓存命中，存储在这里
             bool need_calc;           // 是否需要计算哈希
-            bool is_dirty = false;   // 👈 是否需要写回数据库
+            bool is_dirty = false;    // 👈 是否需要写回数据库
+            uint64_t file_size = 0;   // 【断点续传】文件大小
         };
         
         std::vector<PendingFile> pending_files;
@@ -404,13 +411,18 @@ namespace VeritasSync {
                         }
                     }
                     
+                    // 【断点续传】获取文件大小
+                    uint64_t fsize = entry.file_size(ec);
+                    if (ec) fsize = 0;
+                    
                     pending_files.push_back({
                         entry.path(),
                         std::move(rel_path_str),
                         mtime,
                         std::move(cached_hash),
                         need_calc,
-                        is_dirty
+                        is_dirty,
+                        fsize
                     });
                     
                 } else if (entry.is_directory(ec) && !ec) {
@@ -520,6 +532,7 @@ namespace VeritasSync {
                     info.path = pf.rel_path_str;
                     info.hash = pf.cached_hash;
                     info.modified_time = pf.modified_time;
+                    info.size = pf.file_size;  // 【断点续传】添加 size
                     
                     m_file_map[info.path] = info;
                     

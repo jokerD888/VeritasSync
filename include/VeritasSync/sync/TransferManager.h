@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,61 @@ public:
     SessionStats get_session_stats() const;
 
     static constexpr size_t CHUNK_DATA_SIZE = 16384;
+    
+    // ====== 断点续传相关 ======
+    
+    /**
+     * @brief 续传信息结构体
+     */
+    struct ResumeInfo {
+        std::string path;
+        uint32_t received_chunks;
+        uint32_t total_chunks;
+        std::string expected_hash;
+        uint64_t expected_size;
+        std::string temp_path;
+    };
+    
+    /**
+     * @brief 清理指定 peer 的所有接收任务
+     * 
+     * 当对端程序正常关闭（收到 goodbye）时调用，
+     * 清理该 peer 的所有未完成传输状态和临时文件。
+     * 
+     * @param peer_id 对端 ID
+     */
+    void cancel_receives_for_peer(const std::string& peer_id);
+    
+    /**
+     * @brief 检查是否可以续传指定文件
+     * 
+     * 检查内存中是否有未完成的传输任务，并校验源文件是否变化。
+     * 
+     * @param path 文件路径
+     * @param remote_hash 远程文件的当前 hash
+     * @param remote_size 远程文件的当前大小
+     * @return 如果可以续传返回 ResumeInfo，否则返回 nullopt
+     */
+    std::optional<ResumeInfo> check_resume_eligibility(
+        const std::string& path,
+        const std::string& remote_hash,
+        uint64_t remote_size);
+    
+    /**
+     * @brief 预注册接收任务的元数据
+     * 
+     * 在发送 request_file 之前调用，记录预期的文件信息。
+     * 
+     * @param path 文件路径
+     * @param peer_id 来源 peer ID
+     * @param hash 预期的文件 hash
+     * @param size 预期的文件大小
+     */
+    void register_expected_metadata(
+        const std::string& path,
+        const std::string& peer_id,
+        const std::string& hash,
+        uint64_t size);
 
 private:
     StateManager* m_state_manager;
@@ -79,6 +135,11 @@ private:
         uint32_t last_tick_chunks = 0;
         std::chrono::steady_clock::time_point last_tick_time = std::chrono::steady_clock::now();
         double current_speed = 0.0;
+        
+        // --- 断点续传相关字段 ---
+        std::string peer_id;           // 来源 peer ID（用于按 peer 清理）
+        std::string expected_hash;     // 预期文件哈希（用于校验源文件未变）
+        uint64_t expected_size = 0;    // 预期文件大小
     };
     struct SendingFile {
         uint32_t total_chunks = 0;
