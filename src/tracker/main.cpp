@@ -42,13 +42,13 @@ class Session : public std::enable_shared_from_this<Session> {
    public:
        Session(tcp::socket socket, TrackerServer& server)
            : m_socket(std::move(socket)),
-             m_server(server)  // <-- 保存对 server 的引用
+             m_server(server)
        {
-           // 为此会话生成一个唯一的 ID
+           // 连接时记录临时标识（仅用于连接日志，注册后会被 device_id 覆盖）
            std::stringstream ss;
            ss << m_socket.remote_endpoint().address().to_string() << ":" << m_socket.remote_endpoint().port();
-           m_id = ss.str();
-           g_logger->info("[Session] {} 已连接。", m_id);
+           m_connection_info = ss.str();
+           g_logger->info("[Session] 新连接来自: {}", m_connection_info);
        }
 
     ~Session() { g_logger->info("[Session] {} 已断开连接。", m_id); }
@@ -79,7 +79,8 @@ class Session : public std::enable_shared_from_this<Session> {
 
     tcp::socket m_socket;
     TrackerServer& m_server;
-    std::string m_id;
+    std::string m_id;              // peer_id（必须由客户端的 device_id 设置）
+    std::string m_connection_info; // 原始 ip:port，仅用于日志
     std::string m_sync_key;
 
     boost::asio::streambuf m_read_buffer;
@@ -358,9 +359,18 @@ void Session::handle_message(const json& msg) {
 void Session::handle_register(const json& payload) {
     m_sync_key = payload.at("sync_key").get<std::string>();
     if (m_sync_key.empty()) {
-        g_logger->error("[Session] {} 注册失败：sync_key 为空。", m_id);
+        g_logger->error("[Session] {} 注册失败：sync_key 为空。", m_connection_info);
         return;
     }
+    
+    // 必须提供 device_id
+    if (!payload.contains("device_id") || payload.at("device_id").get<std::string>().empty()) {
+        g_logger->error("[Session] {} 注册失败：device_id 为空或缺失。", m_connection_info);
+        return;
+    }
+    
+    m_id = payload.at("device_id").get<std::string>();
+    g_logger->info("[Session] {} 注册成功，device_id: {}", m_connection_info, m_id);
 
     // 通知 Server 将此 Session 加入
     m_server.join(shared_from_this(), m_sync_key);

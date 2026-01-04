@@ -7,6 +7,7 @@
 #include <optional>
 
 namespace VeritasSync {
+// 待集成
 
 /**
  * @brief 统一二进制 Frame 协议

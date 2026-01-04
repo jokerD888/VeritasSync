@@ -137,6 +137,10 @@ void SyncNode::start() {
 
     // 4. 创建 TrackerClient
     auto tracker = std::make_shared<TrackerClient>(m_global_config.tracker_host, m_global_config.tracker_port);
+    
+    // 设置设备 ID（从配置文件中读取的全局唯一标识符）
+    tracker->set_device_id(m_global_config.device_id);
+    
     m_tracker_client.store(tracker);  // 原子存储
 
     // 5. 互相注入依赖

@@ -69,7 +69,7 @@ static const uint8_t MSG_TYPE_JSON = 0x01;
 static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
 // ═══════════════════════════════════════════════════════════════
-// 【重构】新增辅助函数
+// 新增辅助函数
 // ═══════════════════════════════════════════════════════════════
 
 IceConfig P2PManager::create_ice_config() const {
@@ -121,7 +121,7 @@ void P2PManager::broadcast_current_state() {
             return;
         }
 
-        // 【重构】使用 m_peers 替代 m_peers_by_agent
+        // 使用 m_peers 替代 m_peers_by_agent
         boost::asio::post(self->m_io_context, [self, encrypted_msg = std::move(encrypted_msg)]() {
             std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);  // 读操作
             int sent_count = 0;
@@ -219,7 +219,7 @@ void P2PManager::set_turn_config(std::string host, uint16_t port, std::string us
 }
 
 void P2PManager::init() {
-    // 【重构】TransferManager 回调使用 PeerController
+    // TransferManager 回调使用 PeerController
     // 【修复】减少锁持有时间，避免与 update_all_kcps 的锁竞争
     auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id,
                                                   const std::string& encrypted_data) -> int {
@@ -243,25 +243,28 @@ void P2PManager::init() {
         }
         return 0;
     };
-
+    // 创建 TransferManager 传输管理器
     m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_worker_pool, m_crypto, send_cb);
+    // 启动io线程
     m_thread = std::jthread([this]() {
         g_logger->info("[P2P] IO context 在后台线程运行...");
         auto work_guard = boost::asio::make_work_guard(m_io_context);
         m_io_context.run();
     });
+    // 启动定时器
     schedule_kcp_update();
     schedule_cleanup_task();
+    // upnp发现
     init_upnp();
 }
 
 P2PManager::~P2PManager() {
-    m_io_context.stop();
-    m_worker_pool.join();
+    m_io_context.stop();    // 停止事件循环
+    m_worker_pool.join();   // 等待所有工作线程完成
     if (m_thread.joinable()) {
-        m_thread.join();
+        m_thread.join();    // 等待IO线程退出
     }
-    // 【重构】清理所有 PeerController
+    // 清理所有 PeerController
     std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：清空
     for (auto& [peer_id, controller] : m_peers) {
         controller->close();
@@ -333,7 +336,7 @@ void P2PManager::update_all_kcps() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 【重构核心】连接管理 - 使用 PeerController
+// 连接管理 - 使用 PeerController
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses) {
@@ -356,7 +359,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
 
         g_logger->info("[ICE] 正在为对等点 {} 创建 PeerController...", peer_id);
 
-        // 【重构】创建 PeerController 回调
+        // 创建 PeerController 回调
         PeerControllerCallbacks callbacks;
         
         // 状态变化回调
@@ -402,7 +405,7 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
     }
 }
 
-// 【重构】新增：处理 Peer 状态变化
+// 新增：处理 Peer 状态变化
 void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState state) {
     g_logger->info("[ICE] Peer {} 状态变化: {}", peer_id, static_cast<int>(state));
     
@@ -446,7 +449,7 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
     }
 }
 
-// 【重构】新增：处理 Peer 消息（来自 PeerController 的回调）
+// 新增：处理 Peer 消息（来自 PeerController 的回调）
 void P2PManager::handle_peer_message(const std::string& peer_id, const std::string& encrypted_msg) {
     // 查找对应的 PeerController
     std::shared_ptr<PeerController> controller;
@@ -488,7 +491,7 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id,
         g_logger->info("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
     }
     
-    // 【重构】转发到 PeerController 处理
+    // 转发到 PeerController 处理
     controller->handle_signaling(message_type, payload);
 }
 
@@ -568,6 +571,7 @@ void P2PManager::schedule_reconnect(const std::string& peer_id) {
 // 消息发送
 // ═══════════════════════════════════════════════════════════════
 
+// 广播给所有连接的对等点
 void P2PManager::send_over_kcp(const std::string& msg) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
@@ -589,7 +593,7 @@ void P2PManager::send_over_kcp(const std::string& msg) {
         g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", sent_count, encrypted_msg.length());
     }
 }
-
+// 发给特定对等点
 void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer) {
     if (!peer || !peer->is_connected()) {
         g_logger->warn("[KCP] 尝试向无效或未就绪的对等点发送消息。");
@@ -605,7 +609,7 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer
     }
     peer->send_message(encrypted_msg);
 }
-
+// 通过 peer_id 安全发送（会在锁内查找）
 void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id) {
     std::shared_lock<std::shared_mutex> lock(m_peers_mutex);  // 读操作
     auto it = m_peers.find(peer_id);
@@ -669,6 +673,7 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
         if (m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional) {
             std::string sender_id = from_peer ? from_peer->get_peer_id() : "";
+            // 二进制文件块，交给 TransferManager 处理
             m_transfer_manager->handle_chunk(payload, sender_id);
         }
     } else {
@@ -771,11 +776,11 @@ void P2PManager::handle_share_state(const nlohmann::json& payload, PeerControlle
                 std::error_code ec;
                 bool deleted = false;
 
-                if (self->m_mode == SyncMode::OneWay) {
+                if (self->m_mode == SyncMode::OneWay) { // 单向同步，完全向对等点看齐
                     if (std::filesystem::remove_all(full_path, ec) != static_cast<std::uintmax_t>(-1)) {
                         deleted = true;
                     }
-                } else {
+                } else { // 双向同步，只删除空目录
                     if (std::filesystem::remove(full_path, ec)) {
                         deleted = true;
                     } else if (ec && ec != std::errc::directory_not_empty) {
@@ -932,11 +937,64 @@ void P2PManager::handle_file_update(const nlohmann::json& payload, PeerControlle
                 return;
             }
 
-            if (base_hash.empty() || local_hash == base_hash) {
-                g_logger->info("[Sync] 正常更新 (Local==Base): {}", remote_info.path);
+            /*
+             * ═══════════════════════════════════════════════════════════════════════
+             * 三方冲突判断 (Three-Way Merge Decision)
+             * ═══════════════════════════════════════════════════════════════════════
+             * 
+             * 通过比较 local_hash, remote_hash, base_hash 三者来判断同步策略：
+             * 
+             * ┌──────────────────┬──────────────────┬──────────────────┬─────────────────────┐
+             * │ local vs base    │ remote vs base   │ 含义             │ 操作                │
+             * ├──────────────────┼──────────────────┼──────────────────┼─────────────────────┤
+             * │ local == base    │ remote == base   │ 双方都没变       │ 无需操作 (已处理)   │
+             * │ local == base    │ remote != base   │ 远程更新了       │ 下载远程版本        │
+             * │ local != base    │ remote == base   │ 本地更新了       │ 保留本地,不下载     │
+             * │ local != base    │ remote != base   │ 双方都改了       │ ⚠️ 冲突处理         │
+             * └──────────────────┴──────────────────┴──────────────────┴─────────────────────┘
+             * 
+             * 示例场景 (修复前的 Bug):
+             *   T=101: Alice 发送 file_update {hash="aaa111"}
+             *   T=102: Bob 本地修改文件 → hash="bbb222"
+             *   T=104: Bob 收到 Alice 的旧消息 {hash="aaa111"}
+             *   
+             *   此时: local="bbb222", remote="aaa111", base="aaa111"
+             *   
+             *   旧逻辑: local != base → 认为是冲突 ❌
+             *   新逻辑: local != base 但 remote == base → "本地更新，远程没变" → 保留本地 ✅
+             */
+            
+            bool local_changed = !base_hash.empty() && (local_hash != base_hash);
+            bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
+
+            if (base_hash.empty() || (!local_changed && remote_changed)) {
+                // 情况 1: 本地没动过，远程更新了 (或无历史记录)
+                // 示例: base="aaa", local="aaa", remote="bbb" → 下载 "bbb"
+                g_logger->info("[Sync] 正常更新 (本地未修改): {}", remote_info.path);
                 should_request = true;
+                
+            } else if (local_changed && !remote_changed) {
+                // 情况 2: 本地改了，远程没变
+                // 示例: base="aaa", local="bbb", remote="aaa" → 保留本地 "bbb"
+                // 这种情况常见于：收到过时的 file_update 消息
+                g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {} (local={}, remote={}, base={})", 
+                               remote_info.path,
+                               local_hash.substr(0, 6),
+                               remote_hash.substr(0, 6),
+                               base_hash.substr(0, 6));
+                // 不需要下载，记录同步成功（以本地为准）
+                m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+                should_request = false;
+                
+            } else if (!local_changed && !remote_changed) {
+                // 情况 3: 双方都没变（理论上不会走到这里，因为前面已判断 local != remote）
+                g_logger->debug("[Sync] 状态一致，无需操作: {}", remote_info.path);
+                should_request = false;
+                
             } else {
-                g_logger->warn("[Sync] ⚠️ 检测到冲突: {}", remote_info.path);
+                // 情况 4: 双方都改了 → 真正的冲突
+                // 示例: base="aaa", local="bbb", remote="ccc" → 冲突！
+                g_logger->warn("[Sync] ⚠️ 检测到冲突 (双方都修改了): {}", remote_info.path);
                 g_logger->warn("       Base: {}...", base_hash.substr(0, std::min<size_t>(6, base_hash.size())));
                 g_logger->warn("       Local: {}...", local_hash.substr(0, std::min<size_t>(6, local_hash.size())));
                 g_logger->warn("       Remote: {}...", remote_hash.substr(0, std::min<size_t>(6, remote_hash.size())));

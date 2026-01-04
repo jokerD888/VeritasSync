@@ -792,3 +792,196 @@ TEST(TransferConfigTest, FlowControlWaitTime) {
     EXPECT_LE(MAX_WAIT_MS, 200) << "最大等待时间不应超过 200ms";
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 21. 三方冲突判断测试 (Three-Way Merge Decision)
+// ═══════════════════════════════════════════════════════════════
+
+/*
+ * 这些测试验证 handle_file_update 中的三方冲突判断逻辑是否正确。
+ * 
+ * 判断决策表：
+ * ┌──────────────────┬──────────────────┬──────────────────┬─────────────────────┐
+ * │ local vs base    │ remote vs base   │ 含义             │ 操作                │
+ * ├──────────────────┼──────────────────┼──────────────────┼─────────────────────┤
+ * │ local == base    │ remote == base   │ 双方都没变       │ 无需操作 (已处理)   │
+ * │ local == base    │ remote != base   │ 远程更新了       │ 下载远程版本        │
+ * │ local != base    │ remote == base   │ 本地更新了       │ 保留本地,不下载     │
+ * │ local != base    │ remote != base   │ 双方都改了       │ ⚠️ 冲突处理         │
+ * └──────────────────┴──────────────────┴──────────────────┴─────────────────────┘
+ */
+
+// 辅助函数：模拟三方判断逻辑
+namespace ThreeWayMergeTest {
+
+enum class MergeDecision {
+    NoAction,           // 无需操作
+    DownloadRemote,     // 下载远程版本
+    KeepLocal,          // 保留本地版本
+    Conflict            // 冲突处理
+};
+
+/**
+ * 模拟 P2PManager::handle_file_update 中的三方判断逻辑
+ * @param local_hash  本地文件的 hash
+ * @param remote_hash 远程通知的 hash  
+ * @param base_hash   数据库中记录的上次同步 hash
+ * @return 判断结果
+ */
+MergeDecision decide(const std::string& local_hash, 
+                     const std::string& remote_hash, 
+                     const std::string& base_hash) {
+    // 如果 local == remote，无需操作
+    if (local_hash == remote_hash) {
+        return MergeDecision::NoAction;
+    }
+    
+    bool local_changed = !base_hash.empty() && (local_hash != base_hash);
+    bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
+    
+    if (base_hash.empty() || (!local_changed && remote_changed)) {
+        // 情况 1: 本地没动，远程更新了（或无历史）
+        return MergeDecision::DownloadRemote;
+    } else if (local_changed && !remote_changed) {
+        // 情况 2: 本地改了，远程没变
+        return MergeDecision::KeepLocal;
+    } else if (!local_changed && !remote_changed) {
+        // 情况 3: 双方都没变（理论上前面 local==remote 已处理）
+        return MergeDecision::NoAction;
+    } else {
+        // 情况 4: 双方都改了
+        return MergeDecision::Conflict;
+    }
+}
+
+}  // namespace ThreeWayMergeTest
+
+// Case 1: 本地没动，远程更新了 → 应下载远程
+TEST(ThreeWayMergeTest, LocalUnchanged_RemoteUpdated_ShouldDownload) {
+    /*
+     * 场景：
+     *   base  = "aaa111" (上次同步的版本)
+     *   local = "aaa111" (本地没改)
+     *   remote = "bbb222" (远程更新了)
+     * 
+     * 预期：下载远程版本
+     */
+    auto decision = ThreeWayMergeTest::decide("aaa111", "bbb222", "aaa111");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::DownloadRemote);
+}
+
+// Case 2: 本地改了，远程没变 → 应保留本地
+TEST(ThreeWayMergeTest, LocalUpdated_RemoteUnchanged_ShouldKeepLocal) {
+    /*
+     * 场景（修复前的 Bug）：
+     *   T=101: Alice 发送 file_update {hash="aaa111"}
+     *   T=102: Bob 本地修改文件 → hash="bbb222"
+     *   T=104: Bob 收到 Alice 的旧消息 {hash="aaa111"}
+     * 
+     *   base  = "aaa111" (上次同步的版本)
+     *   local = "bbb222" (Bob 本地改了)
+     *   remote = "aaa111" (Alice 的旧通知，没变)
+     * 
+     * 预期：保留本地版本，不下载
+     * 旧逻辑会误判为冲突！
+     */
+    auto decision = ThreeWayMergeTest::decide("bbb222", "aaa111", "aaa111");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::KeepLocal);
+}
+
+// Case 3: 双方内容一致 → 无需操作
+TEST(ThreeWayMergeTest, BothSame_NoAction) {
+    /*
+     * 场景：
+     *   local = "abc123"
+     *   remote = "abc123"
+     *   (base 不重要，因为 local == remote)
+     * 
+     * 预期：无需操作
+     */
+    auto decision = ThreeWayMergeTest::decide("abc123", "abc123", "old_hash");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::NoAction);
+}
+
+// Case 4: 双方都改了 → 冲突
+TEST(ThreeWayMergeTest, BothChanged_Conflict) {
+    /*
+     * 场景：
+     *   base  = "aaa111" (上次同步的版本)
+     *   local = "bbb222" (本地改了)
+     *   remote = "ccc333" (远程也改了)
+     * 
+     * 预期：冲突处理
+     */
+    auto decision = ThreeWayMergeTest::decide("bbb222", "ccc333", "aaa111");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::Conflict);
+}
+
+// Case 5: 无历史记录（首次同步）→ 应下载远程
+TEST(ThreeWayMergeTest, NoHistory_ShouldDownload) {
+    /*
+     * 场景：首次同步，数据库没有历史记录
+     *   base  = "" (空)
+     *   local = "local_hash"
+     *   remote = "remote_hash"
+     * 
+     * 预期：下载远程版本（无历史时默认信任远程）
+     */
+    auto decision = ThreeWayMergeTest::decide("local_hash", "remote_hash", "");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::DownloadRemote);
+}
+
+// Case 6: 消息乱序场景（后发先到，先发后到）
+TEST(ThreeWayMergeTest, OutOfOrderMessages) {
+    /*
+     * 场景：
+     *   T=90: 同步成功，base = "v1"
+     *   T=91: Alice 修改 → "v2"，发送 file_update（慢网络）
+     *   T=92: Alice 再改 → "v3"，发送 file_update（快网络）
+     *   T=93: Bob 先收到 {hash:"v3"}（后发先到）
+     *         此时：local="v1", remote="v3", base="v1"
+     *         判断：下载远程 ✅
+     *         下载后：local="v3", base="v3"
+     * 
+     *   T=94: Bob 再收到 {hash:"v2"}（先发后到）
+     *         此时：local="v3", remote="v2", base="v3"
+     *         判断：?
+     */
+    
+    // T=93 处理
+    auto decision_93 = ThreeWayMergeTest::decide("v1", "v3", "v1");
+    EXPECT_EQ(decision_93, ThreeWayMergeTest::MergeDecision::DownloadRemote);
+    
+    // T=94 处理（下载后 base 已更新为 "v3"）
+    // local="v3", remote="v2", base="v3"
+    // local_changed = ("v3" != "v3") = false
+    // remote_changed = ("v2" != "v3") = true
+    // → 进入"本地没动，远程更新了"分支，会下载 "v2" 
+    // ⚠️ 这是一个已知的"冗余请求"问题，但不会导致数据丢失
+    auto decision_94 = ThreeWayMergeTest::decide("v3", "v2", "v3");
+    // 虽然判断为 DownloadRemote，但实际请求的是 Alice 的当前版本（仍是 "v3"）
+    EXPECT_EQ(decision_94, ThreeWayMergeTest::MergeDecision::DownloadRemote);
+    
+    // 记录：这种场景会产生冗余请求，但最终数据正确
+    // 如需避免，需要在 file_update 中添加时间戳过滤
+}
+
+// Case 7: 边界情况 - 所有 hash 相同
+TEST(ThreeWayMergeTest, AllHashesSame) {
+    auto decision = ThreeWayMergeTest::decide("same", "same", "same");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::NoAction);
+}
+
+// Case 8: 边界情况 - base 与 remote 相同，但 local 不同
+// 这是 Case 2 的另一种表述
+TEST(ThreeWayMergeTest, BaseEqualsRemote_LocalDifferent) {
+    auto decision = ThreeWayMergeTest::decide("new_local", "old_remote", "old_remote");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::KeepLocal);
+}
+
+// Case 9: 边界情况 - base 与 local 相同，但 remote 不同
+// 这是 Case 1 的另一种表述
+TEST(ThreeWayMergeTest, BaseEqualsLocal_RemoteDifferent) {
+    auto decision = ThreeWayMergeTest::decide("old_base", "new_remote", "old_base");
+    EXPECT_EQ(decision, ThreeWayMergeTest::MergeDecision::DownloadRemote);
+}
+

@@ -5,6 +5,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_io.hpp>
+#include <sstream>
 
 namespace VeritasSync {
 
@@ -28,6 +32,10 @@ struct SyncTask {
 
 // 顶级配置结构
 struct Config {
+    // --- 设备唯一标识符（首次启动时自动生成） ---
+    std::string device_id;
+    // ----------------------------
+    
     std::string tracker_host = "47.121.187.240";
     unsigned short tracker_port = 9988;
 
@@ -75,7 +83,8 @@ inline void from_json(const nlohmann::json& j, SyncTask& task) {
 }
 
 inline void to_json(nlohmann::json& j, const Config& config) {
-    j = nlohmann::json{{"tracker_host", config.tracker_host},
+    j = nlohmann::json{{"device_id", config.device_id},
+                       {"tracker_host", config.tracker_host},
                        {"tracker_port", config.tracker_port},
                        {"stun_host", config.stun_host},
                        {"stun_port", config.stun_port},
@@ -93,6 +102,10 @@ inline void to_json(nlohmann::json& j, const Config& config) {
 }
 
 inline void from_json(const nlohmann::json& j, Config& config) {
+    // --- 加载 device_id (如果存在) ---
+    if (j.contains("device_id")) j.at("device_id").get_to(config.device_id);
+    // ---------------------------------
+    
     j.at("tracker_host").get_to(config.tracker_host);
     j.at("tracker_port").get_to(config.tracker_port);
 
@@ -120,33 +133,57 @@ inline void from_json(const nlohmann::json& j, Config& config) {
     j.at("tasks").get_to(config.tasks);
 }
 
+// 辅助函数：生成 UUID v4
+inline std::string generate_uuid_v4() {
+    boost::uuids::random_generator gen;
+    boost::uuids::uuid uuid = gen();
+    std::ostringstream ss;
+    ss << uuid;
+    return ss.str();
+}
+
 // 辅助函数：加载配置或创建默认配置
 inline Config load_config_or_create_default(const std::string& config_path = "config.json") {
     std::ifstream f(config_path);
+    bool need_save = false;
+    Config config;
+    
     if (f.good()) {
         nlohmann::json j;
         f >> j;
-        // 增加容错：如果配置文件里缺少某些字段，由 from_json 处理或使用结构体默认值
-        return j.get<Config>();
+        f.close();
+        config = j.get<Config>();
+        
+        // 如果配置文件中没有 device_id，生成一个并回写
+        if (config.device_id.empty()) {
+            config.device_id = generate_uuid_v4();
+            need_save = true;
+        }
     } else {
-        Config defaultConfig;
-
+        // 首次启动，创建默认配置
+        config.device_id = generate_uuid_v4();
+        
         // TURN 默认留空，防止连接无效地址导致延迟
-        defaultConfig.turn_host = "";
-        defaultConfig.turn_port = 3478;
-        defaultConfig.turn_username = "";
-        defaultConfig.turn_password = "";
+        config.turn_host = "";
+        config.turn_port = 3478;
+        config.turn_username = "";
+        config.turn_password = "";
 
         // STUN 默认使用 Google 的，比较稳定
-        defaultConfig.stun_host = "stun.l.google.com";
-        defaultConfig.stun_port = 19302;
+        config.stun_host = "stun.l.google.com";
+        config.stun_port = 19302;
 
-        defaultConfig.tasks = {};
-
-        std::ofstream o(config_path);
-        o << nlohmann::json(defaultConfig).dump(4) << std::endl;
-        return defaultConfig;
+        config.tasks = {};
+        need_save = true;
     }
+    
+    // 回写配置文件（如果有新生成的 device_id 或是新文件）
+    if (need_save) {
+        std::ofstream o(config_path);
+        o << nlohmann::json(config).dump(4) << std::endl;
+    }
+    
+    return config;
 }
 
 }  // namespace VeritasSync

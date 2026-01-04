@@ -38,6 +38,7 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     ~TrackerClient();
 
     void set_p2p_manager(P2PManager* p2p);
+    void set_device_id(const std::string& device_id);
 
     void connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready);
     void stop();
@@ -72,6 +73,7 @@ private:
     unsigned short m_port;
     std::string m_sync_key;
     std::string m_self_id;
+    std::string m_device_id;  // 设备唯一标识符，用于 Tracker 注册
 
     std::function<void(std::vector<std::string>)> m_on_ready_callback;
 
