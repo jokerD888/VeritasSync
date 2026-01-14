@@ -113,6 +113,16 @@ namespace VeritasSync {
         // --- 生命周期管理 ---
         // 唯一的重试计时器，负责调度所有文件冲突后的再次处理任务
         std::unique_ptr<boost::asio::steady_timer> m_retry_timer;
+        
+        // --- 阈值触发机制 ---
+        // 上次批处理时间点（用于限制触发频率）
+        std::chrono::steady_clock::time_point m_last_batch_time;
+        // 是否正在处理中（防止重入）
+        std::atomic<bool> m_processing{false};
+        
+        // 检查是否需要立即触发批处理（在 notify_change_detected 调用后检查）
+        // 返回 true 表示需要触发
+        bool check_and_trigger_batch();
     };
 
 }  // namespace VeritasSync

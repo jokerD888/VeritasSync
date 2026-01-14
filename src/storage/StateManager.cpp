@@ -17,6 +17,16 @@
 
 namespace VeritasSync {
 
+    // ═══════════════════════════════════════════════════════════════
+    // 阈值触发配置
+    // ═══════════════════════════════════════════════════════════════
+    
+    // 批量触发阈值：当待处理变更数量达到此值时立即触发处理
+    static constexpr size_t BATCH_TRIGGER_THRESHOLD = 100;
+    
+    // 最小间隔：两次批量处理之间的最小间隔（毫秒），避免过于频繁触发
+    static constexpr int64_t MIN_BATCH_INTERVAL_MS = 1000;
+
     // UpdateListener 现在更简单了
     // 它只负责通知 StateManager 发生了变化，并处理防抖
     class UpdateListener : public efsw::FileWatchListener {
@@ -57,18 +67,23 @@ namespace VeritasSync {
             m_owner->notify_change_detected(PathToUtf8(file_path));
             // ---------------------------------------------------
 
-            // 2. 重置防抖计时器
-            m_debounce_timer.cancel();
-            m_debounce_timer.expires_after(std::chrono::milliseconds(5000));
+            // 2. 检查是否需要立即触发批处理（非阻塞）
+            bool triggered = m_owner->check_and_trigger_batch();
+            
+            // 3. 如果没有触发阈值，则使用正常的防抖定时器
+            if (!triggered) {
+                m_debounce_timer.cancel();
+                m_debounce_timer.expires_after(std::chrono::milliseconds(5000));
 
-            // 3. 计时器触发后，调用 StateManager 的处理函数
-            m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
-                if (!ec) {
-                    // 使用 post 确保在 io_context 线程上执行
-                    boost::asio::post(m_owner->get_io_context(),
-                        [this]() { m_owner->process_debounced_changes(); });
-                }
+                // 计时器触发后，调用 StateManager 的处理函数
+                m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
+                    if (!ec) {
+                        // 使用 post 确保在 io_context 线程上执行
+                        boost::asio::post(m_owner->get_io_context(),
+                            [this]() { m_owner->process_debounced_changes(); });
+                    }
                 });
+            }
         }
 
     private:
@@ -173,6 +188,50 @@ namespace VeritasSync {
         if (result.second) {
             g_logger->debug("[{}] [Watcher] 检测到变化: {}", m_sync_key, full_path);
         }
+    }
+    
+    // --- 检查是否需要立即触发批处理（阈值触发机制）---
+    // 关键：此函数在文件监控线程中调用，必须保持非阻塞
+    bool StateManager::check_and_trigger_batch() {
+        size_t pending_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_changes_mutex);
+            pending_count = m_pending_changes.size();
+        }
+        
+        // 未达到阈值
+        if (pending_count < BATCH_TRIGGER_THRESHOLD) {
+            return false;
+        }
+        
+        // 检查时间间隔
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - m_last_batch_time).count();
+        
+        if (elapsed_ms < MIN_BATCH_INTERVAL_MS) {
+            return false;  // 间隔太短，等待下一次
+        }
+        
+        // 检查是否正在处理中
+        bool expected = false;
+        if (!m_processing.compare_exchange_strong(expected, true)) {
+            return false;  // 已经在处理中
+        }
+        
+        g_logger->info("[{}] [StateManager] 阈值触发: {} 个变更待处理 (阈值={})", 
+                      m_sync_key, pending_count, BATCH_TRIGGER_THRESHOLD);
+        
+        // 非阻塞：post 到 io_context，不在监控线程中执行耗时操作
+        boost::asio::post(get_io_context(), [this]() {
+            process_debounced_changes();
+            
+            // 更新时间戳并释放处理标志
+            m_last_batch_time = std::chrono::steady_clock::now();
+            m_processing.store(false);
+        });
+        
+        return true;
     }
 
     // --- 由 UpdateListener 定时器调用 ---
