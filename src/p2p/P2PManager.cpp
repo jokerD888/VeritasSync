@@ -171,6 +171,79 @@ void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 批量广播方法 (阶段1优化)
+// ═══════════════════════════════════════════════════════════════
+
+// 批量大小配置
+static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;  // 每批最多 50 个文件更新
+static constexpr size_t FILE_DELETE_BATCH_SIZE = 100; // 每批最多 100 个文件删除
+
+void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) {
+    if (!can_broadcast(m_role, m_mode)) return;
+    if (files.empty()) return;
+    
+    g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
+    
+    // 分批发送
+    for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
+        size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
+        
+        nlohmann::json msg;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
+        msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
+        
+        for (size_t j = i; j < end; ++j) {
+            msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
+        }
+        
+        send_over_kcp(msg.dump());
+        
+        g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)", 
+                       (i / FILE_UPDATE_BATCH_SIZE) + 1,
+                       (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
+                       end - i);
+    }
+}
+
+void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& paths) {
+    if (!can_broadcast(m_role, m_mode)) return;
+    if (paths.empty()) return;
+    
+    g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
+    
+    // 分批发送
+    for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
+        size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
+        
+        nlohmann::json msg;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE_BATCH;
+        msg[Protocol::MSG_PAYLOAD]["paths"] = nlohmann::json::array();
+        
+        for (size_t j = i; j < end; ++j) {
+            msg[Protocol::MSG_PAYLOAD]["paths"].push_back(paths[j]);
+        }
+        
+        send_over_kcp(msg.dump());
+    }
+}
+
+void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& creates, 
+                                              const std::vector<std::string>& deletes) {
+    if (!can_broadcast(m_role, m_mode)) return;
+    if (creates.empty() && deletes.empty()) return;
+    
+    g_logger->info("[P2P] (Source) 批量广播目录变更: {} 创建, {} 删除", 
+                   creates.size(), deletes.size());
+    
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
+    msg[Protocol::MSG_PAYLOAD]["creates"] = creates;
+    msg[Protocol::MSG_PAYLOAD]["deletes"] = deletes;
+    
+    send_over_kcp(msg.dump());
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 静态工厂与构造/析构
 // ═══════════════════════════════════════════════════════════════
 
@@ -650,6 +723,14 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
                 handle_dir_create(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && can_receive) {
                 handle_dir_delete(json_payload, from_peer);
+            // --- 批量消息路由 (阶段1优化) ---
+            } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE_BATCH && can_receive) {
+                handle_file_update_batch(json_payload, from_peer);
+            } else if (json_msg_type == Protocol::TYPE_FILE_DELETE_BATCH && can_receive) {
+                handle_file_delete_batch(json_payload, from_peer);
+            } else if (json_msg_type == Protocol::TYPE_DIR_BATCH && can_receive) {
+                handle_dir_batch(json_payload, from_peer);
+            // ---------------------------------
             } else if (json_msg_type == Protocol::TYPE_SYNC_BEGIN && can_receive) {
                 handle_sync_begin(json_payload, from_peer);
             } else if (json_msg_type == Protocol::TYPE_SYNC_ACK) {
@@ -1201,6 +1282,291 @@ void P2PManager::handle_dir_delete(const nlohmann::json& payload, PeerController
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 批量消息处理器 (阶段1优化)
+// ═══════════════════════════════════════════════════════════════
+
+void P2PManager::handle_file_update_batch(const nlohmann::json& payload, PeerController* from_peer) {
+    if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
+    if (!m_state_manager) return;
+    
+    std::vector<FileInfo> files;
+    try {
+        if (!payload.contains("files")) {
+            g_logger->error("[KCP] file_update_batch 缺少 files 字段");
+            return;
+        }
+        for (const auto& file_json : payload["files"]) {
+            FileInfo fi;
+            fi.path = file_json.value("path", "");
+            fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
+            fi.hash = file_json.value("hash", "");
+            fi.size = file_json.value("size", static_cast<uint64_t>(0));
+            if (!fi.path.empty()) {
+                files.push_back(fi);
+            }
+        }
+    } catch (const std::exception& e) {
+        g_logger->error("[KCP] 解析 file_update_batch 失败: {}", e.what());
+        return;
+    }
+    
+    g_logger->info("[KCP] (Destination) 收到批量文件更新: {} 个文件", files.size());
+    
+    // 更新接收计数（用于 sync 会话追踪）- 只更新一次
+    if (from_peer) {
+        from_peer->received_file_count.fetch_add(static_cast<int>(files.size()));
+        
+        std::string pid = from_peer->get_peer_id();
+        uint64_t sid = from_peer->sync_session_id.load();
+        boost::asio::post(m_io_context, [this, self=shared_from_this(), pid, sid](){
+             std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+             auto it = m_peers.find(pid);
+             if (it != m_peers.end() && it->second->sync_session_id.load() == sid) {
+                 if (it->second->sync_timeout_timer) {
+                     it->second->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+                 }
+             }
+        });
+    }
+    
+    std::string peer_id = from_peer ? from_peer->get_peer_id() : "";
+    if (peer_id.empty()) return;
+    
+    // 【修复】在单个 worker 任务中批量处理所有文件，而非每个文件一个任务
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), files = std::move(files), peer_id]() {
+        try {
+        std::vector<std::pair<FileInfo, bool>> files_to_request;  // (file_info, should_request)
+        
+        for (const auto& remote_info : files) {
+            // 1. 拦截回声 (Echo Check)
+            if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
+                continue;
+            }
+
+            g_logger->info("[P2P] 收到更新请求: {}", remote_info.path);
+
+            std::filesystem::path relative_path = Utf8ToPath(remote_info.path);
+            std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
+
+            bool should_request = false;
+            std::error_code ec;
+
+            // 2. 冲突检测 (简化版 - 仅检测本地是否存在)
+            if (!std::filesystem::exists(full_path, ec)) {
+                g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
+                should_request = true;
+            } else {
+                std::string remote_hash = remote_info.hash;
+                std::string local_hash = Hashing::CalculateSHA256(full_path);
+                std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);
+
+                if (local_hash == remote_hash) {
+                    g_logger->debug("[Sync] 内容一致，无需更新: {}", remote_info.path);
+                    m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+                    continue;
+                }
+
+                bool local_changed = !base_hash.empty() && (local_hash != base_hash);
+                bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
+
+                if (base_hash.empty() || (!local_changed && remote_changed)) {
+                    g_logger->info("[Sync] 正常更新 (本地未修改): {}", remote_info.path);
+                    should_request = true;
+                } else if (local_changed && !remote_changed) {
+                    g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {}", remote_info.path);
+                    m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+                    should_request = false;
+                } else if (!local_changed && !remote_changed) {
+                    should_request = false;
+                } else {
+                    // 双方都改了 → 冲突处理
+                    g_logger->warn("[Sync] ⚠️ 检测到冲突 (双方都修改了): {}", remote_info.path);
+                    
+                    auto now = std::chrono::system_clock::now();
+                    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+                    std::string filename = relative_path.stem().string();
+                    std::string ext = relative_path.extension().string();
+                    std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
+                    std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
+
+                    std::error_code ren_ec;
+                    std::filesystem::rename(full_path, conflict_path, ren_ec);
+
+                    if (!ren_ec) {
+                        g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
+                        should_request = true;
+                    } else {
+                        g_logger->error("[Sync] ❌ 冲突处理失败 (无法重命名): {} | {}", remote_info.path, FormatErrorCode(ren_ec));
+                        continue;
+                    }
+                }
+            }
+
+            if (should_request) {
+                files_to_request.emplace_back(remote_info, true);
+            }
+        }
+        
+        // 3. 批量发送文件请求
+        if (!files_to_request.empty()) {
+            g_logger->info("[Sync] 批量请求 {} 个文件", files_to_request.size());
+            
+            boost::asio::post(m_io_context, [self, peer_id, files_to_request]() {
+                try {
+                    std::shared_lock<std::shared_mutex> lock(self->m_peers_mutex);
+                    auto it = self->m_peers.find(peer_id);
+                    if (it == self->m_peers.end() || !it->second->is_connected()) return;
+
+                    auto* peer_ctrl = it->second.get();
+                    for (const auto& [remote_info, _] : files_to_request) {
+                        nlohmann::json request_msg;
+                        request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
+                        
+                        // 检查续传
+                        auto resume_info = self->m_transfer_manager->check_resume_eligibility(
+                            remote_info.path, remote_info.hash, remote_info.size);
+                        
+                        if (resume_info) {
+                            request_msg[Protocol::MSG_PAYLOAD] = {
+                                {"path", remote_info.path},
+                                {"start_chunk", resume_info->received_chunks},
+                                {"expected_hash", resume_info->expected_hash},
+                                {"expected_size", resume_info->expected_size}
+                            };
+                        } else {
+                            self->m_transfer_manager->register_expected_metadata(
+                                remote_info.path, peer_id, remote_info.hash, remote_info.size);
+                            request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
+                        }
+                        
+                        self->send_over_kcp_peer(request_msg.dump(), peer_ctrl);
+                    }
+                } catch (const std::exception& e) {
+                    g_logger->error("[Sync] 批量请求文件异常: {}", e.what());
+                }
+            });
+        }
+    } catch (const std::exception& e) {
+        g_logger->error("[KCP] handle_file_update_batch 异常: {}", e.what());
+    }
+    });
+}
+
+void P2PManager::handle_file_delete_batch(const nlohmann::json& payload, PeerController* from_peer) {
+    if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
+    if (!m_state_manager) return;
+    
+    std::vector<std::string> paths;
+    try {
+        if (!payload.contains("paths")) {
+            g_logger->error("[KCP] file_delete_batch 缺少 paths 字段");
+            return;
+        }
+        for (const auto& path : payload["paths"]) {
+            paths.push_back(path.get<std::string>());
+        }
+    } catch (const std::exception& e) {
+        g_logger->error("[KCP] 解析 file_delete_batch 失败: {}", e.what());
+        return;
+    }
+    
+    g_logger->info("[KCP] (Destination) 收到批量文件删除: {} 个文件", paths.size());
+    
+    // 更新接收计数
+    if (from_peer) {
+        from_peer->received_file_count.fetch_add(static_cast<int>(paths.size()));
+    }
+    
+    // 批量处理删除
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), paths]() {
+        for (const auto& relative_path_str : paths) {
+            std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(relative_path_str);
+            
+            std::error_code ec;
+            if (std::filesystem::remove(full_path, ec)) {
+                g_logger->debug("[Sync] -> 批量删除: {}", relative_path_str);
+                m_state_manager->remove_path_from_map(relative_path_str);
+            } else if (ec && ec != std::errc::no_such_file_or_directory) {
+                g_logger->error("[Sync] ❌ 批量删除失败: {} | {}", relative_path_str, FormatErrorCode(ec));
+            }
+        }
+        g_logger->info("[Sync] 批量删除完成: {} 个文件", paths.size());
+    });
+}
+
+void P2PManager::handle_dir_batch(const nlohmann::json& payload, PeerController* from_peer) {
+    if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
+    if (!m_state_manager) return;
+    
+    std::vector<std::string> creates;
+    std::vector<std::string> deletes;
+    
+    try {
+        if (payload.contains("creates")) {
+            for (const auto& dir : payload["creates"]) {
+                creates.push_back(dir.get<std::string>());
+            }
+        }
+        if (payload.contains("deletes")) {
+            for (const auto& dir : payload["deletes"]) {
+                deletes.push_back(dir.get<std::string>());
+            }
+        }
+    } catch (const std::exception& e) {
+        g_logger->error("[KCP] 解析 dir_batch 失败: {}", e.what());
+        return;
+    }
+    
+    g_logger->info("[KCP] (Destination) 收到批量目录变更: {} 创建, {} 删除", 
+                   creates.size(), deletes.size());
+    
+    // 更新接收计数
+    if (from_peer) {
+        from_peer->received_dir_count.fetch_add(static_cast<int>(creates.size() + deletes.size()));
+    }
+    
+    // 批量处理目录变更
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), creates, deletes]() {
+        try {
+            // 先处理创建
+            for (const auto& dir_path_str : creates) {
+                std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
+                
+                std::error_code ec;
+                if (std::filesystem::create_directories(full_path, ec) || std::filesystem::exists(full_path)) {
+                    m_state_manager->add_dir_to_map(dir_path_str);
+                } else if (ec) {
+                    g_logger->error("[Sync] ❌ 批量创建目录失败: {} | {}", dir_path_str, FormatErrorCode(ec));
+                }
+            }
+            
+            // 再处理删除（从最深的目录开始）
+            std::vector<std::string> sorted_deletes = deletes;
+            std::sort(sorted_deletes.begin(), sorted_deletes.end(),
+                      [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
+            
+            for (const auto& dir_path_str : sorted_deletes) {
+                std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
+                
+                std::error_code ec;
+                std::filesystem::remove_all(full_path, ec);
+                
+                if (!ec || ec == std::errc::no_such_file_or_directory) {
+                    m_state_manager->remove_dir_from_map(dir_path_str);
+                } else {
+                    g_logger->error("[Sync] ❌ 批量删除目录失败: {} | {}", dir_path_str, FormatErrorCode(ec));
+                }
+            }
+            
+            g_logger->info("[Sync] 批量目录变更完成: {} 创建, {} 删除", creates.size(), deletes.size());
+        } catch (const std::exception& e) {
+            g_logger->error("[Sync] handle_dir_batch 异常: {}", e.what());
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 文件传输相关
 // ═══════════════════════════════════════════════════════════════
 
@@ -1509,16 +1875,14 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerController> controller, 
         }
     });
 
-    // 3. 发送目录信息
-    for (const auto& dir_path : dirs) {
-        if (!controller->is_valid()) {
-            g_logger->warn("[P2P] 连接已断开，停止发送目录 (session: {})", session_id);
-            return;
-        }
+    // 【阶段1优化】3. 批量发送目录信息
+    if (!dirs.empty()) {
+        std::vector<std::string> dir_list(dirs.begin(), dirs.end());
         
         nlohmann::json msg;
-        msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_CREATE;
-        msg[Protocol::MSG_PAYLOAD] = {{"path", dir_path}};
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
+        msg[Protocol::MSG_PAYLOAD]["creates"] = dir_list;
+        msg[Protocol::MSG_PAYLOAD]["deletes"] = nlohmann::json::array();  // flood sync 只有创建
 
         std::weak_ptr<PeerController> weak_ctrl = controller;
         boost::asio::post(m_io_context, [self = shared_from_this(), weak_ctrl, msg_str = msg.dump()]() {
@@ -1527,11 +1891,13 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerController> controller, 
                 self->send_over_kcp_peer(msg_str, ctrl_locked.get());
             }
         });
+        
+        g_logger->debug("[P2P] 批量发送 {} 个目录信息", dir_list.size());
     }
 
-    // 4. 逐个发送文件状态
-    for (size_t i = 0; i < files.size(); ++i) {
-        // 【关键】检查连接有效性和会话有效性
+    // 【阶段1优化】4. 批量发送文件状态
+    for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
+        // 检查连接有效性和会话有效性
         if (!controller->is_valid()) {
             g_logger->warn("[P2P] 连接已断开，停止发送文件 (session: {}, 已发送 {}/{})", 
                            session_id, i, files.size());
@@ -1543,10 +1909,15 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerController> controller, 
             return;
         }
         
-        const auto& file = files[i];
+        size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
+        
         nlohmann::json msg;
-        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
-        msg[Protocol::MSG_PAYLOAD] = file;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
+        msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
+        
+        for (size_t j = i; j < end; ++j) {
+            msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
+        }
 
         std::weak_ptr<PeerController> weak_ctrl = controller;
         boost::asio::post(m_io_context, [self = shared_from_this(), weak_ctrl, msg_str = msg.dump()]() {
@@ -1556,18 +1927,20 @@ void P2PManager::perform_flood_sync(std::shared_ptr<PeerController> controller, 
             }
         });
 
-        // 【流控】每 50 个文件检查一次 KCP 发送队列积压量
-        if ((i + 1) % 50 == 0) {
-            int pending = controller->get_kcp_wait_send();
-
-            while (pending > 1024 && controller->is_valid()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                pending = controller->get_kcp_wait_send();
-            }
+        // 【流控】每发送一个批次检查一次 KCP 发送队列积压量
+        int pending = controller->get_kcp_wait_send();
+        while (pending > 1024 && controller->is_valid()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            pending = controller->get_kcp_wait_send();
         }
+        
+        g_logger->debug("[P2P] 发送文件批次 {}/{} ({} 个文件)", 
+                       (i / FILE_UPDATE_BATCH_SIZE) + 1,
+                       (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
+                       end - i);
     }
 
-    g_logger->info("[P2P] 向 {} 推送文件状态完成 ({} 个文件, {} 个目录, session: {})", 
+    g_logger->info("[P2P] 向 {} 批量推送文件状态完成 ({} 个文件, {} 个目录, session: {})", 
                    peer_id, files.size(), dirs.size(), session_id);
 }
 

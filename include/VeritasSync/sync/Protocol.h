@@ -51,6 +51,11 @@ namespace VeritasSync {
 
         static constexpr const char* TYPE_DIR_CREATE = "dir_create";  // 目录创建
         static constexpr const char* TYPE_DIR_DELETE = "dir_delete";  // 目录删除
+        
+        // --- 批量更新 (减少消息开销) ---
+        static constexpr const char* TYPE_FILE_UPDATE_BATCH = "file_update_batch";  // 批量文件更新
+        static constexpr const char* TYPE_FILE_DELETE_BATCH = "file_delete_batch";  // 批量文件删除
+        static constexpr const char* TYPE_DIR_BATCH = "dir_batch";                  // 批量目录变更
         // --------------------
 
         // --- 状态同步握手协议 ---

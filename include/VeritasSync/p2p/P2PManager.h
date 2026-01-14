@@ -326,6 +326,12 @@ public:
     virtual void broadcast_file_delete(const std::string& relative_path);
     virtual void broadcast_dir_create(const std::string& relative_path);
     virtual void broadcast_dir_delete(const std::string& relative_path);
+    
+    // --- 批量广播方法 (阶段1优化) ---
+    virtual void broadcast_file_updates_batch(const std::vector<FileInfo>& files);
+    virtual void broadcast_file_deletes_batch(const std::vector<std::string>& paths);
+    virtual void broadcast_dir_changes_batch(const std::vector<std::string>& creates, 
+                                             const std::vector<std::string>& deletes);
 
     // --- 由 TrackerClient 调用 ---
     virtual void handle_signaling_message(const std::string& from_peer_id, const std::string& message_type,
@@ -367,6 +373,11 @@ protected:
 
     void handle_dir_create(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer);
+    
+    // --- 批量消息处理器 (阶段1优化) ---
+    void handle_file_update_batch(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_file_delete_batch(const nlohmann::json& payload, PeerController* from_peer);
+    void handle_dir_batch(const nlohmann::json& payload, PeerController* from_peer);
 
     // --- 同步会话管理（使用 PeerController）---
     void handle_sync_begin(const nlohmann::json& payload, PeerController* from_peer);

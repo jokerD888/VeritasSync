@@ -319,86 +319,89 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 void TransferManager::handle_chunk(const std::string& payload, const std::string& peer_id) {
     // 此函数在主线程被调用，Throw 到 Worker 线程
     boost::asio::post(m_worker_pool, [self = shared_from_this(), payload, peer_id]() {
-        const char* data_ptr = payload.c_str();
-        size_t data_len = payload.length();
+        try {
+            const char* data_ptr = payload.c_str();
+            size_t data_len = payload.length();
 
-        // 1. 解析头部
-        uint16_t path_len = read_uint16(data_ptr, data_len);
-        if (path_len == 0 || data_len < path_len) return;
+            // 1. 解析头部
+            uint16_t path_len = read_uint16(data_ptr, data_len);
+            if (path_len == 0 || data_len < path_len) return;
 
-        std::string file_path_str(data_ptr, path_len);
-        data_ptr += path_len;
-        data_len -= path_len;
+            std::string file_path_str(data_ptr, path_len);
+            data_ptr += path_len;
+            data_len -= path_len;
 
-        uint32_t chunk_index = read_uint32(data_ptr, data_len);
-        uint32_t total_chunks = read_uint32(data_ptr, data_len);
+            uint32_t chunk_index = read_uint32(data_ptr, data_len);
+            uint32_t total_chunks = read_uint32(data_ptr, data_len);
 
-        // 2. 解压
-        std::string uncompressed_data;
-        if (data_len > 0) {
-            if (!snappy::Uncompress(data_ptr, data_len, &uncompressed_data)) {
-                g_logger->error("[Transfer] Snappy 解压失败: {}", file_path_str);
-                return;
-            }
-        }
-
-        // 3. 写入文件 - 需要加锁保护 map
-        std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-
-        auto it = self->m_receiving_files.find(file_path_str);
-        bool is_new_task = (it == self->m_receiving_files.end());
-        bool need_open_stream = is_new_task;
-        
-        if (is_new_task) {
-            // 新下载任务
-            std::filesystem::path relative_path = Utf8ToPath(file_path_str);
-            std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
-
-            if (full_path.has_parent_path()) {
-                std::error_code dir_ec;
-                std::filesystem::create_directories(full_path.parent_path(), dir_ec);
-                if (dir_ec) {
-                    g_logger->error("[Transfer] ❌ 无法创建目录: {} | {}", PathToUtf8(full_path.parent_path()), FormatErrorCode(dir_ec));
+            // 2. 解压
+            std::string uncompressed_data;
+            if (data_len > 0) {
+                if (!snappy::Uncompress(data_ptr, data_len, &uncompressed_data)) {
+                    g_logger->error("[Transfer] Snappy 解压失败: {}", file_path_str);
                     return;
                 }
             }
 
-            std::filesystem::path temp_path = full_path;
-            temp_path += ".veritas_tmp";
+            // 3. 写入文件 - 需要加锁保护 map
+            std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
 
-            ReceivingFile new_file;
-            new_file.temp_path = temp_path.string();
-            new_file.total_chunks = total_chunks;
-            new_file.peer_id = peer_id;  // 【断点续传】保存 peer_id
-
-            auto res = self->m_receiving_files.insert({file_path_str, std::move(new_file)});
-            it = res.first;
-            self->m_session_total++;
-            g_logger->info("[Transfer] 开始接收: {} ({} 块)", file_path_str, total_chunks);
-        } else {
-            // 已有记录（可能是预注册的或续传的）
-            // 更新 peer_id 和 total_chunks
-            it->second.peer_id = peer_id;
-            if (it->second.total_chunks == 0) {
-                it->second.total_chunks = total_chunks;
-            }
+            auto it = self->m_receiving_files.find(file_path_str);
+            bool is_new_task = (it == self->m_receiving_files.end());
+            bool need_open_stream = is_new_task;
             
-            // 如果 temp_path 为空（预注册状态），需要初始化
-            if (it->second.temp_path.empty()) {
+            if (is_new_task) {
+                // 新下载任务
                 std::filesystem::path relative_path = Utf8ToPath(file_path_str);
                 std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+
                 if (full_path.has_parent_path()) {
                     std::error_code dir_ec;
                     std::filesystem::create_directories(full_path.parent_path(), dir_ec);
+                    if (dir_ec) {
+                        g_logger->error("[Transfer] ❌ 无法创建目录: {} | {}", PathToUtf8(full_path.parent_path()), FormatErrorCode(dir_ec));
+                        return;
+                    }
                 }
+
                 std::filesystem::path temp_path = full_path;
                 temp_path += ".veritas_tmp";
-                it->second.temp_path = temp_path.string();
-                need_open_stream = true;
+
+                ReceivingFile new_file;
+                // 【修复】使用 PathToUtf8 确保 Windows 上中文路径正确编码
+                new_file.temp_path = PathToUtf8(temp_path);
+                new_file.total_chunks = total_chunks;
+                new_file.peer_id = peer_id;  // 【断点续传】保存 peer_id
+
+                auto res = self->m_receiving_files.insert({file_path_str, std::move(new_file)});
+                it = res.first;
                 self->m_session_total++;
-                g_logger->info("[Transfer] 开始接收（从预注册）: {} ({} 块)", file_path_str, total_chunks);
+                g_logger->info("[Transfer] 开始接收: {} ({} 块)", file_path_str, total_chunks);
+            } else {
+                // 已有记录（可能是预注册的或续传的）
+                // 更新 peer_id 和 total_chunks
+                it->second.peer_id = peer_id;
+                if (it->second.total_chunks == 0) {
+                    it->second.total_chunks = total_chunks;
+                }
+                
+                // 如果 temp_path 为空（预注册状态），需要初始化
+                if (it->second.temp_path.empty()) {
+                    std::filesystem::path relative_path = Utf8ToPath(file_path_str);
+                    std::filesystem::path full_path = self->m_state_manager->get_root_path() / relative_path;
+                    if (full_path.has_parent_path()) {
+                        std::error_code dir_ec;
+                        std::filesystem::create_directories(full_path.parent_path(), dir_ec);
+                    }
+                    std::filesystem::path temp_path = full_path;
+                    temp_path += ".veritas_tmp";
+                    // 【修复】使用 PathToUtf8 确保 Windows 上中文路径正确编码
+                    it->second.temp_path = PathToUtf8(temp_path);
+                    need_open_stream = true;
+                    self->m_session_total++;
+                    g_logger->info("[Transfer] 开始接收（从预注册）: {} ({} 块)", file_path_str, total_chunks);
+                }
             }
-        }
 
         ReceivingFile& recv_file = it->second;
         auto now = std::chrono::steady_clock::now();
@@ -461,9 +464,11 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
 
             std::filesystem::path relative_path = Utf8ToPath(file_path_str);
             std::filesystem::path final_path = self->m_state_manager->get_root_path() / relative_path;
+            // 【修复】使用 Utf8ToPath 转换 temp_path 以确保正确处理中文路径
+            std::filesystem::path temp_path_obj = Utf8ToPath(recv_file.temp_path);
 
             std::error_code ec;
-            std::filesystem::rename(recv_file.temp_path, final_path, ec);
+            std::filesystem::rename(temp_path_obj, final_path, ec);
 
             if (!ec) {
                 g_logger->info("[Transfer] ✅ 下载完成: {}", file_path_str);
@@ -472,10 +477,15 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
                     self->m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
                 }
             } else {
-                g_logger->error("[Transfer] 重命名失败: {}", ec.message());
+                g_logger->error("[Transfer] 重命名失败: {} -> {} | {}", recv_file.temp_path, PathToUtf8(final_path), ec.message());
             }
             self->m_session_done++;
             self->m_receiving_files.erase(it);
+        }
+        } catch (const std::exception& e) {
+            g_logger->error("[Transfer] handle_chunk 异常: {}", e.what());
+        } catch (...) {
+            g_logger->error("[Transfer] handle_chunk 未知异常");
         }
     });
 }

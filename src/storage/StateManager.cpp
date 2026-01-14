@@ -186,6 +186,12 @@ namespace VeritasSync {
         if (changes_to_process.empty()) return;
 
         std::unordered_set<std::string> failed_changes;
+        
+        // 【阶段1优化】批量收集变更
+        std::vector<FileInfo> file_updates;
+        std::vector<std::string> file_deletes;
+        std::vector<std::string> dir_creates;
+        std::vector<std::string> dir_deletes;
 
         std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
         std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
@@ -263,14 +269,16 @@ namespace VeritasSync {
                         // 更新数据库
                         if (m_db) m_db->update_file(info.path, info.hash, info.modified_time);
 
-                        g_logger->info("[{}] [StateManager] 广播文件更新: {}", m_sync_key, info.path);
-                        m_p2p_manager->broadcast_file_update(info);
+                        // 【阶段1优化】收集而非立即广播
+                        file_updates.push_back(info);
+                        g_logger->debug("[{}] [StateManager] 收集文件更新: {}", m_sync_key, info.path);
 
                     } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
                         if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
                             m_dir_map.insert(rel_path_str);
-                            g_logger->info("[{}] [StateManager] 广播目录创建: {}", m_sync_key, rel_path_str);
-                            m_p2p_manager->broadcast_dir_create(rel_path_str);
+                            // 【阶段1优化】收集而非立即广播
+                            dir_creates.push_back(rel_path_str);
+                            g_logger->debug("[{}] [StateManager] 收集目录创建: {}", m_sync_key, rel_path_str);
                         }
                     }
                 } else {
@@ -279,11 +287,13 @@ namespace VeritasSync {
                         // 从数据库删除
                         if (m_db) m_db->remove_file(rel_path_str);
 
-                        g_logger->info("[{}] [StateManager] 广播文件删除: {}", m_sync_key, rel_path_str);
-                        m_p2p_manager->broadcast_file_delete(rel_path_str);
+                        // 【阶段1优化】收集而非立即广播
+                        file_deletes.push_back(rel_path_str);
+                        g_logger->debug("[{}] [StateManager] 收集文件删除: {}", m_sync_key, rel_path_str);
                     } else if (m_dir_map.erase(rel_path_str) > 0) {
-                        g_logger->info("[{}] [StateManager] 广播目录删除: {}", m_sync_key, rel_path_str);
-                        m_p2p_manager->broadcast_dir_delete(rel_path_str);
+                        // 【阶段1优化】收集而非立即广播
+                        dir_deletes.push_back(rel_path_str);
+                        g_logger->debug("[{}] [StateManager] 收集目录删除: {}", m_sync_key, rel_path_str);
                     }
                 }
             } catch (const std::exception& e) {
@@ -294,6 +304,23 @@ namespace VeritasSync {
 
         // --- 提交事务 ---
         trans_guard.commit();
+
+        // 【阶段1优化】批量广播所有变更
+        if (!file_updates.empty()) {
+            g_logger->info("[{}] [StateManager] 批量广播 {} 个文件更新", m_sync_key, file_updates.size());
+            m_p2p_manager->broadcast_file_updates_batch(file_updates);
+        }
+        
+        if (!file_deletes.empty()) {
+            g_logger->info("[{}] [StateManager] 批量广播 {} 个文件删除", m_sync_key, file_deletes.size());
+            m_p2p_manager->broadcast_file_deletes_batch(file_deletes);
+        }
+        
+        if (!dir_creates.empty() || !dir_deletes.empty()) {
+            g_logger->info("[{}] [StateManager] 批量广播目录变更: {} 创建, {} 删除", 
+                          m_sync_key, dir_creates.size(), dir_deletes.size());
+            m_p2p_manager->broadcast_dir_changes_batch(dir_creates, dir_deletes);
+        }
 
         // --- 处理失败重试 ---
         if (!failed_changes.empty()) {
