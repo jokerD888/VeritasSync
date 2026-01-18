@@ -244,16 +244,20 @@ int PeerController::send_message(const std::string& message) {
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::update_kcp(uint32_t current_ms) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
-    if (!m_kcp || !m_is_valid.load()) return;
-    
-    m_kcp->update(current_ms);
-    
-    // receive() 会在锁外触发回调，这里调用是为了驱动消息接收
-    // KcpSession::receive() 内部会先收集消息，释放锁后触发回调
-    // 但我们持有 PeerController 的锁，不会死锁（不同的锁）
-    m_kcp->receive();
+    // 获取 KcpSession 的 shared_ptr，在锁外使用
+    std::shared_ptr<KcpSession> kcp;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        if (!m_kcp || !m_is_valid.load()) return;
+        
+        kcp = m_kcp;
+        kcp->update(current_ms);
+    }
+    // ⚠️ 关键修复：在锁外调用 receive()
+    // receive() 的回调 (on_message_received) 可能会调用 send_message()
+    // send_message() 需要获取 m_mutex，如果在锁内调用会死锁
+    kcp->receive();
 }
 
 // ═══════════════════════════════════════════════════════════════

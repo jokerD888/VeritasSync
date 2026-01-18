@@ -324,6 +324,7 @@ void P2PManager::init() {
     // 启动定时器
     schedule_kcp_update();
     schedule_cleanup_task();
+    schedule_heartbeat();  // 启动心跳保活定时器
     // upnp发现
     init_upnp();
 }
@@ -409,7 +410,7 @@ void P2PManager::update_all_kcps() {
 // 连接管理 - 使用 PeerController
 // ═══════════════════════════════════════════════════════════════
 
-void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses) {
+void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses, bool force) {
     std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：插入peer
 
     if (!m_tracker_client) {
@@ -423,8 +424,37 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
     }
 
     for (const auto& peer_id : peer_addresses) {
-        if (m_peers.count(peer_id)) {
+        // 【修复】跳过自己的 ID，防止尝试连接自己
+        if (peer_id == self_id) {
+            g_logger->debug("[ICE] 跳过自己的 ID: {}", peer_id);
             continue;
+        }
+        
+        // 检查是否已存在该 peer
+        auto existing_it = m_peers.find(peer_id);
+        if (existing_it != m_peers.end()) {
+            auto existing_state = existing_it->second->get_state();
+            
+            // 【修复】如果 force=true（Tracker 重连场景），强制重新连接
+            // 因为网络可能已经变化，旧的 ICE 连接无效
+            if (!force && (existing_state == PeerState::Connected || 
+                           existing_state == PeerState::Connecting)) {
+                continue;  // 非强制模式下，已连接或正在连接的跳过
+            }
+            
+            // 【修复】如果处于 Failed 或 Disconnected 状态，删除旧的并重新建立
+            // 这修复了睡眠唤醒后无法重连的问题
+            g_logger->info("[ICE] 对等点 {} 已存在但状态为 {}，重新建立连接", 
+                          peer_id, static_cast<int>(existing_state));
+            existing_it->second->close();
+            m_peers.erase(existing_it);
+            
+            // 清除重连计数（给新连接一个干净的开始）
+            {
+                std::lock_guard<std::mutex> reconnect_lock(m_reconnect_mutex);
+                m_reconnect_attempts.erase(peer_id);
+                m_last_reconnect_time.erase(peer_id);
+            }
         }
 
         g_logger->info("[ICE] 正在为对等点 {} 创建 PeerController...", peer_id);
@@ -472,6 +502,26 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
             controller->initiate_connection();
         } else {
             g_logger->info("[ICE] 我们是 Answer 方，等待 Offer (对于 {})", peer_id);
+            
+            // 【修复】Answer 方添加等待超时机制
+            // 如果 30 秒内没有收到 Offer，触发 Failed 状态启动重连
+            auto timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
+            timeout_timer->expires_after(std::chrono::seconds(30));
+            timeout_timer->async_wait([weak_controller = std::weak_ptr<PeerController>(controller), 
+                                       peer_id, 
+                                       timeout_timer,
+                                       self = shared_from_this()](const boost::system::error_code& ec) {
+                if (ec) return;  // 定时器被取消
+                
+                auto ctrl = weak_controller.lock();
+                if (!ctrl) return;
+                
+                // 如果仍然处于 Disconnected 状态（没收到 Offer），触发失败
+                if (ctrl->get_state() == PeerState::Disconnected) {
+                    g_logger->warn("[ICE] Answer 方等待 Offer 超时 (30s), 对等点: {}", peer_id);
+                    self->handle_peer_state_changed(peer_id, PeerState::Failed);
+                }
+            });
         }
     }
 }
@@ -738,6 +788,12 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
             } else if (json_msg_type == Protocol::TYPE_GOODBYE) {
                 // 【断点续传】处理对端正常退出通知
                 handle_goodbye(from_peer);
+            // --- 心跳保活 ---
+            } else if (json_msg_type == Protocol::TYPE_HEARTBEAT) {
+                handle_heartbeat(from_peer);
+            } else if (json_msg_type == Protocol::TYPE_HEARTBEAT_ACK) {
+                handle_heartbeat_ack(from_peer);
+            // ----------------
             } else {
                 g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
                                m_role == SyncRole::Source ? "Source" : "Destination");
@@ -761,6 +817,53 @@ TransferManager::SessionStats P2PManager::get_transfer_stats() {
         return m_transfer_manager->get_session_stats();
     }
     return {0, 0};
+}
+
+std::vector<P2PManager::PeerInfo> P2PManager::get_peers_info() {
+    std::vector<PeerInfo> result;
+    
+    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+    result.reserve(m_peers.size());
+    
+    for (const auto& [peer_id, controller] : m_peers) {
+        PeerInfo info;
+        info.peer_id = peer_id;
+        info.connected_since = controller->connected_at_ts.load();
+        
+        // 转换 PeerState 到字符串
+        switch (controller->get_state()) {
+            case PeerState::Connected:
+                info.state = "connected";
+                break;
+            case PeerState::Connecting:
+                info.state = "connecting";
+                break;
+            case PeerState::Failed:
+                info.state = "failed";
+                break;
+            case PeerState::Disconnected:
+            default:
+                info.state = "disconnected";
+                break;
+        }
+        
+        // 转换 IceConnectionType 到字符串
+        switch (controller->get_connection_type()) {
+            case IceConnectionType::Direct:
+                info.connection_type = "direct";
+                break;
+            case IceConnectionType::Relay:
+                info.connection_type = "relay";
+                break;
+            default:
+                info.connection_type = "unknown";
+                break;
+        }
+        
+        result.push_back(std::move(info));
+    }
+    
+    return result;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2035,6 +2138,82 @@ void P2PManager::handle_goodbye(PeerController* from_peer) {
             m_peers.erase(it);
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 心跳保活机制
+// ═══════════════════════════════════════════════════════════════
+
+void P2PManager::schedule_heartbeat() {
+    m_heartbeat_timer.expires_after(std::chrono::milliseconds(HEARTBEAT_INTERVAL_MS));
+    m_heartbeat_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
+        if (!ec) {
+            self->send_heartbeats();
+            self->schedule_heartbeat();  // 重新调度
+        }
+    });
+}
+
+void P2PManager::send_heartbeats() {
+    // 只在有连接的 peer 时发送心跳
+    std::vector<std::shared_ptr<PeerController>> connected_peers;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+        for (auto& [peer_id, controller] : m_peers) {
+            if (controller->is_connected()) {
+                connected_peers.push_back(controller);
+            }
+        }
+    }
+    
+    if (connected_peers.empty()) {
+        return;  // 没有连接的 peer，跳过心跳
+    }
+    
+    // 构造心跳消息
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_HEARTBEAT;
+    msg[Protocol::MSG_PAYLOAD] = {
+        {"ts", std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()}
+    };
+    
+    std::string json_packet;
+    json_packet.push_back(MSG_TYPE_JSON);
+    json_packet.append(msg.dump());
+    
+    // 向所有连接的 peer 发送心跳
+    for (auto& controller : connected_peers) {
+        if (controller->is_valid()) {
+            controller->send_message(json_packet);
+        }
+    }
+    
+    g_logger->debug("[Heartbeat] 发送心跳到 {} 个对等点", connected_peers.size());
+}
+
+void P2PManager::handle_heartbeat(PeerController* from_peer) {
+    if (!from_peer) return;
+    
+    // 收到心跳请求，立即回复 ACK
+    nlohmann::json msg;
+    msg[Protocol::MSG_TYPE] = Protocol::TYPE_HEARTBEAT_ACK;
+    msg[Protocol::MSG_PAYLOAD] = {
+        {"ts", std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()}
+    };
+    
+    send_over_kcp_peer(msg.dump(), from_peer);
+    
+    g_logger->debug("[Heartbeat] 收到来自 {} 的心跳，已回复 ACK", from_peer->get_peer_id());
+}
+
+void P2PManager::handle_heartbeat_ack(PeerController* from_peer) {
+    if (!from_peer) return;
+    
+    // 收到心跳响应，连接正常
+    // 这里可以用于统计 RTT 或检测连接质量，目前只记录日志
+    g_logger->debug("[Heartbeat] 收到来自 {} 的心跳 ACK", from_peer->get_peer_id());
 }
 
 }  // namespace VeritasSync

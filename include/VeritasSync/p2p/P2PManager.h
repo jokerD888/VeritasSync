@@ -318,7 +318,12 @@ public:
 
     virtual ~P2PManager();
 
-    virtual void connect_to_peers(const std::vector<std::string>& peer_addresses);
+    /**
+     * @brief 连接到对等点
+     * @param peer_addresses 对等点 ID 列表
+     * @param force 是否强制重新连接（用于 Tracker 重连后，需要清理旧的无效连接）
+     */
+    virtual void connect_to_peers(const std::vector<std::string>& peer_addresses, bool force = false);
 
     // --- 广播方法 ---
     virtual void broadcast_current_state();
@@ -350,6 +355,15 @@ public:
     std::vector<TransferStatus> get_active_transfers();
 
     TransferManager::SessionStats get_transfer_stats();
+
+    // --- 对等点状态查询 (Web UI 用) ---
+    struct PeerInfo {
+        std::string peer_id;           // 对端 ID
+        std::string state;             // 连接状态字符串: connected, connecting, disconnected, failed
+        std::string connection_type;   // 连接类型: direct, relay, unknown
+        int64_t connected_since;       // 连接建立时间 (epoch秒)，未连接为 0
+    };
+    std::vector<PeerInfo> get_peers_info();
 
 protected:
     P2PManager();
@@ -487,6 +501,17 @@ protected:
     static constexpr int BASE_RECONNECT_DELAY_MS = 3000;  // 基础重连延迟 3秒
     void schedule_reconnect(const std::string& peer_id);
     // ---------------------------------
+
+    // --- 心跳保活机制 ---
+    // NAT 映射通常在 30秒-5分钟 超时
+    // libjuice 内置 15 秒 STUN keepalive，我们在应用层额外增加 20 秒心跳作为双保险
+    boost::asio::steady_timer m_heartbeat_timer{m_io_context};
+    static constexpr int HEARTBEAT_INTERVAL_MS = 20000;  // 20秒
+    void schedule_heartbeat();
+    void send_heartbeats();
+    void handle_heartbeat(PeerController* from_peer);
+    void handle_heartbeat_ack(PeerController* from_peer);
+    // -----------------------
 
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作

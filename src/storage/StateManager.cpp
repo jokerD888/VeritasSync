@@ -328,6 +328,11 @@ namespace VeritasSync {
                         // 更新数据库
                         if (m_db) m_db->update_file(info.path, info.hash, info.modified_time);
 
+                        // 【源头抑制】检查是否为接收文件的回声
+                        if (check_and_clear_echo(info.path, info.hash)) {
+                            continue;  // 跳过广播，不加入 file_updates
+                        }
+
                         // 【阶段1优化】收集而非立即广播
                         file_updates.push_back(info);
                         g_logger->debug("[{}] [StateManager] 收集文件更新: {}", m_sync_key, info.path);
@@ -768,5 +773,26 @@ namespace VeritasSync {
                 }
             });
         });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 回声抑制（源头抑制）
+    // ═══════════════════════════════════════════════════════════════
+
+    void StateManager::mark_file_received(const std::string& path, const std::string& hash) {
+        std::lock_guard<std::mutex> lock(m_received_files_mutex);
+        m_received_files[path] = hash;
+        g_logger->debug("[Echo] 记录接收文件: {} (hash: {}...)", path, hash.substr(0, 8));
+    }
+
+    bool StateManager::check_and_clear_echo(const std::string& path, const std::string& hash) {
+        std::lock_guard<std::mutex> lock(m_received_files_mutex);
+        auto it = m_received_files.find(path);
+        if (it != m_received_files.end() && it->second == hash) {
+            m_received_files.erase(it);
+            g_logger->debug("[Echo] 检测到回声，跳过广播: {} (hash: {}...)", path, hash.substr(0, 8));
+            return true;
+        }
+        return false;
     }
 }  // namespace VeritasSync

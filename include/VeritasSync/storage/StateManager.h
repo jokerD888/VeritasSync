@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 #include <atomic>
 
 #include "VeritasSync/storage/Database.h"
@@ -77,6 +78,13 @@ namespace VeritasSync {
         // 获取所有文件列表（用于分批推送）
         std::vector<FileInfo> get_all_files() const;
 
+        // --- 回声抑制（源头抑制） ---
+        // 下载完成后调用，记录接收到的文件（用于抑制后续的回声广播）
+        void mark_file_received(const std::string& path, const std::string& hash);
+        
+        // 检查是否为接收文件的回声，如果是则删除记录并返回 true
+        bool check_and_clear_echo(const std::string& path, const std::string& hash);
+
     private:
         // --- 供 UpdateListener 调用的内部方法 ---
         friend class UpdateListener;
@@ -109,6 +117,11 @@ namespace VeritasSync {
 
         // 过滤器实例
         FileFilter m_file_filter;
+
+        // --- 回声抑制（源头抑制） ---
+        // 记录从对端接收到的文件（path → hash），用于在广播前检查并跳过回声
+        std::unordered_map<std::string, std::string> m_received_files;
+        std::mutex m_received_files_mutex;
 
         // --- 生命周期管理 ---
         // 唯一的重试计时器，负责调度所有文件冲突后的再次处理任务

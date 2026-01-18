@@ -199,23 +199,42 @@ bool TrayIcon::is_autostart_enabled() {
 
 void TrayIcon::set_autostart(bool enable) {
     HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
-        g_logger->error("[Tray] 无法打开注册表项用于设置自启动");
+    LONG result = RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, KEY_SET_VALUE, &hKey);
+    if (result != ERROR_SUCCESS) {
+        g_logger->error("[Tray] 无法打开注册表项用于设置自启动，错误码: {}", result);
         return;
     }
 
     if (enable) {
         // 获取当前 EXE 路径
         wchar_t path[MAX_PATH];
-        GetModuleFileNameW(NULL, path, MAX_PATH);
-        // 加上 " 不然路径有空格会挂
+        DWORD len = GetModuleFileNameW(NULL, path, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH) {
+            g_logger->error("[Tray] 获取 EXE 路径失败");
+            RegCloseKey(hKey);
+            return;
+        }
+        
+        // 加上引号，防止路径有空格时出错
         std::wstring cmd = std::wstring(L"\"") + path + L"\"";
-
-        RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, (const BYTE*)cmd.c_str(), (cmd.size() + 1) * sizeof(wchar_t));
-        g_logger->info("[Tray] 已开启开机自启");
+        
+        // 写入注册表
+        result = RegSetValueExW(hKey, APP_NAME, 0, REG_SZ, 
+                                (const BYTE*)cmd.c_str(), 
+                                (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        
+        if (result == ERROR_SUCCESS) {
+            g_logger->info("[Tray] 已开启开机自启，路径: {}", WideToUtf8(cmd));
+        } else {
+            g_logger->error("[Tray] 写入注册表失败，错误码: {}", result);
+        }
     } else {
-        RegDeleteValueW(hKey, APP_NAME);
-        g_logger->info("[Tray] 已关闭开机自启");
+        result = RegDeleteValueW(hKey, APP_NAME);
+        if (result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND) {
+            g_logger->info("[Tray] 已关闭开机自启");
+        } else {
+            g_logger->error("[Tray] 删除注册表值失败，错误码: {}", result);
+        }
     }
     RegCloseKey(hKey);
 }

@@ -308,11 +308,21 @@ void TrackerClient::register_handlers() {
         std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
         g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
 
+        // 【修复】无论是首次连接还是重连，都要尝试连接到对等点
         if (m_on_ready_callback) {
+            // 首次连接：使用回调
             auto cb = std::move(m_on_ready_callback);
-            m_on_ready_callback = nullptr; // 显式置空
+            m_on_ready_callback = nullptr;
             boost::asio::post(m_p2p_manager->get_io_context(),
                               [cb, peers = std::move(peers)]() { cb(peers); });
+        } else if (m_p2p_manager && !peers.empty()) {
+            // 重连后：直接调用，使用 force=true 强制重建连接
+            // 因为 Tracker 重连意味着网络可能已变化，旧的 ICE 连接无效
+            g_logger->info("[TrackerClient] Tracker 重连成功，强制重新连接到 {} 个对等点", peers.size());
+            boost::asio::post(m_p2p_manager->get_io_context(),
+                              [p2p = m_p2p_manager, peers = std::move(peers)]() { 
+                                  p2p->connect_to_peers(peers, true);  // force=true
+                              });
         }
     };
 
@@ -320,8 +330,12 @@ void TrackerClient::register_handlers() {
         std::string peer_id = payload.at("peer_id").get<std::string>();
         g_logger->info("[TrackerClient] 对等点 {} 已加入。", peer_id);
         if (m_p2p_manager) {
+            // 【修复】使用 force=true，因为对端重新上线后 IP 可能已变化
+            // 这也会清除之前的重连计数，给连接一个干净的开始
             boost::asio::post(m_p2p_manager->get_io_context(),
-                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { p2p->connect_to_peers({id}); });
+                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { 
+                                  p2p->connect_to_peers({id}, true);  // force=true
+                              });
         }
     };
 

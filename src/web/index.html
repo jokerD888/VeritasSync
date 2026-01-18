@@ -446,8 +446,25 @@
                         </div>
                     </div>
 
+                    <!-- P2P 对等点状态 (新增) -->
+                    <div class="glass-card" style="max-height: 240px; display:flex; flex-direction:column;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.8rem">
+                            <h3 style="font-size:1rem; color:#fff; display:flex; align-items:center; gap:8px; margin:0">
+                                <span>🔗</span> P2P 对等点
+                            </h3>
+                            <div style="font-size:0.75rem; color:var(--text-sub);" id="peers-summary">
+                                在线: 0
+                            </div>
+                        </div>
+                        <div id="peers-container" style="overflow-y:auto; flex:1;">
+                            <div style="text-align:center; padding:1.5rem; color:var(--text-muted); font-size:0.85rem;">
+                                等待对等点连接...
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- 传输流 -->
-                    <div class="glass-card" style="flex:1; display:flex; flex-direction:column; min-height: 300px;">
+                    <div class="glass-card" style="flex:1; display:flex; flex-direction:column; min-height: 200px;">
                         <h3 style="margin-bottom:1rem; font-size:1rem; color:#fff; display:flex; align-items:center; gap:10px">
                             <span>📡</span> 实时数据流
                         </h3>
@@ -608,15 +625,31 @@
         </div>
     </div>
 
-    <!-- 弹窗：任务日志 -->
-    <div class="modal" id="log-modal">
-        <div class="modal-box" style="width:800px; max-width:95%">
-            <div style="display:flex; justify-content:space-between; margin-bottom:1rem; align-items:center">
-                <h3>任务详细日志</h3>
-                <button class="btn btn-ghost" style="padding:4px 8px" onclick="closeLogModal()">✕</button>
+    <!-- 弹窗：忽略规则编辑器 -->
+    <div class="modal" id="ignore-modal">
+        <div class="modal-box" style="width:700px; max-width:95%">
+            <div style="display:flex; justify-content:space-between; margin-bottom:1.5rem; align-items:center">
+                <div>
+                    <h3 style="margin:0; color:#fff; font-size:1.4rem">📋 忽略规则编辑器</h3>
+                    <p style="color:var(--text-sub); font-size:0.85rem; margin-top:6px" id="ignore-folder-name">加载中...</p>
+                </div>
+                <button class="btn btn-ghost" style="padding:6px 12px; font-size:1.2rem" onclick="closeIgnoreModal()">✕</button>
             </div>
-            <div class="terminal" style="height:450px">
-                <div class="log-body" id="task-log-content"></div>
+            
+            <div style="background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:10px; padding:15px; margin-bottom:1.5rem">
+                <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:10px">📄 .veritasignore 语法说明:</div>
+                <div style="font-size:0.8rem; color:var(--text-sub); line-height:1.8; font-family:var(--font-mono)">
+                    <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px">*.log</code> 忽略所有 .log 文件<br>
+                    <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px">node_modules/</code> 忽略整个目录<br>
+                    <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px"># 注释</code> 以 # 开头的行为注释
+                </div>
+            </div>
+            
+            <textarea id="ignore-content" class="form-input" style="height:280px; font-family:var(--font-mono); font-size:0.9rem; resize:vertical; line-height:1.6" placeholder="# 在此输入忽略规则，每行一条&#10;&#10;# 示例:&#10;*.tmp&#10;*.log&#10;.git/&#10;node_modules/"></textarea>
+            
+            <div style="display:flex; justify-content:space-between; gap:15px; margin-top:1.5rem">
+                <button class="btn btn-ghost" onclick="closeIgnoreModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveIgnoreRules()" id="btn-save-ignore">💾 保存规则</button>
             </div>
         </div>
     </div>
@@ -713,7 +746,7 @@
 
                     <div class="task-footer">
                         <button class="btn btn-ghost" onclick="openFolder(${i})">📂 打开</button>
-                        <button class="btn btn-ghost" onclick="viewTaskLog(${i})">📄 日志</button>
+                        <button class="btn btn-ghost" onclick="openIgnoreModal(${i})">📋 忽略规则</button>
                         <button class="btn btn-danger-ghost" style="justify-content:center" onclick="delTask(${i})">🗑</button>
                     </div>
                 </div>`;
@@ -782,7 +815,75 @@
             id('newKey').value = k; 
         }
         function closeModal() { id('add-modal').classList.remove('open'); }
-        function closeLogModal() { id('log-modal').classList.remove('open'); }
+        
+        // 忽略规则相关
+        let currentIgnoreTaskId = -1;
+        let ignoreTaskList = [];
+        
+        function closeIgnoreModal() { 
+            id('ignore-modal').classList.remove('open'); 
+            currentIgnoreTaskId = -1;
+        }
+        
+        async function openIgnoreModal(taskIdx) {
+            currentIgnoreTaskId = taskIdx;
+            id('ignore-modal').classList.add('open');
+            id('ignore-content').value = '';
+            id('ignore-folder-name').innerText = '加载中...';
+            
+            try {
+                // 先获取任务信息
+                const configRes = await fetch('/api/config');
+                const config = await configRes.json();
+                if (config.tasks && config.tasks[taskIdx]) {
+                    ignoreTaskList = config.tasks;
+                    const folder = config.tasks[taskIdx].sync_folder;
+                    id('ignore-folder-name').innerText = '📁 ' + folder;
+                }
+                
+                // 获取忽略规则
+                const res = await fetch(`/api/tasks/${taskIdx}/ignore`);
+                const data = await res.json();
+                if (data.success) {
+                    id('ignore-content').value = data.content || '';
+                }
+            } catch (e) {
+                console.error('加载忽略规则失败', e);
+                id('ignore-folder-name').innerText = '加载失败';
+            }
+        }
+        
+        async function saveIgnoreRules() {
+            if (currentIgnoreTaskId < 0) return;
+            
+            const btn = id('btn-save-ignore');
+            btn.disabled = true;
+            btn.innerText = '保存中...';
+            
+            try {
+                const content = id('ignore-content').value;
+                const res = await fetch(`/api/tasks/${currentIgnoreTaskId}/ignore`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    closeIgnoreModal();
+                    // 显示成功提示
+                    alert('✅ 忽略规则已保存！\n\n规则将立即生效，无需重启。');
+                } else {
+                    alert('保存失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                console.error('保存失败', e);
+                alert('保存失败，请重试');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '💾 保存规则';
+            }
+        }
         
         async function openFolder(i) { try { await fetch(`/api/tasks/${i}/open`, { method: 'POST' }); } catch (e) { } }
         async function pickFolder() { 
@@ -963,6 +1064,66 @@
                             </div>
                         </div>
                         `}).join('');
+                }
+                
+                // --- 4. 渲染对等点状态 (新增) ---
+                const peers = data.peers || [];
+                const peersSummary = data.peers_summary || { total: 0, connected: 0, connecting: 0, failed: 0 };
+                
+                // 更新统计
+                id('peers-summary').innerText = `在线: ${peersSummary.connected} / ${peersSummary.total}`;
+                
+                const peersContainer = id('peers-container');
+                if (peers.length === 0) {
+                    peersContainer.innerHTML = '<div style="text-align:center; padding:1.5rem; color:var(--text-muted); font-size:0.85rem;">等待对等点连接...</div>';
+                } else {
+                    peersContainer.innerHTML = peers.map(p => {
+                        // 状态对应的 LED 颜色和文字
+                        let ledColor, ledGlow, stateText;
+                        switch (p.state) {
+                            case 'connected':
+                                ledColor = '#10b981'; ledGlow = '0 0 8px #10b981'; stateText = '已连接';
+                                break;
+                            case 'connecting':
+                                ledColor = '#fbbf24'; ledGlow = '0 0 8px #fbbf24'; stateText = '连接中...';
+                                break;
+                            case 'failed':
+                                ledColor = '#ef4444'; ledGlow = '0 0 8px #ef4444'; stateText = '连接失败';
+                                break;
+                            default:
+                                ledColor = '#64748b'; ledGlow = 'none'; stateText = '断开';
+                        }
+                        
+                        // 连接类型
+                        let connTypeText = '';
+                        if (p.state === 'connected') {
+                            connTypeText = p.connection_type === 'direct' ? '🚀 直连' : 
+                                          p.connection_type === 'relay' ? '🌐 中继' : '';
+                        }
+                        
+                        // 在线时长
+                        let durationText = '';
+                        if (p.state === 'connected' && p.connected_since > 0) {
+                            const now = Math.floor(Date.now() / 1000);
+                            const seconds = now - p.connected_since;
+                            if (seconds < 60) durationText = `${seconds}秒`;
+                            else if (seconds < 3600) durationText = `${Math.floor(seconds / 60)}分钟`;
+                            else durationText = `${Math.floor(seconds / 3600)}小时`;
+                        }
+                        
+                        return `
+                        <div style="background:rgba(0,0,0,0.2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <span style="width:10px; height:10px; border-radius:50%; background:${ledColor}; box-shadow:${ledGlow}; display:inline-block;"></span>
+                                <span style="font-weight:600; color:#fff; font-size:0.9rem; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${p.peer_id}">${p.peer_id}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:0.75rem; color:var(--text-sub);">
+                                <span>${stateText}${connTypeText ? ' · ' + connTypeText : ''}</span>
+                                <span style="color:var(--text-muted)">${durationText}</span>
+                            </div>
+                        </div>
+                        `;
+                    }).join('');
                 }
                 
             } catch (e) { 

@@ -475,6 +475,9 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
                 if (!peer_id.empty()) {
                     std::string new_hash = Hashing::CalculateSHA256(final_path);
                     self->m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
+                    
+                    // 【源头抑制】记录接收到的文件，防止后续回声广播
+                    self->m_state_manager->mark_file_received(file_path_str, new_hash);
                 }
             } else {
                 g_logger->error("[Transfer] 重命名失败: {} -> {} | {}", recv_file.temp_path, PathToUtf8(final_path), ec.message());

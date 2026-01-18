@@ -384,6 +384,79 @@ private:
                 res.set_content("{\"success\":false}", "application/json");
             }
         });
+
+        // 12. 获取忽略规则
+        m_svr.Get("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
+            try {
+                size_t idx = std::stoul(req.path_params.at("id"));
+                std::string content;
+                {
+                    std::lock_guard<std::mutex> lock(m_config_mutex);
+                    if (idx < m_config.tasks.size()) {
+                        std::filesystem::path ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
+                        if (std::filesystem::exists(ignore_path)) {
+                            std::ifstream f(ignore_path);
+                            if (f.good()) {
+                                std::ostringstream oss;
+                                oss << f.rdbuf();
+                                content = oss.str();
+                            }
+                        }
+                    }
+                }
+                nlohmann::json j;
+                j["success"] = true;
+                j["content"] = content;
+                res.set_content(j.dump(), "application/json");
+            } catch (const std::exception& e) {
+                nlohmann::json j;
+                j["success"] = false;
+                j["error"] = e.what();
+                res.set_content(j.dump(), "application/json");
+                res.status = 400;
+            }
+        });
+
+        // 13. 保存忽略规则
+        m_svr.Post("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
+            try {
+                size_t idx = std::stoul(req.path_params.at("id"));
+                nlohmann::json body = nlohmann::json::parse(req.body);
+                std::string content = body.value("content", "");
+                
+                std::filesystem::path ignore_path;
+                {
+                    std::lock_guard<std::mutex> lock(m_config_mutex);
+                    if (idx < m_config.tasks.size()) {
+                        ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
+                    }
+                }
+                
+                if (!ignore_path.empty()) {
+                    std::ofstream f(ignore_path);
+                    if (f.good()) {
+                        f << content;
+                        f.close();
+                        nlohmann::json j;
+                        j["success"] = true;
+                        res.set_content(j.dump(), "application/json");
+                        if (g_logger) g_logger->info("[WebUI] 已保存忽略规则: {}", PathToUtf8(ignore_path));
+                    } else {
+                        res.status = 500;
+                        res.set_content("{\"success\":false,\"error\":\"无法写入文件\"}", "application/json");
+                    }
+                } else {
+                    res.status = 404;
+                    res.set_content("{\"success\":false,\"error\":\"任务不存在\"}", "application/json");
+                }
+            } catch (const std::exception& e) {
+                nlohmann::json j;
+                j["success"] = false;
+                j["error"] = e.what();
+                res.set_content(j.dump(), "application/json");
+                res.status = 400;
+            }
+        });
     }
 
     bool save_config_internal() {

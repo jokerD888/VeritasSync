@@ -129,13 +129,27 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
     auto& peer_set = m_peer_groups[sync_key];
     std::string new_peer_id = session->get_id();
 
-    // 1. 准备 ACK 消息，包含当前房间中的所有 peers
+    // 【修复】先检查是否已存在相同 ID 的旧 session（重连场景）
+    auto old_session_it = m_peers_by_id.find(new_peer_id);
+    if (old_session_it != m_peers_by_id.end()) {
+        auto old_session = old_session_it->second;
+        if (old_session != session) {
+            g_logger->info("[Tracker] 检测到相同 ID 的旧连接，移除旧 session: {}", new_peer_id);
+            peer_set.erase(old_session);
+            m_peers_by_id.erase(old_session_it);
+        }
+    }
+
+    // 1. 准备 ACK 消息，包含当前房间中的所有 peers（排除自己）
     json reg_ack_payload;
     reg_ack_payload["self_id"] = new_peer_id;
 
     json peers_list = json::array();
     for (const auto& peer : peer_set) {
-        peers_list.push_back(peer->get_id());
+        // 【修复】排除自己的 ID
+        if (peer->get_id() != new_peer_id) {
+            peers_list.push_back(peer->get_id());
+        }
     }
     reg_ack_payload["peers"] = peers_list;
 
@@ -154,7 +168,9 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
 
     // 2.A. 广播 PEER_JOIN 给房间中所有 *其他* peers
     for (const auto& peer : peer_set) {
-        peer->send(peer_join_msg);
+        if (peer->get_id() != new_peer_id) {  // 也要排除相同 ID
+            peer->send(peer_join_msg);
+        }
     }
 
     // 3. 将新 peer 加入

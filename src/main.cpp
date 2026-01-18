@@ -29,6 +29,19 @@ std::atomic<bool> g_shutdown_requested{false};
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
+    // ===== 单实例检查 =====
+    // 使用命名互斥锁防止程序多开
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"VeritasSync_SingleInstance_Mutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // 已有实例在运行，提示用户并退出
+        MessageBoxW(NULL, 
+                    L"VeritasSync 已经在运行中。\n\n请检查系统托盘区域。", 
+                    L"VeritasSync", 
+                    MB_OK | MB_ICONINFORMATION);
+        if (hMutex) CloseHandle(hMutex);
+        return 0;
+    }
+
     // 1. 设置控制台输入输出代码页为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
@@ -93,6 +106,12 @@ int main(int argc, char* argv[]) {
         bool any_tracker_online = false;
         uint64_t global_done = 0;
         uint64_t global_total = 0;
+        
+        // 对等点统计
+        nlohmann::json all_peers = nlohmann::json::array();
+        int connected_count = 0;
+        int connecting_count = 0;
+        int failed_count = 0;
 
         std::lock_guard<std::mutex> lock(g_nodes_mutex);
         for (const auto& node : g_active_nodes) {
@@ -131,13 +150,42 @@ int main(int argc, char* argv[]) {
                     t["stalled"] = item.is_stalled;
                     node_json["transfers"].push_back(t);
                 }
+                
+                // C. 获取对等点状态 (新增)
+                auto peers_info = p2p->get_peers_info();
+                for (const auto& peer : peers_info) {
+                    nlohmann::json peer_json;
+                    peer_json["peer_id"] = peer.peer_id;
+                    peer_json["state"] = peer.state;
+                    peer_json["connection_type"] = peer.connection_type;
+                    peer_json["connected_since"] = peer.connected_since;
+                    peer_json["sync_key"] = node->get_key();  // 关联到哪个同步任务
+                    all_peers.push_back(peer_json);
+                    
+                    // 统计
+                    if (peer.state == "connected") connected_count++;
+                    else if (peer.state == "connecting") connecting_count++;
+                    else if (peer.state == "failed") failed_count++;
+                }
             }
             root["nodes"].push_back(node_json);
         }
 
         // 3. 构建全局状态对象
         root["global"] = {
-            {"tracker_online", any_tracker_online}, {"session_done", global_done}, {"session_total", global_total}};
+            {"tracker_online", any_tracker_online}, 
+            {"session_done", global_done}, 
+            {"session_total", global_total}
+        };
+        
+        // 4. 添加对等点信息 (新增)
+        root["peers"] = all_peers;
+        root["peers_summary"] = {
+            {"total", all_peers.size()},
+            {"connected", connected_count},
+            {"connecting", connecting_count},
+            {"failed", failed_count}
+        };
 
         return root;
     });
