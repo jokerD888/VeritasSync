@@ -188,7 +188,7 @@ TEST_F(TrackerClientTest, ConnectionAndRegistration) {
     auto p2p_work = boost::asio::make_work_guard(p2p_ctx);
     std::jthread p2p_thread([&]() { p2p_ctx.run(); });
 
-    auto client = std::make_shared<TrackerClient>("127.0.0.1", m_port);
+    auto client = std::make_shared<TrackerClient>(p2p_ctx, "127.0.0.1", m_port);
     MockP2PManager mock_p2p(p2p_ctx);
     client->set_p2p_manager(&mock_p2p);
 
@@ -219,7 +219,7 @@ TEST_F(TrackerClientTest, ConcurrencyWriteQueueStress) {
     auto p2p_work = boost::asio::make_work_guard(p2p_ctx);
     std::jthread p2p_thread([&]() { p2p_ctx.run(); });
 
-    auto client = std::make_shared<TrackerClient>("127.0.0.1", m_port);
+    auto client = std::make_shared<TrackerClient>(p2p_ctx, "127.0.0.1", m_port);
     MockP2PManager mock_p2p(p2p_ctx);
     client->set_p2p_manager(&mock_p2p);
 
@@ -251,7 +251,7 @@ TEST_F(TrackerClientTest, ReconnectionLogic) {
     auto p2p_work = boost::asio::make_work_guard(p2p_ctx);
     std::jthread p2p_thread([&]() { p2p_ctx.run(); });
 
-    auto client = std::make_shared<TrackerClient>("127.0.0.1", m_port);
+    auto client = std::make_shared<TrackerClient>(p2p_ctx, "127.0.0.1", m_port);
     MockP2PManager mock_p2p(p2p_ctx);
     client->set_p2p_manager(&mock_p2p);
 

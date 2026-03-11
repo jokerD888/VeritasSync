@@ -112,6 +112,32 @@ int main(int argc, char* argv[]) {
         g_active_nodes.push_back(node);
     });
 
+    // --- C-5: 设置动态删除任务回调 ---
+    web_ui.set_on_task_remove([](const std::string& sync_key) {
+        VeritasSync::g_logger->info("[Main] 收到删除任务请求: {}", sync_key);
+        std::lock_guard<std::mutex> lock(g_nodes_mutex);
+
+        // 通过 sync_key 查找并停止对应的 SyncNode
+        auto it = std::find_if(g_active_nodes.begin(), g_active_nodes.end(),
+            [&sync_key](const std::shared_ptr<VeritasSync::SyncNode>& node) {
+                return node->get_key() == sync_key;
+            });
+        
+        if (it != g_active_nodes.end()) {
+            // 先优雅关闭 P2P 连接（广播 goodbye）
+            auto p2p = (*it)->get_p2p();
+            if (p2p) {
+                p2p->shutdown_gracefully();
+            }
+            // 停止 SyncNode（停止 Tracker、清理资源）
+            (*it)->stop();
+            g_active_nodes.erase(it);
+            VeritasSync::g_logger->info("[Main] 已停止并移除任务: {}", sync_key);
+        } else {
+            VeritasSync::g_logger->warn("[Main] 未找到对应的活跃节点: {}", sync_key);
+        }
+    });
+
     // --- 启动初始任务 ---
     {
         std::lock_guard<std::mutex> lock(g_nodes_mutex);

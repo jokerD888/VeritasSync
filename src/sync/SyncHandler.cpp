@@ -33,6 +33,110 @@ bool SyncHandler::can_receive() const {
     return m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 提取的私有方法：冲突检测 + 文件请求构造
+// ═══════════════════════════════════════════════════════════════
+
+SyncHandler::ConflictResult SyncHandler::resolve_conflict(
+    const std::string& peer_id,
+    const FileInfo& remote_info,
+    const std::filesystem::path& full_path,
+    const std::filesystem::path& relative_path) {
+    
+    std::error_code ec;
+    if (!std::filesystem::exists(full_path, ec)) {
+        g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
+        return ConflictResult::RequestRemote;
+    }
+
+    std::string remote_hash = remote_info.hash;
+    std::string local_hash = Hashing::CalculateSHA256(full_path);
+    std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);
+
+    if (local_hash == remote_hash) {
+        g_logger->debug("[Sync] 内容一致，无需更新: {}", remote_info.path);
+        m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+        return ConflictResult::Skip;
+    }
+
+    bool local_changed = !base_hash.empty() && (local_hash != base_hash);
+    bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
+
+    if (base_hash.empty() || (!local_changed && remote_changed)) {
+        g_logger->info("[Sync] 正常更新 (本地未修改): {}", remote_info.path);
+        return ConflictResult::RequestRemote;
+
+    } else if (local_changed && !remote_changed) {
+        g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {} (local={}, remote={}, base={})",
+                       remote_info.path,
+                       local_hash.substr(0, 6),
+                       remote_hash.substr(0, 6),
+                       base_hash.substr(0, 6));
+        m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
+        return ConflictResult::NoAction;
+
+    } else if (!local_changed && !remote_changed) {
+        g_logger->debug("[Sync] 状态一致，无需操作: {}", remote_info.path);
+        return ConflictResult::NoAction;
+
+    } else {
+        // 双方都改了 → 真正的冲突
+        g_logger->warn("[Sync] ⚠️ 检测到冲突 (双方都修改了): {}", remote_info.path);
+        g_logger->warn("       Base: {}...", base_hash.substr(0, std::min<size_t>(6, base_hash.size())));
+        g_logger->warn("       Local: {}...", local_hash.substr(0, std::min<size_t>(6, local_hash.size())));
+        g_logger->warn("       Remote: {}...", remote_hash.substr(0, std::min<size_t>(6, remote_hash.size())));
+
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+        std::string filename = relative_path.stem().string();
+        std::string ext = relative_path.extension().string();
+        std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
+        std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
+
+        std::error_code ren_ec;
+        std::filesystem::rename(full_path, conflict_path, ren_ec);
+
+        if (!ren_ec) {
+            g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
+            return ConflictResult::RequestRemote;
+        } else {
+            g_logger->error("[Sync] ❌ 冲突处理失败 (无法重命名): {} | {}", remote_info.path, FormatErrorCode(ren_ec));
+            return ConflictResult::Skip;
+        }
+    }
+}
+
+std::string SyncHandler::build_file_request(
+    const std::string& file_path,
+    const std::string& peer_id,
+    const std::string& remote_hash,
+    uint64_t remote_size) {
+    
+    nlohmann::json request_msg;
+    request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
+
+    auto resume_info = m_transfer_manager->check_resume_eligibility(
+        file_path, remote_hash, remote_size);
+
+    if (resume_info) {
+        request_msg[Protocol::MSG_PAYLOAD] = {
+            {"path", file_path},
+            {"start_chunk", resume_info->received_chunks},
+            {"expected_hash", resume_info->expected_hash},
+            {"expected_size", resume_info->expected_size}
+        };
+        g_logger->info("[P2P] 发送续传请求: {} 从 chunk #{} 开始",
+                       file_path, resume_info->received_chunks);
+    } else {
+        m_transfer_manager->register_expected_metadata(
+            file_path, peer_id, remote_hash, remote_size);
+        request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
+    }
+
+    return request_msg.dump();
+}
+
 void SyncHandler::refresh_peer_timeout(PeerController* from_peer) {
     if (!from_peer) return;
 
@@ -185,10 +289,7 @@ void SyncHandler::handle_share_state(const nlohmann::json& payload, PeerControll
                     if (!peer_ctrl || !peer_ctrl->is_connected()) return;
                     
                     for (const auto& file_path : reqs) {
-                        nlohmann::json request_msg;
-                        request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-                        
-                        // 【断点续传】获取远程文件信息
+                        // 获取远程文件信息
                         std::string remote_hash;
                         uint64_t remote_size = 0;
                         auto fit = remote_file_map.find(file_path);
@@ -197,26 +298,8 @@ void SyncHandler::handle_share_state(const nlohmann::json& payload, PeerControll
                             remote_size = fit->second.size;
                         }
                         
-                        // 【断点续传】检查是否可以续传
-                        auto resume_info = m_transfer_manager->check_resume_eligibility(
-                            file_path, remote_hash, remote_size);
-                        
-                        if (resume_info) {
-                            request_msg[Protocol::MSG_PAYLOAD] = {
-                                {"path", file_path},
-                                {"start_chunk", resume_info->received_chunks},
-                                {"expected_hash", resume_info->expected_hash},
-                                {"expected_size", resume_info->expected_size}
-                            };
-                            g_logger->info("[P2P] 发送续传请求: {} 从 chunk #{} 开始", 
-                                          file_path, resume_info->received_chunks);
-                        } else {
-                            m_transfer_manager->register_expected_metadata(
-                                file_path, peer_id, remote_hash, remote_size);
-                            request_msg[Protocol::MSG_PAYLOAD] = {{"path", file_path}};
-                        }
-                        
-                        m_send_to_peer(request_msg.dump(), peer_ctrl);
+                        std::string msg = build_file_request(file_path, peer_id, remote_hash, remote_size);
+                        m_send_to_peer(msg, peer_ctrl);
                     }
                 });
             });
@@ -261,99 +344,15 @@ void SyncHandler::handle_file_update(const nlohmann::json& payload, PeerControll
         std::filesystem::path relative_path = Utf8ToPath(remote_info.path);
         std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
 
-        bool should_request = false;
-        std::error_code ec;
+        // --- 2. 冲突检测 ---
+        ConflictResult result = resolve_conflict(peer_id, remote_info, full_path, relative_path);
+        if (result == ConflictResult::Skip || result == ConflictResult::NoAction) return;
 
-        // --- 2. 冲突检测 (Conflict Resolution) ---
-        if (!std::filesystem::exists(full_path, ec)) {
-            g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
-            should_request = true;
-        } else {
-            std::string remote_hash = remote_info.hash;
-            std::string local_hash = Hashing::CalculateSHA256(full_path);
-            std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);
-
-            if (local_hash == remote_hash) {
-                g_logger->info("[Sync] 内容一致，无需更新: {}", remote_info.path);
-                m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
-                return;
-            }
-
-            bool local_changed = !base_hash.empty() && (local_hash != base_hash);
-            bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
-
-            if (base_hash.empty() || (!local_changed && remote_changed)) {
-                g_logger->info("[Sync] 正常更新 (本地未修改): {}", remote_info.path);
-                should_request = true;
-                
-            } else if (local_changed && !remote_changed) {
-                g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {} (local={}, remote={}, base={})", 
-                               remote_info.path,
-                               local_hash.substr(0, 6),
-                               remote_hash.substr(0, 6),
-                               base_hash.substr(0, 6));
-                m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
-                should_request = false;
-                
-            } else if (!local_changed && !remote_changed) {
-                g_logger->debug("[Sync] 状态一致，无需操作: {}", remote_info.path);
-                should_request = false;
-                
-            } else {
-                // 情况 4: 双方都改了 → 真正的冲突
-                g_logger->warn("[Sync] ⚠️ 检测到冲突 (双方都修改了): {}", remote_info.path);
-                g_logger->warn("       Base: {}...", base_hash.substr(0, std::min<size_t>(6, base_hash.size())));
-                g_logger->warn("       Local: {}...", local_hash.substr(0, std::min<size_t>(6, local_hash.size())));
-                g_logger->warn("       Remote: {}...", remote_hash.substr(0, std::min<size_t>(6, remote_hash.size())));
-
-                auto now = std::chrono::system_clock::now();
-                auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-
-                std::string filename = relative_path.stem().string();
-                std::string ext = relative_path.extension().string();
-                std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
-                std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
-
-                std::error_code ren_ec;
-                std::filesystem::rename(full_path, conflict_path, ren_ec);
-
-                if (!ren_ec) {
-                    g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
-                    should_request = true;
-                } else {
-                    g_logger->error("[Sync] ❌ 冲突处理失败 (无法重命名): {} | {}", remote_info.path, FormatErrorCode(ren_ec));
-                    return;
-                }
-            }
-        }
-
-        if (should_request) {
-            nlohmann::json request_msg;
-            request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-            
-            auto resume_info = m_transfer_manager->check_resume_eligibility(
-                remote_info.path, remote_info.hash, remote_info.size);
-            
-            if (resume_info) {
-                request_msg[Protocol::MSG_PAYLOAD] = {
-                    {"path", remote_info.path},
-                    {"start_chunk", resume_info->received_chunks},
-                    {"expected_hash", resume_info->expected_hash},
-                    {"expected_size", resume_info->expected_size}
-                };
-                g_logger->info("[P2P] 发送续传请求: {} 从 chunk #{} 开始", 
-                              remote_info.path, resume_info->received_chunks);
-            } else {
-                m_transfer_manager->register_expected_metadata(
-                    remote_info.path, peer_id, remote_info.hash, remote_info.size);
-                request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
-            }
-            
-            std::string msg_str = request_msg.dump();
-            boost::asio::post(m_io_context, [this, peer_id, msg_str]() {
-                 m_send_to_peer_safe(msg_str, peer_id);
-            });
-        }
+        // --- 3. 发送文件请求 ---
+        std::string msg_str = build_file_request(remote_info.path, peer_id, remote_info.hash, remote_info.size);
+        boost::asio::post(m_io_context, [this, peer_id, msg_str]() {
+             m_send_to_peer_safe(msg_str, peer_id);
+        });
     });
 }
 
@@ -522,7 +521,7 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
     
     boost::asio::post(m_worker_pool, [this, files = std::move(files), peer_id]() {
         try {
-        std::vector<std::pair<FileInfo, bool>> files_to_request;
+        std::vector<FileInfo> files_to_request;
         
         for (const auto& remote_info : files) {
             // 1. 拦截回声
@@ -535,63 +534,10 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
             std::filesystem::path relative_path = Utf8ToPath(remote_info.path);
             std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
 
-            bool should_request = false;
-            std::error_code ec;
-
             // 2. 冲突检测
-            if (!std::filesystem::exists(full_path, ec)) {
-                g_logger->info("[Sync] 本地缺失，准备下载: {}", remote_info.path);
-                should_request = true;
-            } else {
-                std::string remote_hash = remote_info.hash;
-                std::string local_hash = Hashing::CalculateSHA256(full_path);
-                std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);
-
-                if (local_hash == remote_hash) {
-                    g_logger->debug("[Sync] 内容一致，无需更新: {}", remote_info.path);
-                    m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
-                    continue;
-                }
-
-                bool local_changed = !base_hash.empty() && (local_hash != base_hash);
-                bool remote_changed = !base_hash.empty() && (remote_hash != base_hash);
-
-                if (base_hash.empty() || (!local_changed && remote_changed)) {
-                    g_logger->info("[Sync] 正常更新 (本地未修改): {}", remote_info.path);
-                    should_request = true;
-                } else if (local_changed && !remote_changed) {
-                    g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {}", remote_info.path);
-                    m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
-                    should_request = false;
-                } else if (!local_changed && !remote_changed) {
-                    should_request = false;
-                } else {
-                    // 双方都改了 → 冲突处理
-                    g_logger->warn("[Sync] ⚠️ 检测到冲突 (双方都修改了): {}", remote_info.path);
-                    
-                    auto now = std::chrono::system_clock::now();
-                    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-
-                    std::string filename = relative_path.stem().string();
-                    std::string ext = relative_path.extension().string();
-                    std::string conflict_name = filename + ".conflict." + std::to_string(timestamp) + ext;
-                    std::filesystem::path conflict_path = full_path.parent_path() / conflict_name;
-
-                    std::error_code ren_ec;
-                    std::filesystem::rename(full_path, conflict_path, ren_ec);
-
-                    if (!ren_ec) {
-                        g_logger->warn("[Sync] ⚡ 本地冲突文件已重命名为: {}", conflict_path.filename().string());
-                        should_request = true;
-                    } else {
-                        g_logger->error("[Sync] ❌ 冲突处理失败 (无法重命名): {} | {}", remote_info.path, FormatErrorCode(ren_ec));
-                        continue;
-                    }
-                }
-            }
-
-            if (should_request) {
-                files_to_request.emplace_back(remote_info, true);
+            ConflictResult result = resolve_conflict(peer_id, remote_info, full_path, relative_path);
+            if (result == ConflictResult::RequestRemote) {
+                files_to_request.push_back(remote_info);
             }
         }
         
@@ -604,27 +550,10 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
                     m_with_peer(peer_id, [this, &peer_id, &files_to_request](PeerController* peer_ctrl) {
                         if (!peer_ctrl || !peer_ctrl->is_connected()) return;
                         
-                        for (const auto& [remote_info, _] : files_to_request) {
-                            nlohmann::json request_msg;
-                            request_msg[Protocol::MSG_TYPE] = Protocol::TYPE_REQUEST_FILE;
-                            
-                            auto resume_info = m_transfer_manager->check_resume_eligibility(
-                                remote_info.path, remote_info.hash, remote_info.size);
-                            
-                            if (resume_info) {
-                                request_msg[Protocol::MSG_PAYLOAD] = {
-                                    {"path", remote_info.path},
-                                    {"start_chunk", resume_info->received_chunks},
-                                    {"expected_hash", resume_info->expected_hash},
-                                    {"expected_size", resume_info->expected_size}
-                                };
-                            } else {
-                                m_transfer_manager->register_expected_metadata(
-                                    remote_info.path, peer_id, remote_info.hash, remote_info.size);
-                                request_msg[Protocol::MSG_PAYLOAD] = {{"path", remote_info.path}};
-                            }
-                            
-                            m_send_to_peer(request_msg.dump(), peer_ctrl);
+                        for (const auto& remote_info : files_to_request) {
+                            std::string msg = build_file_request(
+                                remote_info.path, peer_id, remote_info.hash, remote_info.size);
+                            m_send_to_peer(msg, peer_ctrl);
                         }
                     });
                 } catch (const std::exception& e) {

@@ -6,8 +6,9 @@
 #include <vector>
 #include <optional>
 
+#include <boost/asio/detail/socket_ops.hpp>
+
 namespace VeritasSync {
-// 待集成
 
 /**
  * @brief 统一二进制 Frame 协议
@@ -42,13 +43,22 @@ public:
     // 帧头大小
     static constexpr size_t HEADER_SIZE = 7; // 2 + 1 + 4
     
+    // S-5 安全修复: 单帧最大载荷大小 64 MB
+    // 防止恶意节点发送超大 payload_len 导致 OOM
+    static constexpr uint32_t MAX_PAYLOAD_SIZE = 64 * 1024 * 1024;
+    
     /**
      * @brief 编码 Frame
      * @param type 消息类型
      * @param payload 载荷数据
-     * @return 编码后的完整帧
+     * @return 编码后的完整帧，payload 超限时返回空串
      */
     static std::string encode(MessageType type, const std::string& payload) {
+        // S-5: 发送端也做校验，防止编程错误导致发出超大帧
+        if (payload.size() > MAX_PAYLOAD_SIZE) {
+            return "";
+        }
+        
         std::string frame;
         frame.reserve(HEADER_SIZE + payload.size());
         
@@ -122,6 +132,11 @@ public:
             (static_cast<uint32_t>(static_cast<uint8_t>(data[5])) << 8) |
             static_cast<uint32_t>(static_cast<uint8_t>(data[6]));
         
+        // S-5 安全修复: 载荷长度上限校验，防止恶意超大帧导致 OOM
+        if (payload_len > MAX_PAYLOAD_SIZE) {
+            return std::nullopt;
+        }
+        
         // 检查完整性
         if (size < HEADER_SIZE + payload_len) {
             return std::nullopt;
@@ -157,9 +172,42 @@ public:
     }
 };
 
-// --- 兼容旧代码的常量 ---
-// 后续迁移完成后应移除
+// ═══════════════════════════════════════════════════════════════
+// 兼容旧代码的常量（后续全面迁移到 BinaryFrame::MessageType 后可移除）
+// ═══════════════════════════════════════════════════════════════
 static const uint8_t MSG_TYPE_JSON = 0x01;
 static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
+
+// ═══════════════════════════════════════════════════════════════
+// 统一的二进制序列化/反序列化工具函数
+// 用于协议封包/解包中的网络字节序读写
+// ═══════════════════════════════════════════════════════════════
+inline void append_uint16(std::string& s, uint16_t val) {
+    uint16_t net_val = boost::asio::detail::socket_ops::host_to_network_short(val);
+    s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
+}
+
+inline void append_uint32(std::string& s, uint32_t val) {
+    uint32_t net_val = boost::asio::detail::socket_ops::host_to_network_long(val);
+    s.append(reinterpret_cast<const char*>(&net_val), sizeof(net_val));
+}
+
+inline uint16_t read_uint16(const char*& data, size_t& len) {
+    if (len < sizeof(uint16_t)) return 0;
+    uint16_t net_val;
+    std::memcpy(&net_val, data, sizeof(net_val));
+    data += sizeof(net_val);
+    len -= sizeof(net_val);
+    return boost::asio::detail::socket_ops::network_to_host_short(net_val);
+}
+
+inline uint32_t read_uint32(const char*& data, size_t& len) {
+    if (len < sizeof(uint32_t)) return 0;
+    uint32_t net_val;
+    std::memcpy(&net_val, data, sizeof(net_val));
+    data += sizeof(net_val);
+    len -= sizeof(net_val);
+    return boost::asio::detail::socket_ops::network_to_host_long(net_val);
+}
 
 } // namespace VeritasSync

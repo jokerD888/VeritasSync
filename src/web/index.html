@@ -839,8 +839,11 @@
         }
 
         function genKey() { 
-            const c = 'abcdefghijklmnopqrstuvwxyz0123456789', l = c.length; 
-            let k = 'sync-'; for (let i = 0; i < 8; i++)k += c.charAt(Math.floor(Math.random() * l)); 
+            // S-2 安全修复: 使用密码学安全随机数，192 位熵
+            const bytes = new Uint8Array(24);
+            crypto.getRandomValues(bytes);
+            const base64 = btoa(String.fromCharCode(...bytes));
+            const k = 'sync-' + base64.replace(/[+/=]/g, '').substring(0, 32);
             id('newKey').value = k; 
         }
         function closeModal() { id('add-modal').classList.remove('open'); }
@@ -930,7 +933,9 @@
             const r = id('newRole').value;
             const f = id('newFolder').value;
             const m = id('newMode').value;
-            if (!k || !f) return alert('信息不完整'); 
+            if (!k || !f) return alert('信息不完整');
+            // S-2 安全修复: sync_key 最低强度校验
+            if (k.length < 16) return alert('Sync Key 长度至少 16 个字符，建议点击 🎲 生成按钮创建安全密钥');
             await fetch('/api/tasks', { method: 'POST', body: JSON.stringify({ sync_key: k, role: r, sync_folder: f, mode: m }) }); 
             closeModal(); location.reload(); 
         }

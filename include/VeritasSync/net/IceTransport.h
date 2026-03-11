@@ -165,6 +165,19 @@ public:
     bool is_connected() const;
     
     /**
+     * @brief 替换回调（用于两阶段初始化）
+     * 
+     * 在 PeerController 的 bind_callbacks() 中调用，
+     * 此时 shared_ptr 已就绪，可以用 weak_ptr 绑定回调。
+     * 
+     * @param callbacks 新的回调接口
+     */
+    void set_callbacks(IceTransportCallbacks callbacks) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callbacks = std::move(callbacks);
+    }
+    
+    /**
      * @brief 获取底层 agent 指针 (仅供兼容旧代码，后续应移除)
      */
     juice_agent_t* get_raw_agent() const { return m_agent; }

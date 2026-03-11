@@ -43,8 +43,8 @@ public:
     };
 
     // 构造函数注入所有依赖
-    // 构造函数注入所有依赖
-    TransferManager(StateManager* sm, boost::asio::thread_pool& pool, SendCallback send_cb);
+    TransferManager(StateManager* sm, boost::asio::io_context& io_context,
+                    boost::asio::thread_pool& pool, SendCallback send_cb);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
@@ -122,10 +122,15 @@ public:
 
 private:
     StateManager* m_state_manager;
+    boost::asio::io_context& m_io_context;
     boost::asio::thread_pool& m_worker_pool;
     SendCallback m_send_callback;
 
     struct ReceivingFile {
+        // C-2: per-file 锁 —— 保护 file_stream 和写入操作
+        // 允许不同文件的 chunk 并行处理，同一文件的 chunk 串行写入
+        std::mutex file_mutex;
+        
         std::ofstream file_stream;
         std::string temp_path;
         uint32_t total_chunks = 0;
@@ -140,6 +145,9 @@ private:
         std::string peer_id;           // 来源 peer ID（用于按 peer 清理）
         std::string expected_hash;     // 预期文件哈希（用于校验源文件未变）
         uint64_t expected_size = 0;    // 预期文件大小
+        
+        // C-2: 标记是否正在被 handle_chunk 使用（防止 cancel/cleanup 并发删除）
+        bool busy = false;
     };
     struct SendingFile {
         uint32_t total_chunks = 0;
@@ -153,8 +161,9 @@ private:
     };
 
     // 正在接收的文件映射 (Path -> State)
-    std::map<std::string, ReceivingFile> m_receiving_files;
-    std::mutex m_transfer_mutex;
+    // C-2: 使用 shared_ptr 因为 ReceivingFile 含 std::mutex 不可移动
+    std::map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
+    std::mutex m_transfer_mutex;  // 全局锁：保护 map 结构（insert/erase/遍历）
     std::map<std::string, SendingFile> m_sending_files;  // 追踪上传
 
     std::atomic<uint64_t> m_session_total{0};

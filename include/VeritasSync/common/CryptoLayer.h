@@ -24,7 +24,7 @@ public:
     CryptoLayer(CryptoLayer&&) noexcept;
     CryptoLayer& operator=(CryptoLayer&&) noexcept;
 
-    // 从字符串派生密钥 (SHA256)
+    // 从字符串派生密钥 (HKDF-SHA256)
     void set_key(const std::string& key_string);
 
     // AES-256-GCM 加密
@@ -38,10 +38,6 @@ public:
     bool has_key() const { return !m_key.empty(); }
 
 private:
-    // 获取或创建加密上下文（线程局部缓存）
-    EVP_CIPHER_CTX* get_encrypt_ctx() const;
-    EVP_CIPHER_CTX* get_decrypt_ctx() const;
-    
     std::string m_key;
     
     // 性能优化：使用线程局部缓存 (Thread Local Storage)

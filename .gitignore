@@ -72,11 +72,22 @@ data_source/
 data_backup/
 temp/
 
+# --- Test Artifacts ---
+test_sync_node_*/
+test_state_root/
+test_transfer_root/
+test_*.db
+test_*.db-shm
+test_*.db-wal
+*.tmp
+
 # --- Temporary Build/Install Scripts ---
 bg_install.bat
 build_msvc.bat
 build_only.bat
 build_project.bat
+build_debug.bat
+build_release.bat
 cmake_configure.bat
 configure.bat
 continue_install.bat

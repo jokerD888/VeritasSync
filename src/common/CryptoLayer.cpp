@@ -1,8 +1,10 @@
 #include "VeritasSync/common/CryptoLayer.h"
 
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <openssl/crypto.h>
 
 #include <cstring>
 #include <memory>
@@ -17,7 +19,13 @@ static const int GCM_TAG_LEN = 16;
 
 // --- 构造/析构 ---
 CryptoLayer::CryptoLayer() = default;
-CryptoLayer::~CryptoLayer() = default;
+
+CryptoLayer::~CryptoLayer() {
+    // S-4 安全修复: 析构时清零密钥内存，防止残留在堆中被取证工具提取
+    if (!m_key.empty()) {
+        OPENSSL_cleanse(m_key.data(), m_key.size());
+    }
+}
 
 CryptoLayer::CryptoLayer(CryptoLayer&& other) noexcept
     : m_key(std::move(other.m_key)) {
@@ -25,6 +33,10 @@ CryptoLayer::CryptoLayer(CryptoLayer&& other) noexcept
 
 CryptoLayer& CryptoLayer::operator=(CryptoLayer&& other) noexcept {
     if (this != &other) {
+        // S-4 安全修复: 先清零自己的旧密钥
+        if (!m_key.empty()) {
+            OPENSSL_cleanse(m_key.data(), m_key.size());
+        }
         m_key = std::move(other.m_key);
     }
     return *this;
@@ -59,16 +71,43 @@ EVP_CIPHER_CTX* CryptoLayer::get_thread_decrypt_ctx() {
 }
 
 void CryptoLayer::set_key(const std::string& key_string) {
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, key_string.c_str(), key_string.length());
-    SHA256_Final(hash, &sha256);
-    m_key.assign(reinterpret_cast<const char*>(hash), SHA256_DIGEST_LENGTH);
-    
+    // S-2 安全修复: 使用 HKDF-SHA256 从 sync_key 派生 AES-256 密钥
+    // Salt: 固定的应用级盐值（防止跨应用碰撞）
+    // Info: 绑定用途，防止密钥被误用于其他场景
+    static const unsigned char salt[] = "VeritasSync-v1-salt";
+    static const unsigned char info[] = "veritassync-aes256-gcm";
+
+    unsigned char derived_key[32]; // 256 bits
+
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    if (!ctx) {
+        g_logger->error("[Crypto] HKDF 上下文创建失败");
+        return;
+    }
+
+    bool ok = (EVP_PKEY_derive_init(ctx) == 1);
+    ok = ok && (EVP_PKEY_CTX_set_hkdf_md(ctx, EVP_sha256()) == 1);
+    ok = ok && (EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt, sizeof(salt) - 1) == 1);
+    ok = ok && (EVP_PKEY_CTX_set1_hkdf_key(ctx,
+            reinterpret_cast<const unsigned char*>(key_string.c_str()),
+            key_string.length()) == 1);
+    ok = ok && (EVP_PKEY_CTX_add1_hkdf_info(ctx, info, sizeof(info) - 1) == 1);
+
+    size_t outlen = 32;
+    ok = ok && (EVP_PKEY_derive(ctx, derived_key, &outlen) == 1);
+    EVP_PKEY_CTX_free(ctx);
+
+    if (!ok) {
+        g_logger->error("[Crypto] HKDF 密钥派生失败");
+        return;
+    }
+
+    m_key.assign(reinterpret_cast<const char*>(derived_key), 32);
+    OPENSSL_cleanse(derived_key, sizeof(derived_key));  // S-4: 清零临时密钥
+
     // 注意：由于使用了 thread_local，这里的密钥更改是全局生效的，
     // 但上下文状态会在下次 EncryptInit 时由新的密钥覆盖，无需手动重置上下文。
-    g_logger->info("[Crypto] 加密密钥已更新 (SHA256 derived).");
+    g_logger->info("[Crypto] 加密密钥已更新 (HKDF-SHA256 derived).");
 }
 
 std::string CryptoLayer::encrypt(const std::string& plaintext) const {

@@ -2,6 +2,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/thread_pool.hpp>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -88,6 +89,31 @@ private:
     
     // 检查是否可以接收同步消息
     bool can_receive() const;
+
+    /**
+     * @brief 三方合并冲突检测
+     * 
+     * 比较 local_hash / remote_hash / base_hash，返回结果：
+     *  - 1: 应该下载远程文件 (should_request = true)
+     *  - 0: 不需要操作 (should_request = false)
+     * -1: 跳过当前文件（已一致或本地更新已记录）
+     * 
+     * 当双方都修改时，自动将本地文件重命名为 .conflict.{timestamp} 并返回 1。
+     */
+    enum class ConflictResult { RequestRemote, Skip, NoAction };
+    ConflictResult resolve_conflict(const std::string& peer_id,
+                                    const FileInfo& remote_info,
+                                    const std::filesystem::path& full_path,
+                                    const std::filesystem::path& relative_path);
+
+    /**
+     * @brief 构造文件请求消息（含断点续传检查）
+     * @return JSON 字符串，可直接发送给 peer
+     */
+    std::string build_file_request(const std::string& file_path,
+                                   const std::string& peer_id,
+                                   const std::string& remote_hash,
+                                   uint64_t remote_size);
 
     StateManager* m_state_manager;
     std::shared_ptr<TransferManager> m_transfer_manager;

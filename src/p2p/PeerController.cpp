@@ -71,60 +71,10 @@ PeerController::~PeerController() {
 // ═══════════════════════════════════════════════════════════════
 
 bool PeerController::initialize_ice(const IceConfig& ice_config) {
-    // 【关键设计】
-    // IceTransport 的回调在 libjuice 内部线程触发，
-    // 我们需要通过 post 投递到 io_context 线程。
-    // 
-    // 问题：此时 shared_ptr 尚未完全创建，不能使用 weak_from_this()
-    // 解决：使用 this 指针 + io_context post，在回调中检查 m_is_valid
-    // 
-    // 这种设计的安全性依赖于：
-    // 1. close() 会先设置 m_is_valid = false，再释放资源
-    // 2. 所有回调在执行业务逻辑前检查 m_is_valid
-    // 3. 回调通过 post 到 io_context，与其他操作串行化
+    // 第一阶段：仅创建 IceTransport，回调留空
+    // 回调将在 bind_callbacks() 中设置（此时 shared_ptr 已就绪）
     
-    IceTransportCallbacks ice_callbacks;
-    
-    // 捕获 raw pointer + io_context reference
-    // IceTransport 的生命周期由 PeerController 管理
-    PeerController* self_ptr = this;
-    auto& io = m_io_context;
-    
-    ice_callbacks.on_state_changed = [self_ptr, &io](IceState state) {
-        // 【重要】post 到 io_context 线程执行
-        boost::asio::post(io, [self_ptr, state]() {
-            // 检查有效性
-            if (self_ptr->m_is_valid.load()) {
-                self_ptr->on_ice_state_changed(state);
-            }
-        });
-    };
-    
-    ice_callbacks.on_local_candidate = [self_ptr, &io](const std::string& candidate) {
-        boost::asio::post(io, [self_ptr, candidate]() {
-            if (self_ptr->m_is_valid.load()) {
-                self_ptr->on_ice_local_candidate(candidate);
-            }
-        });
-    };
-    
-    ice_callbacks.on_gathering_done = [self_ptr, &io](const std::string& local_desc) {
-        boost::asio::post(io, [self_ptr, local_desc]() {
-            if (self_ptr->m_is_valid.load()) {
-                self_ptr->on_ice_gathering_done(local_desc);
-            }
-        });
-    };
-    
-    ice_callbacks.on_data_received = [self_ptr, &io](const char* data, size_t size) {
-        // 数据接收需要拷贝，因为原始指针在回调返回后可能无效
-        std::string data_copy(data, size);
-        boost::asio::post(io, [self_ptr, data_copy]() {
-            if (self_ptr->m_is_valid.load()) {
-                self_ptr->on_ice_data_received(data_copy.data(), data_copy.size());
-            }
-        });
-    };
+    IceTransportCallbacks ice_callbacks;  // 空回调，后续在 bind_callbacks 中设置
     
     m_ice = IceTransport::create(ice_config, std::move(ice_callbacks));
     if (!m_ice) {
@@ -138,9 +88,50 @@ bool PeerController::initialize_ice(const IceConfig& ice_config) {
 }
 
 void PeerController::bind_callbacks() {
-    // 现在 shared_ptr 已创建，可以做一些额外的初始化
-    // 但由于 IceTransport 的回调已经在 initialize_ice 中设置，
-    // 这里只需要记录日志
+    // C-1 安全修复：ICE 回调改用 weak_ptr
+    // 现在 shared_ptr 已创建，可以安全使用 weak_from_this()
+    // weak_ptr::lock() 是原子判活 + 延寿，彻底消除 Use-After-Free
+    
+    auto self_weak = weak_from_this();
+    auto& io = m_io_context;
+    
+    IceTransportCallbacks ice_callbacks;
+    
+    ice_callbacks.on_state_changed = [self_weak, &io](IceState state) {
+        boost::asio::post(io, [self_weak, state]() {
+            auto self = self_weak.lock();
+            if (!self) return;  // 对象已析构，安全跳过
+            self->on_ice_state_changed(state);
+        });
+    };
+    
+    ice_callbacks.on_local_candidate = [self_weak, &io](const std::string& candidate) {
+        boost::asio::post(io, [self_weak, candidate]() {
+            auto self = self_weak.lock();
+            if (!self) return;
+            self->on_ice_local_candidate(candidate);
+        });
+    };
+    
+    ice_callbacks.on_gathering_done = [self_weak, &io](const std::string& local_desc) {
+        boost::asio::post(io, [self_weak, local_desc]() {
+            auto self = self_weak.lock();
+            if (!self) return;
+            self->on_ice_gathering_done(local_desc);
+        });
+    };
+    
+    ice_callbacks.on_data_received = [self_weak, &io](const char* data, size_t size) {
+        // 数据接收需要拷贝，因为原始指针在回调返回后可能无效
+        std::string data_copy(data, size);
+        boost::asio::post(io, [self_weak, data_copy]() {
+            auto self = self_weak.lock();
+            if (!self) return;
+            self->on_ice_data_received(data_copy.data(), data_copy.size());
+        });
+    };
+    
+    m_ice->set_callbacks(std::move(ice_callbacks));
     
     if (g_logger) {
         g_logger->info("[PeerController] Initialized {} <-> {} (offer_side={})", 
@@ -174,7 +165,7 @@ uint32_t PeerController::calculate_conv() const {
 void PeerController::initiate_connection() {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    if (!m_ice || !m_is_valid.load()) return;
+    if (!m_ice) return;
     
     m_state.store(PeerState::Connecting);
     m_ice->gather_candidates();
@@ -188,7 +179,7 @@ void PeerController::initiate_connection() {
 void PeerController::handle_signaling(const std::string& signal_type, const std::string& payload) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    if (!m_ice || !m_is_valid.load()) return;
+    if (!m_ice) return;
     
     if (signal_type == "ice_candidate") {
         m_ice->add_remote_candidate(payload);
@@ -205,8 +196,8 @@ void PeerController::handle_signaling(const std::string& signal_type, const std:
 }
 
 void PeerController::close() {
-    // 先标记为无效，让所有异步操作安全退出
-    m_is_valid.store(false);
+    // C-1: 标记为已关闭，is_valid() 返回 false
+    m_closed.store(true);
     m_state.store(PeerState::Disconnected);
     
     // 取消同步超时定时器
@@ -229,7 +220,7 @@ void PeerController::close() {
 int PeerController::send_message(const char* data, size_t size) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    if (!m_kcp || !m_is_valid.load()) return -1;
+    if (!m_kcp) return -1;
     
     m_kcp->send(data, size);
     return m_kcp->get_wait_send_count();
@@ -249,7 +240,7 @@ void PeerController::update_kcp(uint32_t current_ms) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         
-        if (!m_kcp || !m_is_valid.load()) return;
+        if (!m_kcp) return;
         
         kcp = m_kcp;
         kcp->update(current_ms);
@@ -309,9 +300,7 @@ void PeerController::flush_kcp() {
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::on_ice_state_changed(IceState state) {
-    // 此方法应该在 io_context 线程中被调用（通过 post）
-    
-    if (!m_is_valid.load()) return;
+    // 此方法通过 weak_ptr + post 调用，到达这里说明对象仍存活
     
     if (g_logger) {
         g_logger->info("[PeerController] {} ICE state changed to {}", 
@@ -352,7 +341,6 @@ void PeerController::on_ice_state_changed(IceState state) {
 }
 
 void PeerController::on_ice_local_candidate(const std::string& candidate) {
-    if (!m_is_valid.load()) return;
     
     if (m_callbacks.on_signal_needed) {
         m_callbacks.on_signal_needed("ice_candidate", candidate);
@@ -360,7 +348,6 @@ void PeerController::on_ice_local_candidate(const std::string& candidate) {
 }
 
 void PeerController::on_ice_gathering_done(const std::string& local_desc) {
-    if (!m_is_valid.load()) return;
     
     if (m_callbacks.on_signal_needed) {
         // 根据角色发送正确的信令类型
@@ -373,7 +360,6 @@ void PeerController::on_ice_gathering_done(const std::string& local_desc) {
 }
 
 void PeerController::on_ice_data_received(const char* data, size_t size) {
-    if (!m_is_valid.load()) return;
     
     // 【加密层下沉】
     // 1. 尝试解密
@@ -405,7 +391,7 @@ int PeerController::on_kcp_output(const char* data, int len) {
     // 此回调在 KCP 内部触发，不能调用 KCP 的其他方法
     // 直接转发到 ICE 发送
     
-    if (!m_is_valid.load()) return -1;
+    if (m_state.load() == PeerState::Disconnected) return -1;
     
     // 【加密层下沉】
     // 1. 加密整个 KCP 包 (Header + Content)
@@ -432,8 +418,6 @@ int PeerController::on_kcp_output(const char* data, int len) {
 
 void PeerController::on_kcp_message_received(const std::string& message) {
     // 此回调在 KcpSession::receive() 的锁外触发，是安全的
-    
-    if (!m_is_valid.load()) return;
     
     if (m_callbacks.on_message_received) {
         m_callbacks.on_message_received(message);

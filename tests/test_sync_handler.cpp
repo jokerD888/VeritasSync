@@ -48,7 +48,7 @@ protected:
     std::shared_ptr<TransferManager> make_dummy_transfer_manager() {
         // TransferManager 需要一个 SendCallback
         return std::make_shared<TransferManager>(
-            nullptr, worker_pool,
+            nullptr, io_ctx, worker_pool,
             [](const std::string&, const std::string&) -> int { return 0; }
         );
     }
@@ -115,7 +115,7 @@ protected:
 
     void SetUp() override {
         tm = std::make_shared<TransferManager>(
-            nullptr, worker_pool,
+            nullptr, io_ctx, worker_pool,
             [](const std::string&, const std::string&) -> int { return 0; }
         );
         work_guard.emplace(boost::asio::make_work_guard(io_ctx));
@@ -181,7 +181,7 @@ protected:
 
     void SetUp() override {
         tm = std::make_shared<TransferManager>(
-            nullptr, worker_pool,
+            nullptr, io_ctx, worker_pool,
             [](const std::string&, const std::string&) -> int { return 0; }
         );
     }
@@ -272,7 +272,7 @@ protected:
 
     void SetUp() override {
         tm = std::make_shared<TransferManager>(
-            nullptr, worker_pool,
+            nullptr, io_ctx, worker_pool,
             [](const std::string&, const std::string&) -> int { return 0; }
         );
     }
@@ -335,7 +335,7 @@ protected:
 
     void SetUp() override {
         tm = std::make_shared<TransferManager>(
-            nullptr, worker_pool,
+            nullptr, io_ctx, worker_pool,
             [](const std::string&, const std::string&) -> int { return 0; }
         );
     }

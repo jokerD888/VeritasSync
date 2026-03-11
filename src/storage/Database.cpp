@@ -91,17 +91,20 @@ void Database::init_schema() {
     // 增加此索引可将全表扫描优化为索引查找，在大数据量下性能提升百倍。
     const char* sql_index_path = "CREATE INDEX IF NOT EXISTS idx_sync_history_path ON sync_history(path);";
 
-    char* errMsg = nullptr;
+    // C-4 正确性修复: 每次 sqlite3_exec 后独立检查并释放 errMsg，防止泄漏
+    auto exec_schema = [this](const char* sql, const char* description) {
+        char* errMsg = nullptr;
+        int rc = sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            g_logger->error("[Database] {} 失败: {}", description, errMsg ? errMsg : "unknown error");
+            if (errMsg) sqlite3_free(errMsg);
+        }
+    };
 
     // 执行建表和索引创建
-    sqlite3_exec(m_db, sql_files, nullptr, nullptr, &errMsg);
-    sqlite3_exec(m_db, sql_history, nullptr, nullptr, &errMsg);
-    sqlite3_exec(m_db, sql_index_path, nullptr, nullptr, &errMsg);
-
-    if (errMsg) {
-        g_logger->error("[Database] SQL Error: {}", errMsg);
-        sqlite3_free(errMsg);
-    }
+    exec_schema(sql_files, "创建 files 表");
+    exec_schema(sql_history, "创建 sync_history 表");
+    exec_schema(sql_index_path, "创建 sync_history path 索引");
 }
 
 void Database::prepare_statements() {
@@ -248,17 +251,30 @@ std::vector<std::string> Database::get_all_file_paths() const {
 void Database::begin_transaction() {
     // 这里依然需要 lock_guard，防止 begin 指令与其它 SQL 冲突
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    // C-4: 添加错误诊断
+    char* errMsg = nullptr;
+    if (sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
+        g_logger->error("[Database] BEGIN TRANSACTION 失败: {}", errMsg ? errMsg : "unknown");
+        if (errMsg) sqlite3_free(errMsg);
+    }
 }
 
 void Database::commit_transaction() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr);
+    char* errMsg = nullptr;
+    if (sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
+        g_logger->error("[Database] COMMIT 失败: {}", errMsg ? errMsg : "unknown");
+        if (errMsg) sqlite3_free(errMsg);
+    }
 }
 
 void Database::rollback_transaction() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    char* errMsg = nullptr;
+    if (sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
+        g_logger->error("[Database] ROLLBACK 失败: {}", errMsg ? errMsg : "unknown");
+        if (errMsg) sqlite3_free(errMsg);
+    }
 }
 
 // --- TransactionGuard 实现 ---

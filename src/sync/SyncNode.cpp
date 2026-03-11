@@ -135,8 +135,8 @@ void SyncNode::start() {
     }
     m_p2p_manager.store(p2p);  // 原子存储
 
-    // 4. 创建 TrackerClient
-    auto tracker = std::make_shared<TrackerClient>(m_global_config.tracker_host, m_global_config.tracker_port);
+    // 4. 创建 TrackerClient（共享 P2PManager 的 io_context）
+    auto tracker = std::make_shared<TrackerClient>(p2p->get_io_context(), m_global_config.tracker_host, m_global_config.tracker_port);
     
     // 设置设备 ID（从配置文件中读取的全局唯一标识符）
     tracker->set_device_id(m_global_config.device_id);
@@ -176,8 +176,33 @@ void SyncNode::start() {
 
     // 7. 创建 StateManager（可能抛出异常，需要捕获）
     try {
+        // 构造回调：将 StateManager 的变更通知连接到 P2PManager 的广播方法
+        // 这实现了 storage 层 → p2p 层的单向依赖注入，无需 StateManager 知道 P2PManager
+        StateManagerCallbacks sm_callbacks;
+        
+        // 捕获 weak_ptr 避免循环引用导致的生命周期问题
+        std::weak_ptr<P2PManager> weak_p2p = p2p;
+        
+        sm_callbacks.on_file_updates = [weak_p2p](const std::vector<FileInfo>& files) {
+            if (auto p = weak_p2p.lock()) {
+                p->broadcast_file_updates_batch(files);
+            }
+        };
+        sm_callbacks.on_file_deletes = [weak_p2p](const std::vector<std::string>& paths) {
+            if (auto p = weak_p2p.lock()) {
+                p->broadcast_file_deletes_batch(paths);
+            }
+        };
+        sm_callbacks.on_dir_changes = [weak_p2p](const std::vector<std::string>& creates, 
+                                                  const std::vector<std::string>& deletes) {
+            if (auto p = weak_p2p.lock()) {
+                p->broadcast_dir_changes_batch(creates, deletes);
+            }
+        };
+        
         m_state_manager =
-            std::make_unique<StateManager>(m_task.sync_folder, *p2p, enable_watcher, m_task.sync_key);
+            std::make_unique<StateManager>(m_task.sync_folder, p2p->get_io_context(),
+                                           std::move(sm_callbacks), enable_watcher, m_task.sync_key);
     } catch (const std::exception& e) {
         g_logger->error("[SyncNode] Failed to create StateManager: {}", e.what());
         

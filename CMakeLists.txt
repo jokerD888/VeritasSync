@@ -60,6 +60,7 @@ add_executable(veritas_sync WIN32
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
+    src/p2p/WebUI.cpp
     src/storage/StateManager.cpp
     src/storage/FileFilter.cpp
     src/storage/Database.cpp
@@ -113,7 +114,11 @@ target_link_libraries(veritas_sync PRIVATE
 # ===========================================================
 # 目标 2: veritas_tracker (服务器程序)
 # ===========================================================
-add_executable(veritas_tracker src/tracker/main.cpp)
+add_executable(veritas_tracker 
+    src/tracker/main.cpp
+    src/tracker/Session.cpp
+    src/tracker/TrackerServer.cpp
+)
 target_include_directories(veritas_tracker PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 add_executable(efsw_test

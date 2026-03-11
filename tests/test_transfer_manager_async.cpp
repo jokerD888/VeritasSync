@@ -10,17 +10,8 @@
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/common/Logger.h"
-#include "VeritasSync/p2p/P2PManager.h"
 
 namespace VeritasSync {
-
-// Mock P2PManager to provide io_context
-class MockP2PForTransfer : public P2PManager {
-public:
-    boost::asio::io_context& get_io_context() override { return m_ioc; }
-private:
-    boost::asio::io_context m_ioc;
-};
 
 class TransferManagerAsyncTest : public ::testing::Test {
 protected:
@@ -29,7 +20,7 @@ protected:
     CryptoLayer crypto;
     std::shared_ptr<TransferManager> tm;
     std::unique_ptr<StateManager> sm;
-    std::shared_ptr<MockP2PForTransfer> mock_p2p;
+    boost::asio::io_context m_io_context;
     
     std::atomic<int> sent_packets{0};
     std::mutex payload_mutex;
@@ -42,21 +33,21 @@ protected:
         
         crypto.set_key("test_transfer_key_1234567890123");
         
-        mock_p2p = std::make_shared<MockP2PForTransfer>();
-        sm = std::make_unique<StateManager>(test_root.string(), *mock_p2p, false, "test_sync");
+        StateManagerCallbacks callbacks;  // 空回调，测试中不需要广播
+        sm = std::make_unique<StateManager>(test_root.string(), m_io_context,
+                                            std::move(callbacks), false, "test_sync");
         
         auto send_cb = [this](const std::string& /*peer_id*/, const std::string& /*data*/) {
             sent_packets++;
             return 0; 
         };
         
-        tm = std::make_shared<TransferManager>(sm.get(), worker_pool, send_cb);
+        tm = std::make_shared<TransferManager>(sm.get(), m_io_context, worker_pool, send_cb);
     }
 
     void TearDown() override {
         tm.reset();
         sm.reset();
-        mock_p2p.reset();
         worker_pool.join();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

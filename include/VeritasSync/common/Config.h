@@ -12,11 +12,6 @@
 
 namespace VeritasSync {
 
-static const std::vector<std::pair<std::string, unsigned short>> kBackupStunServers = {
-    {"stun.l.google.com", 19302},
-    {"47.121.187.240", 3478},
-};
-
 enum class SyncMode {
     OneWay,        // 单向：仅 Source -> Destination
     BiDirectional  // 双向：Source <-> Destination

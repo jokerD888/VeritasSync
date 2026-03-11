@@ -7,23 +7,14 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include "VeritasSync/common/SignalProto.h"
 
 namespace VeritasSync {
 
 class P2PManager;
-
-namespace SignalProto {
-constexpr const char* MSG_TYPE = "type";
-constexpr const char* MSG_PAYLOAD = "payload";
-constexpr const char* TYPE_REGISTER = "REGISTER";
-constexpr const char* TYPE_REG_ACK = "REG_ACK";
-constexpr const char* TYPE_PEER_JOIN = "PEER_JOIN";
-constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
-constexpr const char* TYPE_SIGNAL = "SIGNAL";
-}  // namespace SignalProto
 
 using boost::asio::ip::tcp;
 
@@ -34,7 +25,13 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     static constexpr size_t MAX_PACKET_SIZE = 1024 * 1024;  // 1MB
     static constexpr std::chrono::seconds RECONNECT_INTERVAL{5};
 
-    TrackerClient(std::string host, unsigned short port);
+    /**
+     * @brief 构造 TrackerClient
+     * @param io_context 外部提供的 io_context（共享 P2PManager 的事件循环）
+     * @param host Tracker 服务器地址
+     * @param port Tracker 服务器端口
+     */
+    TrackerClient(boost::asio::io_context& io_context, std::string host, unsigned short port);
     ~TrackerClient();
 
     void set_p2p_manager(P2PManager* p2p);
@@ -62,9 +59,8 @@ private:
     void schedule_reconnect();
     void close_socket();
 
-    boost::asio::io_context m_io_context;
-    std::jthread m_thread;
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+    // 共享外部 io_context（不再拥有独立线程）
+    boost::asio::io_context& m_io_context;
 
     tcp::resolver m_resolver;
     tcp::socket m_socket;

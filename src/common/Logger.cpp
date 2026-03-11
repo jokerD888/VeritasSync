@@ -5,40 +5,41 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <iostream>
+#include <mutex>
 #include <unordered_map>
 
 namespace VeritasSync {
 // 定义全局 logger 变量
 std::shared_ptr<spdlog::logger> g_logger;
 
+// C-6: 使用 std::once_flag 保证 init_logger 在多线程下只执行一次
+static std::once_flag s_logger_init_flag;
+
 void init_logger() {
-    // 幂等性检查：如果已经初始化过，直接返回
-    if (g_logger) {
-        return;
-    }
-    
-    try {
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_level(spdlog::level::info);  // 调试级别: info
-        auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", 1024 * 1024 * 5, 3);
-        file_sink->set_level(spdlog::level::info);     // 调试级别: info
+    std::call_once(s_logger_init_flag, []() {
+        try {
+            auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            console_sink->set_level(spdlog::level::info);  // 调试级别: info
+            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", 1024 * 1024 * 5, 3);
+            file_sink->set_level(spdlog::level::info);     // 调试级别: info
 
-        spdlog::init_thread_pool(8192, 1);
+            spdlog::init_thread_pool(8192, 1);
 
-        g_logger =
-            std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},
-                                                   spdlog::thread_pool(), spdlog::async_overflow_policy::block);
+            g_logger =
+                std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},
+                                                       spdlog::thread_pool(), spdlog::async_overflow_policy::block);
 
-        g_logger->set_level(spdlog::level::info);      // 调试级别: info
-        g_logger->flush_on(spdlog::level::info);       // info 级别就刷新
+            g_logger->set_level(spdlog::level::info);      // 调试级别: info
+            g_logger->flush_on(spdlog::level::info);       // info 级别就刷新
 
-        spdlog::register_logger(g_logger);
-        spdlog::set_default_logger(g_logger);
-    } catch (const spdlog::spdlog_ex& ex) {
-        std::cerr << "Log initialization failed: " << ex.what() << std::endl;
-        // 在测试环境中不应该退出，改为静默处理
-        // exit(1);
-    }
+            spdlog::register_logger(g_logger);
+            spdlog::set_default_logger(g_logger);
+        } catch (const spdlog::spdlog_ex& ex) {
+            std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+            // 在测试环境中不应该退出，改为静默处理
+            // exit(1);
+        }
+    });
 }
 void set_log_level(const std::string& level) {
     if (!g_logger) return;

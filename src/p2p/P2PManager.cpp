@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/net/BinaryFrame.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/p2p/TrackerClient.h"
@@ -27,8 +28,6 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
-
-#include <boost/asio/detail/socket_ops.hpp>
 
 namespace VeritasSync {
 
@@ -41,27 +40,6 @@ bool can_broadcast(SyncRole role, SyncMode mode) {
     if (mode == SyncMode::BiDirectional) return true;
     return false;
 }
-
-uint16_t read_uint16(const char*& data, size_t& len) {
-    if (len < sizeof(uint16_t)) return 0;
-    uint16_t net_val;
-    std::memcpy(&net_val, data, sizeof(net_val));
-    data += sizeof(net_val);
-    len -= sizeof(net_val);
-    return boost::asio::detail::socket_ops::network_to_host_short(net_val);
-}
-
-uint32_t read_uint32(const char*& data, size_t& len) {
-    if (len < sizeof(uint32_t)) return 0;
-    uint32_t net_val;
-    std::memcpy(&net_val, data, sizeof(net_val));
-    data += sizeof(net_val);
-    len -= sizeof(net_val);
-    return boost::asio::detail::socket_ops::network_to_host_long(net_val);
-}
-
-static const uint8_t MSG_TYPE_JSON = 0x01;
-static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
 
 // ═══════════════════════════════════════════════════════════════
 // 新增辅助函数
@@ -319,7 +297,7 @@ void P2PManager::init() {
         return -1;  // 【断点续传】连接已断开，返回 -1 通知发送方提前终止
     };
     // 创建 TransferManager 传输管理器
-    m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_worker_pool, send_cb);
+    m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_io_context, m_worker_pool, send_cb);
     
     // 创建 SyncHandler 同步消息处理器
     m_sync_handler = std::make_unique<SyncHandler>(

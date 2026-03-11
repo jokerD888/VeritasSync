@@ -6,33 +6,16 @@
 #include <thread>
 
 #include "VeritasSync/storage/StateManager.h"
-#include "VeritasSync/p2p/P2PManager.h"
 #include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 
-// 简单的 MockP2PManager，只满足 StateManager 的构造需求
-class MinimalMockP2P : public P2PManager {
-public:
-    MinimalMockP2P() : P2PManager() {} // 调用 Protected 构造函数
-    
-    boost::asio::io_context& get_io_context() override { return m_ctx; }
-    
-    // 捕获广播，以便验证
-    void broadcast_file_update(const FileInfo& /*info*/) override {
-        m_broadcast_count++;
-    }
-
-    std::atomic<int> m_broadcast_count{0};
-private:
-    boost::asio::io_context m_ctx;
-};
-
 class StateManagerEnhancedTest : public ::testing::Test {
 protected:
     std::filesystem::path test_root = "test_state_root";
-    std::unique_ptr<MinimalMockP2P> mock_p2p;
+    boost::asio::io_context m_io_context;
     std::unique_ptr<StateManager> sm;
+    std::atomic<int> m_broadcast_count{0};
 
     // --- 授权包装器 ---
     // 由于 TEST_F 会生成子类，子类无法直接利用父类的友元权限，
@@ -51,14 +34,18 @@ protected:
         }
         std::filesystem::create_directories(test_root);
         
-        mock_p2p = std::make_unique<MinimalMockP2P>();
-        sm = std::make_unique<StateManager>(test_root.string(), *mock_p2p, true, "test_sync");
+        StateManagerCallbacks callbacks;
+        callbacks.on_file_updates = [this](const std::vector<FileInfo>&) {
+            m_broadcast_count++;
+        };
+        
+        sm = std::make_unique<StateManager>(test_root.string(), m_io_context,
+                                            std::move(callbacks), true, "test_sync");
     }
 
     void TearDown() override {
         // 1. 显式释放 StateManager，触发其内部 Database 和 FileWatcher 的析构
         sm.reset();
-        mock_p2p.reset();
 
         // 2. 给 Windows 系统一点点缓冲时间来真正释放文件句柄 (50ms)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

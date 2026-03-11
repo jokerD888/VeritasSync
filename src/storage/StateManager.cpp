@@ -13,7 +13,6 @@
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
-#include "VeritasSync/p2p/P2PManager.h"
 
 namespace VeritasSync {
 
@@ -34,7 +33,7 @@ namespace VeritasSync {
         // --- 构造函数现在接收 StateManager* ---
         UpdateListener(StateManager* owner)
             : m_owner(owner),
-            m_debounce_timer(owner->get_io_context()) {
+            m_debounce_timer(owner->m_io_context) {
         }  // 从 owner 获取 io_context
 
         void handleFileAction(
@@ -79,7 +78,7 @@ namespace VeritasSync {
                 m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
                     if (!ec) {
                         // 使用 post 确保在 io_context 线程上执行
-                        boost::asio::post(m_owner->get_io_context(),
+                        boost::asio::post(m_owner->m_io_context,
                             [this]() { m_owner->process_debounced_changes(); });
                     }
                 });
@@ -93,10 +92,12 @@ namespace VeritasSync {
 
     // --- StateManager 实现 ---
 
-    StateManager::StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher,
+    StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
+                               StateManagerCallbacks callbacks, bool enable_watcher,
                                const std::string& sync_key)
         : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
-          m_p2p_manager(&p2p_manager),
+          m_io_context(io_context),
+          m_callbacks(std::move(callbacks)),
           m_sync_key(sync_key),
           m_retry_timer(nullptr) {
         if (!std::filesystem::exists(m_root_path)) {
@@ -124,7 +125,7 @@ namespace VeritasSync {
             m_file_filter.load_rules(m_root_path);
 
             // 初始化重试计时器
-            m_retry_timer = std::make_unique<boost::asio::steady_timer>(get_io_context());
+            m_retry_timer = std::make_unique<boost::asio::steady_timer>(m_io_context);
 
             m_file_watcher = std::make_unique<efsw::FileWatcher>();
             m_listener = std::make_unique<UpdateListener>(this);
@@ -174,11 +175,6 @@ namespace VeritasSync {
         m_dir_map.erase(relative_path);
     }
 
-    // --- 实现 get_io_context ---
-    boost::asio::io_context& StateManager::get_io_context() {
-        return m_p2p_manager->get_io_context();
-    }
-
     // --- 实现 notify_change_detected (由 UpdateListener 调用) ---
     void StateManager::notify_change_detected(const std::string& full_path) {
         std::lock_guard<std::mutex> lock(m_changes_mutex);
@@ -223,7 +219,7 @@ namespace VeritasSync {
                       m_sync_key, pending_count, BATCH_TRIGGER_THRESHOLD);
         
         // 非阻塞：post 到 io_context，不在监控线程中执行耗时操作
-        boost::asio::post(get_io_context(), [this]() {
+        boost::asio::post(m_io_context, [this]() {
             process_debounced_changes();
             
             // 更新时间戳并释放处理标志
@@ -369,21 +365,27 @@ namespace VeritasSync {
         // --- 提交事务 ---
         trans_guard.commit();
 
-        // 【阶段1优化】批量广播所有变更
+        // 【解耦】通过回调通知外部变更，StateManager 不再知道 P2PManager 的存在
         if (!file_updates.empty()) {
             g_logger->info("[{}] [StateManager] 批量广播 {} 个文件更新", m_sync_key, file_updates.size());
-            m_p2p_manager->broadcast_file_updates_batch(file_updates);
+            if (m_callbacks.on_file_updates) {
+                m_callbacks.on_file_updates(file_updates);
+            }
         }
         
         if (!file_deletes.empty()) {
             g_logger->info("[{}] [StateManager] 批量广播 {} 个文件删除", m_sync_key, file_deletes.size());
-            m_p2p_manager->broadcast_file_deletes_batch(file_deletes);
+            if (m_callbacks.on_file_deletes) {
+                m_callbacks.on_file_deletes(file_deletes);
+            }
         }
         
         if (!dir_creates.empty() || !dir_deletes.empty()) {
             g_logger->info("[{}] [StateManager] 批量广播目录变更: {} 创建, {} 删除", 
                           m_sync_key, dir_creates.size(), dir_deletes.size());
-            m_p2p_manager->broadcast_dir_changes_batch(dir_creates, dir_deletes);
+            if (m_callbacks.on_dir_changes) {
+                m_callbacks.on_dir_changes(dir_creates, dir_deletes);
+            }
         }
 
         // --- 处理失败重试 ---
@@ -759,7 +761,7 @@ namespace VeritasSync {
 
         // 【核心加固】通过 post 确保所有的计时器操作都在 io_context 的线程内线性执行
         // 这样即使 scan_directory (主线程) 和之前挂起的回调同时触发重试，也不会发生竞态
-        boost::asio::post(get_io_context(), [this, delay_seconds]() {
+        boost::asio::post(m_io_context, [this, delay_seconds]() {
             if (!m_retry_timer) return;
 
             // 1. 设置超时：这会自动取消该计时器之前所有挂起的异步操作

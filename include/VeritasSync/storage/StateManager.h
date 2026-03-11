@@ -24,14 +24,25 @@ namespace efsw {
 }  // namespace efsw
 
 namespace VeritasSync {
-    class P2PManager;
     class StateManagerEnhancedTest;
+
+    // ═══════════════════════════════════════════════════════════════
+    // 回调结构体：解耦 StateManager 与 P2PManager
+    // StateManager 通过这些回调通知外部"发生了什么变更"，
+    // 而不需要知道 P2PManager 的存在。
+    // ═══════════════════════════════════════════════════════════════
+    struct StateManagerCallbacks {
+        std::function<void(const std::vector<FileInfo>&)> on_file_updates;
+        std::function<void(const std::vector<std::string>&)> on_file_deletes;
+        std::function<void(const std::vector<std::string>&, const std::vector<std::string>&)> on_dir_changes;
+    };
 
     class StateManager {
         friend class StateManagerEnhancedTest;
     public:
-        // 构造函数接收一个 P2PManager 的引用
-        StateManager(const std::string& root_path, P2PManager& p2p_manager, bool enable_watcher,
+        // 构造函数接收 io_context 引用和回调，不再依赖 P2PManager
+        StateManager(const std::string& root_path, boost::asio::io_context& io_context,
+                     StateManagerCallbacks callbacks, bool enable_watcher,
                      const std::string& sync_key = "unknown");
         ~StateManager();
 
@@ -48,7 +59,6 @@ namespace VeritasSync {
         std::set<std::string> get_local_directories() const;
 
         // --- P2PManager 需要的辅助函数 ---
-        boost::asio::io_context& get_io_context();
         void add_dir_to_map(const std::string& relative_path);
         void remove_dir_from_map(const std::string& relative_path);
 
@@ -97,7 +107,8 @@ namespace VeritasSync {
         // --- 成员变量 ---
         std::string m_sync_key;
         std::filesystem::path m_root_path;
-        P2PManager* m_p2p_manager;  // 保存 P2PManager 的指针
+        boost::asio::io_context& m_io_context;  // 外部注入的 io_context
+        StateManagerCallbacks m_callbacks;       // 变更通知回调
 
         // 文件状态的核心存储结构
         std::map<std::string, FileInfo> m_file_map;

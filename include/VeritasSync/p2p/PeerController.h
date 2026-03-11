@@ -68,7 +68,7 @@ struct PeerControllerCallbacks {
  * 
  * 线程安全：
  * - 内部使用 mutex 保护共享资源
- * - ICE/KCP 回调通过 weak_ptr + post 防止悬垂指针
+ * - ICE 回调通过 weak_ptr + post 防止悬垂指针（C-1 修复已落地）
  * - 公共方法可从任意线程调用
  */
 class PeerController : public std::enable_shared_from_this<PeerController> {
@@ -157,7 +157,8 @@ public:
     const std::string& get_peer_id() const { return m_peer_id; }
     PeerState get_state() const { return m_state.load(); }
     bool is_connected() const { return m_state.load() == PeerState::Connected; }
-    bool is_valid() const { return m_is_valid.load(); }
+    /// C-1: 检查 controller 是否仍然有效（未被 close）
+    bool is_valid() const { return !m_closed.load(); }
     
     /// 是否是 Offer 方（self_id < peer_id）
     bool is_offer_side() const { return m_is_offer_side; }
@@ -236,7 +237,7 @@ private:
     std::shared_ptr<KcpSession> m_kcp;
     
     std::atomic<PeerState> m_state{PeerState::Disconnected};
-    std::atomic<bool> m_is_valid{true};
+    std::atomic<bool> m_closed{false};             // C-1: 替代 m_is_valid，close() 后为 true
     std::atomic<bool> m_kcp_initialized{false};  // 防止重复初始化
     
     mutable std::mutex m_mutex;  // 保护 m_ice 和 m_kcp

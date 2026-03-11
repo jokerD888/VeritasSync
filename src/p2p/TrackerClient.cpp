@@ -48,11 +48,10 @@ std::string sys_err_to_utf8(const boost::system::error_code& ec) { return ec.mes
 
 // --- 构造函数 ---
 /**
- * @brief 构造函数：初始化成员变量并注册信令消息处理器
+ * @brief 构造函数：使用外部 io_context，不再创建独立线程
  */
-TrackerClient::TrackerClient(std::string host, unsigned short port)
-    : m_io_context(),
-      m_work_guard(boost::asio::make_work_guard(m_io_context)),
+TrackerClient::TrackerClient(boost::asio::io_context& io_context, std::string host, unsigned short port)
+    : m_io_context(io_context),
       m_resolver(m_io_context),
       m_socket(m_io_context),
       m_retry_timer(m_io_context),
@@ -94,7 +93,8 @@ TrackerClient::~TrackerClient() {
 }
 
 /**
- * @brief 停止客户端：取消定时器、关闭 Socket、停止 io_context 并阻塞等待后台线程退出
+ * @brief 停止客户端：取消定时器、关闭 Socket
+ * 不再需要停止 io_context 或等待线程退出（共享外部 io_context）
  */
 void TrackerClient::stop() {
     m_state = State::DISCONNECTED;
@@ -107,14 +107,6 @@ void TrackerClient::stop() {
     if (m_socket.is_open()) {
         m_socket.shutdown(tcp::socket::shutdown_both, ec);
         m_socket.close(ec);
-    }
-
-    // 停止 IO 上下文
-    m_io_context.stop();
-    
-    // 等待线程退出
-    if (m_thread.joinable()) {
-        m_thread.join();
     }
 }
 
@@ -129,7 +121,7 @@ void TrackerClient::set_p2p_manager(P2PManager* p2p) { m_p2p_manager = p2p; }
 void TrackerClient::set_device_id(const std::string& device_id) { m_device_id = device_id; }
 
 /**
- * @brief 启动连接流程：建立后台线程（如果尚未启动）并开始异步连接 Tracker
+ * @brief 启动连接流程：直接 post 到共享的 io_context 开始异步连接 Tracker
  * @param sync_key 同步密钥
  * @param on_ready 注册成功后的回调，参数为当前已在线的对等点列表
  */
@@ -146,16 +138,7 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
     m_sync_key = sync_key;
     m_on_ready_callback = std::move(on_ready);
 
-    // --- 启动自己的线程 ---
-    if (!m_thread.joinable()) { 
-        m_thread = std::jthread([this]() {
-            g_logger->info("[TrackerClient] IO context 在后台线程运行...");
-            m_io_context.run();
-            g_logger->info("[TrackerClient] IO context 已停止。");
-        });
-    }
-
-    // 将 do_connect 任务 post 到自己的 io_context 线程
+    // 将 do_connect 任务 post 到共享的 io_context
     boost::asio::post(m_io_context, [self = shared_from_this()]() { self->do_connect(); });
 }
 
@@ -300,6 +283,9 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
 
 /**
  * @brief 注册处理器：建立协议消息类型字符串与逻辑回调函数之间的映射
+ * 
+ * 由于 TrackerClient 与 P2PManager 共享同一个 io_context，
+ * 回调可以直接调用 P2PManager 的方法，无需跨线程 post。
  */
 void TrackerClient::register_handlers() {
     m_handlers[SignalProto::TYPE_REG_ACK] = [this](const nlohmann::json& payload) {
@@ -308,21 +294,16 @@ void TrackerClient::register_handlers() {
         std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
         g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
 
-        // 【修复】无论是首次连接还是重连，都要尝试连接到对等点
+        // 无论是首次连接还是重连，都要尝试连接到对等点
         if (m_on_ready_callback) {
             // 首次连接：使用回调
             auto cb = std::move(m_on_ready_callback);
             m_on_ready_callback = nullptr;
-            boost::asio::post(m_p2p_manager->get_io_context(),
-                              [cb, peers = std::move(peers)]() { cb(peers); });
+            cb(std::move(peers));
         } else if (m_p2p_manager && !peers.empty()) {
             // 重连后：直接调用，使用 force=true 强制重建连接
-            // 因为 Tracker 重连意味着网络可能已变化，旧的 ICE 连接无效
             g_logger->info("[TrackerClient] Tracker 重连成功，强制重新连接到 {} 个对等点", peers.size());
-            boost::asio::post(m_p2p_manager->get_io_context(),
-                              [p2p = m_p2p_manager, peers = std::move(peers)]() { 
-                                  p2p->connect_to_peers(peers, true);  // force=true
-                              });
+            m_p2p_manager->connect_to_peers(peers, true);  // force=true
         }
     };
 
@@ -330,12 +311,7 @@ void TrackerClient::register_handlers() {
         std::string peer_id = payload.at("peer_id").get<std::string>();
         g_logger->info("[TrackerClient] 对等点 {} 已加入。", peer_id);
         if (m_p2p_manager) {
-            // 【修复】使用 force=true，因为对端重新上线后 IP 可能已变化
-            // 这也会清除之前的重连计数，给连接一个干净的开始
-            boost::asio::post(m_p2p_manager->get_io_context(),
-                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { 
-                                  p2p->connect_to_peers({id}, true);  // force=true
-                              });
+            m_p2p_manager->connect_to_peers({peer_id}, true);  // force=true
         }
     };
 
@@ -343,8 +319,7 @@ void TrackerClient::register_handlers() {
         std::string peer_id = payload.at("peer_id").get<std::string>();
         g_logger->info("[TrackerClient] 对等点 {} 已离开。", peer_id);
         if (m_p2p_manager) {
-            boost::asio::post(m_p2p_manager->get_io_context(),
-                              [p2p = m_p2p_manager, id = std::move(peer_id)]() { p2p->handle_peer_leave(id); });
+            m_p2p_manager->handle_peer_leave(peer_id);
         }
     };
 
@@ -353,10 +328,7 @@ void TrackerClient::register_handlers() {
         std::string signal_type = payload.at("signal_type").get<std::string>();
         std::string sdp = payload.at("sdp").get<std::string>();
         if (m_p2p_manager) {
-            boost::asio::post(m_p2p_manager->get_io_context(),
-                              [p2p = m_p2p_manager, f = std::move(from), t = std::move(signal_type), s = std::move(sdp)]() {
-                                  p2p->handle_signaling_message(f, t, s);
-                              });
+            m_p2p_manager->handle_signaling_message(from, signal_type, sdp);
         }
     };
 }
@@ -401,15 +373,14 @@ void TrackerClient::start_write_next() {
                              });
 }
 /**
- * @brief 安全关闭 Socket：将关闭操作 Post 到异步线程以避免竞态
+ * @brief 安全关闭 Socket：将关闭操作 Post 到 io_context 以确保串行化
  */
 void TrackerClient::close_socket() {
-    // --- post 到自己的 io_context ---
-    boost::asio::post(m_io_context, [this]() {
-        if (m_socket.is_open()) {
+    boost::asio::post(m_io_context, [self = shared_from_this()]() {
+        if (self->m_socket.is_open()) {
             boost::system::error_code ec;
-            m_socket.shutdown(tcp::socket::shutdown_both, ec);
-            m_socket.close(ec);
+            self->m_socket.shutdown(tcp::socket::shutdown_both, ec);
+            self->m_socket.close(ec);
         }
     });
 }
