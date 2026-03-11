@@ -71,3 +71,25 @@ config.json
 data_source/
 data_backup/
 temp/
+
+# --- Temporary Build/Install Scripts ---
+bg_install.bat
+build_msvc.bat
+build_only.bat
+build_project.bat
+cmake_configure.bat
+configure.bat
+continue_install.bat
+do_install.cmd
+install_deps.bat
+install_openssl.bat
+install_openssl2.bat
+run_tests.bat
+run_tests2.bat
+run_vcpkg.bat
+run_vcpkg2.bat
+run_vcpkg3.bat
+run_vcpkg_final.bat
+setup_env.bat
+step1_configure.bat
+vcpkg_install.bat

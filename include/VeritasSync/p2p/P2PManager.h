@@ -21,11 +21,12 @@
 #include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/sync/TransferManager.h"
+#include "VeritasSync/sync/SyncHandler.h"
+#include "VeritasSync/sync/SyncSession.h"
 #include "VeritasSync/p2p/PeerController.h"
 
-// --- miniupnpc 头文件 ---
-#include <miniupnpc/miniupnpc.h>
-#include <miniupnpc/upnpcommands.h>
+// --- UPnP 管理器 ---
+#include "VeritasSync/net/UpnpManager.h"
 // --------------------------
 
 
@@ -295,8 +296,6 @@ enum class ConnectionType {
 };
 // -------------------------
 
-enum class SyncRole { Source, Destination };
-
 class StateManager;
 class P2PManager;
 class TrackerClient;
@@ -312,7 +311,11 @@ public:
     void set_state_manager(StateManager* sm);
     void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
-    void set_mode(SyncMode mode) { m_mode = mode; }
+    void set_mode(SyncMode mode) {
+        m_mode = mode;
+        if (m_sync_handler) m_sync_handler->set_mode(mode);
+        if (m_sync_session) m_sync_session->set_mode(mode);
+    }
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
@@ -379,27 +382,9 @@ protected:
     void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
     void handle_kcp_message(const std::string& msg, PeerController* from_peer);
 
-    // --- 消息处理器（使用 PeerController）---
-    void handle_share_state(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_update(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_delete(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_request(const nlohmann::json& payload, PeerController* from_peer);
+    // --- 消息处理器（已迁移到 SyncHandler）---
 
-    void handle_dir_create(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer);
-    
-    // --- 批量消息处理器 (阶段1优化) ---
-    void handle_file_update_batch(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_delete_batch(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_dir_batch(const nlohmann::json& payload, PeerController* from_peer);
-
-    // --- 同步会话管理（使用 PeerController）---
-    void handle_sync_begin(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_sync_ack(const nlohmann::json& payload, PeerController* from_peer);
-    void send_sync_begin(PeerController* peer, uint64_t session_id, size_t file_count, size_t dir_count);
-    void send_sync_ack(PeerController* peer, uint64_t session_id, size_t received_files, size_t received_dirs);
-    void perform_flood_sync(std::shared_ptr<PeerController> controller, uint64_t session_id);
-    // -----------------------
+    // --- 同步会话管理（已迁移到 SyncSession）---
 
     // 【重构】新增：PeerController 回调处理
     void handle_peer_state_changed(const std::string& peer_id, PeerState state);
@@ -428,9 +413,7 @@ protected:
     void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
 #endif
 
-    // --- UPnP 辅助函数 ---
-    void init_upnp();
-    std::string rewrite_candidate(const std::string& sdp_candidate);
+    // --- UPnP 辅助函数（已迁移到 UpnpManager）---
 
     // --- 成员变量 ---
     // m_io_context 所有网络事件的事件循环
@@ -462,6 +445,12 @@ protected:
     // ---  传输管理器 ---
     std::shared_ptr<TransferManager> m_transfer_manager;
 
+    // --- 同步消息处理器 ---
+    std::unique_ptr<SyncHandler> m_sync_handler;
+
+    // --- 同步会话管理器 ---
+    std::unique_ptr<SyncSession> m_sync_session;
+
     // --- STUN 服务器配置 ---
     std::string m_stun_host = "stun.l.google.com";  // 默认公共STUN
     uint16_t m_stun_port = 19302;
@@ -484,13 +473,8 @@ protected:
     void schedule_cleanup_task();
     void cleanup_stale_buffers();
 
-    // --- UPnP 成员变量 ---
-    std::mutex m_upnp_mutex;
-    bool m_upnp_available = false;
-    char m_upnp_lan_addr[64] = {0};
-    std::string m_upnp_public_ip;
-    struct UPNPUrls m_upnp_urls;
-    struct IGDdatas m_upnp_data;
+    // --- UPnP 管理器 ---
+    UpnpManager m_upnp;
     // --------------------------
 
     // --- ICE FAILED 自动重连机制 ---

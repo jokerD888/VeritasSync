@@ -18,7 +18,7 @@ public:
     
     boost::asio::io_context& get_io_context() override { return m_ctx; }
     
-    void connect_to_peers(const std::vector<std::string>& peer_addresses, bool force = false) override {
+    void connect_to_peers(const std::vector<std::string>& peer_addresses, bool /*force*/ = false) override {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_connected_peers.insert(m_connected_peers.end(), peer_addresses.begin(), peer_addresses.end());
     }

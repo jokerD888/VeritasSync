@@ -22,6 +22,8 @@ enum class SyncMode {
     BiDirectional  // 双向：Source <-> Destination
 };
 
+enum class SyncRole { Source, Destination };
+
 // 单个同步任务的结构
 struct SyncTask {
     std::string sync_key;
@@ -58,6 +60,10 @@ struct Config {
     size_t chunk_size = 16384;  // 文件分块大小 (bytes)
     uint32_t kcp_window_size = 256;  // KCP窗口大小
     uint32_t file_hash_retry_delay_ms = 250;  // 文件哈希重试延迟
+    // ----------------------------
+
+    // --- WebUI 配置  ---
+    unsigned short webui_port = 8800;  // Web 控制台端口
     // ----------------------------
 
     std::vector<SyncTask> tasks;
@@ -98,6 +104,7 @@ inline void to_json(nlohmann::json& j, const Config& config) {
                        {"chunk_size", config.chunk_size},
                        {"kcp_window_size", config.kcp_window_size},
                        {"file_hash_retry_delay_ms", config.file_hash_retry_delay_ms},
+                       {"webui_port", config.webui_port},
                        {"tasks", config.tasks}};
 }
 
@@ -130,7 +137,81 @@ inline void from_json(const nlohmann::json& j, Config& config) {
     if (j.contains("file_hash_retry_delay_ms")) j.at("file_hash_retry_delay_ms").get_to(config.file_hash_retry_delay_ms);
     // ---------------------------------
 
+    // --- 加载 WebUI 配置 (如果存在) ---
+    if (j.contains("webui_port")) j.at("webui_port").get_to(config.webui_port);
+    // ---------------------------------
+
     j.at("tasks").get_to(config.tasks);
+}
+
+/// 配置验证：检查所有字段的有效性，返回错误信息列表（空 = 全部通过）
+inline std::vector<std::string> validate_config(const Config& config) {
+    std::vector<std::string> errors;
+
+    // --- 端口范围验证 ---
+    auto check_port = [&](const std::string& name, unsigned short port) {
+        if (port == 0) {
+            errors.push_back(name + " 端口不能为 0");
+        }
+    };
+    check_port("tracker_port", config.tracker_port);
+    check_port("stun_port", config.stun_port);
+    check_port("webui_port", config.webui_port);
+    // turn_port 仅在 turn_host 非空时校验
+    if (!config.turn_host.empty()) {
+        check_port("turn_port", config.turn_port);
+    }
+
+    // --- 必填字段验证 ---
+    if (config.tracker_host.empty()) {
+        errors.push_back("tracker_host 不能为空");
+    }
+    if (config.stun_host.empty()) {
+        errors.push_back("stun_host 不能为空");
+    }
+    if (config.device_id.empty()) {
+        errors.push_back("device_id 不能为空（应自动生成）");
+    }
+
+    // --- 日志级别验证 ---
+    {
+        static const std::vector<std::string> valid_levels = {"debug", "info", "warn", "warning", "error", "err", "critical", "off"};
+        bool valid = false;
+        for (const auto& l : valid_levels) {
+            if (config.log_level == l) { valid = true; break; }
+        }
+        if (!valid) {
+            errors.push_back("log_level 值无效 ('" + config.log_level + "'), 有效值: debug, info, warn, error, critical, off");
+        }
+    }
+
+    // --- 性能参数范围验证 ---
+    if (config.kcp_update_interval_ms < 5 || config.kcp_update_interval_ms > 500) {
+        errors.push_back("kcp_update_interval_ms 应在 5-500 之间 (当前: " + std::to_string(config.kcp_update_interval_ms) + ")");
+    }
+    if (config.chunk_size < 1024 || config.chunk_size > 1048576) {
+        errors.push_back("chunk_size 应在 1024-1048576 (1KB-1MB) 之间 (当前: " + std::to_string(config.chunk_size) + ")");
+    }
+    if (config.kcp_window_size < 16 || config.kcp_window_size > 4096) {
+        errors.push_back("kcp_window_size 应在 16-4096 之间 (当前: " + std::to_string(config.kcp_window_size) + ")");
+    }
+
+    // --- 同步任务验证 ---
+    for (size_t i = 0; i < config.tasks.size(); ++i) {
+        const auto& task = config.tasks[i];
+        std::string prefix = "tasks[" + std::to_string(i) + "]: ";
+        if (task.sync_key.empty()) {
+            errors.push_back(prefix + "sync_key 不能为空");
+        }
+        if (task.role != "source" && task.role != "destination") {
+            errors.push_back(prefix + "role 必须是 'source' 或 'destination' (当前: '" + task.role + "')");
+        }
+        if (task.sync_folder.empty()) {
+            errors.push_back(prefix + "sync_folder 不能为空");
+        }
+    }
+
+    return errors;
 }
 
 // 辅助函数：生成 UUID v4

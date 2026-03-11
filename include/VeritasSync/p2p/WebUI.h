@@ -17,9 +17,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <random>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -42,6 +44,7 @@ public:
         } catch (...) {
             m_absolute_config_path = m_config_path;
         }
+        m_auth_token = generate_token(32);
         reload_config();
         setup_routes();
     }
@@ -60,6 +63,11 @@ public:
     void stop() { m_svr.stop(); }
 
     unsigned short get_port() const { return static_cast<unsigned short>(m_port); }
+
+    /// 获取带认证 Token 的 WebUI URL（用于从托盘打开浏览器）
+    std::string get_auth_url() const {
+        return "http://127.0.0.1:" + std::to_string(m_port) + "/?token=" + m_auth_token;
+    }
 
     void reload_config() {
         std::lock_guard<std::mutex> lock(m_config_mutex);
@@ -174,15 +182,57 @@ private:
     std::mutex m_config_mutex;
     StatusProvider m_status_provider;
     OnTaskAddCallback m_on_task_add;
+    std::string m_auth_token;
+
+    /// 生成指定长度的随机十六进制 Token
+    static std::string generate_token(size_t bytes) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> dist(0, 255);
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0');
+        for (size_t i = 0; i < bytes; ++i) {
+            oss << std::setw(2) << dist(gen);
+        }
+        return oss.str();
+    }
+
+    /// 检查请求是否携带有效 Token（优先查 Header，其次查 URL 参数）
+    bool check_auth(const httplib::Request& req, httplib::Response& res) const {
+        // 1. 检查 Authorization: Bearer <token> 请求头
+        auto auth_header = req.get_header_value("Authorization");
+        if (auth_header.size() > 7 && auth_header.substr(0, 7) == "Bearer ") {
+            if (auth_header.substr(7) == m_auth_token) return true;
+        }
+        // 2. 检查 URL 参数 ?token=xxx
+        if (req.has_param("token") && req.get_param_value("token") == m_auth_token) {
+            return true;
+        }
+        // 3. 认证失败
+        res.status = 401;
+        res.set_content("{\"error\":\"Unauthorized\"}", "application/json");
+        return false;
+    }
 
     void setup_routes() {
-        // 1. 首页
-        m_svr.Get("/", [this](const httplib::Request&, httplib::Response& res) {
-            res.set_content(get_index_html(), "text/html; charset=utf-8");
+        // 1. 首页 — 带 token 参数访问则正常返回，否则返回未授权提示页
+        m_svr.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
+            if (req.has_param("token") && req.get_param_value("token") == m_auth_token) {
+                res.set_content(get_index_html(), "text/html; charset=utf-8");
+            } else {
+                res.status = 401;
+                res.set_content(
+                    R"(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>VeritasSync</title></head>)"
+                    R"(<body style="background:#0b1121;color:#94a3b8;display:flex;justify-content:center;align-items:center;height:100vh;font-family:system-ui">)"
+                    R"(<div style="text-align:center"><h2 style="color:#f1f5f9;margin-bottom:12px">🔒 需要授权</h2>)"
+                    R"(<p>请通过系统托盘的 "打开控制台" 菜单访问 WebUI</p></div></body></html>)",
+                    "text/html; charset=utf-8");
+            }
         });
 
         // 2. 获取状态
-        m_svr.Get("/api/status", [this](const httplib::Request&, httplib::Response& res) {
+        m_svr.Get("/api/status", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             nlohmann::json j;
             if (m_status_provider) {
                 j = m_status_provider();  // 获取完整对象
@@ -195,18 +245,21 @@ private:
         });
 
         // 3. 获取日志
-        m_svr.Get("/api/log", [](const httplib::Request&, httplib::Response& res) {
+        m_svr.Get("/api/log", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             res.set_content(tail_log("veritas_sync.log", 16384), "text/plain; charset=utf-8");
         });
 
         // 4. 获取配置
-        m_svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
+        m_svr.Get("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             std::lock_guard<std::mutex> lock(m_config_mutex);
             res.set_content(nlohmann::json(m_config).dump(2), "application/json; charset=utf-8");
         });
 
         // 5. 更新配置
         m_svr.Post("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             std::lock_guard<std::mutex> lock(m_config_mutex);
             try {
                 auto j = nlohmann::json::parse(req.body);
@@ -264,13 +317,15 @@ private:
         });
 
         // 6. 重启应用
-        m_svr.Post("/api/restart", [this](const httplib::Request&, httplib::Response& res) {
+        m_svr.Post("/api/restart", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             res.set_content("{\"success\":true}", "application/json");
             std::thread([]() { restart_application(); }).detach();
         });
 
         // 7. 添加任务
         m_svr.Post("/api/tasks", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 auto j = nlohmann::json::parse(req.body);
                 SyncTask task;
@@ -309,6 +364,7 @@ private:
 
         // 8. 删除任务
         m_svr.Delete("/api/tasks/:id", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 size_t idx = std::stoul(req.path_params.at("id"));
                 std::lock_guard<std::mutex> lock(m_config_mutex);
@@ -328,6 +384,7 @@ private:
 
         // 9. 获取任务日志
         m_svr.Get("/api/tasks/:id/log", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 size_t idx = std::stoul(req.path_params.at("id"));
                 std::string log_content;
@@ -353,6 +410,7 @@ private:
 
         // 10. 打开文件夹
         m_svr.Post("/api/tasks/:id/open", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 size_t idx = std::stoul(req.path_params.at("id"));
                 std::string p;
@@ -372,7 +430,8 @@ private:
         });
 
         // 11. 选择文件夹
-        m_svr.Post("/api/utils/pick_folder", [](const httplib::Request&, httplib::Response& res) {
+        m_svr.Post("/api/utils/pick_folder", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             std::string p = pick_folder_dialog();
             if (!p.empty()) {
                 std::replace(p.begin(), p.end(), '\\', '/');
@@ -387,6 +446,7 @@ private:
 
         // 12. 获取忽略规则
         m_svr.Get("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 size_t idx = std::stoul(req.path_params.at("id"));
                 std::string content;
@@ -419,6 +479,7 @@ private:
 
         // 13. 保存忽略规则
         m_svr.Post("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
+            if (!check_auth(req, res)) return;
             try {
                 size_t idx = std::stoul(req.path_params.at("id"));
                 nlohmann::json body = nlohmann::json::parse(req.body);

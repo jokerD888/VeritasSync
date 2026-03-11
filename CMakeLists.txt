@@ -3,7 +3,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 project(VeritasSync VERSION 1.0)
 
 if(MSVC)
-  add_compile_options(/utf-8)
+  add_compile_options(/utf-8 /W4 /permissive-)
+else()
+  add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -54,6 +56,7 @@ add_executable(veritas_sync WIN32
     src/common/Logger.cpp
     src/net/IceTransport.cpp
     src/net/KcpSession.cpp
+    src/net/UpnpManager.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
@@ -61,6 +64,8 @@ add_executable(veritas_sync WIN32
     src/storage/FileFilter.cpp
     src/storage/Database.cpp
     src/sync/SyncManager.cpp
+    src/sync/SyncHandler.cpp
+    src/sync/SyncSession.cpp
     src/sync/TransferManager.cpp
     src/sync/SyncNode.cpp 
 )
@@ -228,9 +233,16 @@ add_executable(unit_tests
     tests/test_state_manager_enhanced.cpp
     tests/test_transfer_manager_async.cpp
     tests/test_common_utils_robustness.cpp
+    tests/test_config.cpp
+    tests/test_sync_handler.cpp
+    tests/test_sync_session.cpp
+    tests/test_sync_node.cpp
     
     # --- 被测试的源文件 ---
     src/sync/SyncManager.cpp 
+    src/sync/SyncHandler.cpp
+    src/sync/SyncSession.cpp
+    src/sync/SyncNode.cpp
     src/common/Hashing.cpp
     src/common/CryptoLayer.cpp
     src/common/Logger.cpp
@@ -238,6 +250,7 @@ add_executable(unit_tests
     src/storage/FileFilter.cpp
     src/net/KcpSession.cpp
     src/net/IceTransport.cpp
+    src/net/UpnpManager.cpp
     src/p2p/PeerController.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp

@@ -5,6 +5,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <iostream>
+#include <unordered_map>
 
 namespace VeritasSync {
 // 定义全局 logger 变量
@@ -39,4 +40,31 @@ void init_logger() {
         // exit(1);
     }
 }
+void set_log_level(const std::string& level) {
+    if (!g_logger) return;
+
+    static const std::unordered_map<std::string, spdlog::level::level_enum> level_map = {
+        {"debug", spdlog::level::debug},
+        {"info", spdlog::level::info},
+        {"warn", spdlog::level::warn},
+        {"warning", spdlog::level::warn},
+        {"error", spdlog::level::err},
+        {"err", spdlog::level::err},
+        {"critical", spdlog::level::critical},
+        {"off", spdlog::level::off},
+    };
+
+    auto it = level_map.find(level);
+    if (it != level_map.end()) {
+        g_logger->set_level(it->second);
+        // 同步设置所有 sink 的级别
+        for (auto& sink : g_logger->sinks()) {
+            sink->set_level(it->second);
+        }
+        g_logger->info("[Logger] 日志级别已设置为: {}", level);
+    } else {
+        g_logger->warn("[Logger] 未知的日志级别 '{}', 保持当前级别 (info)", level);
+    }
+}
+
 }  // namespace VeritasSync

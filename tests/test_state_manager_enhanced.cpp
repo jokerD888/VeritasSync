@@ -19,7 +19,7 @@ public:
     boost::asio::io_context& get_io_context() override { return m_ctx; }
     
     // 捕获广播，以便验证
-    void broadcast_file_update(const FileInfo& info) override {
+    void broadcast_file_update(const FileInfo& /*info*/) override {
         m_broadcast_count++;
     }
 

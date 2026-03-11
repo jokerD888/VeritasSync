@@ -157,7 +157,7 @@ bool IceTransport::is_connected() const {
 // 这样的设计模式也叫 适配器模式 (Adapter Pattern)，将 libjuice 的 C 风格回调适配为 C++ 的 std::function 回调，让上层代码更加现代和安全！
 
 // 对应 IceTransportCallbacks::on_state_changed
-void IceTransport::on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr) {
+void IceTransport::on_juice_state_changed(juice_agent_t* /*agent*/, juice_state_t state, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self) {
         self->handle_state_changed(state);
@@ -165,7 +165,7 @@ void IceTransport::on_juice_state_changed(juice_agent_t* agent, juice_state_t st
 }
 
 // 对应 IceTransportCallbacks::on_local_candidate
-void IceTransport::on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr) {
+void IceTransport::on_juice_candidate(juice_agent_t* /*agent*/, const char* sdp, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_local_candidate && sdp) {
         std::string candidate(sdp);
@@ -178,7 +178,7 @@ void IceTransport::on_juice_candidate(juice_agent_t* agent, const char* sdp, voi
 }
 
 // 对应 IceTransportCallbacks::on_gathering_done
-void IceTransport::on_juice_gathering_done(juice_agent_t* agent, void* user_ptr) {
+void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_gathering_done) {
         std::string local_desc = self->get_local_description();
@@ -187,7 +187,7 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* agent, void* user_ptr)
 }
 
 // 对应 IceTransportCallbacks::on_data_received
-void IceTransport::on_juice_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr) {
+void IceTransport::on_juice_recv(juice_agent_t* /*agent*/, const char* data, size_t size, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_data_received) {
         self->m_callbacks.on_data_received(data, size);

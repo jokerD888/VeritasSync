@@ -45,7 +45,7 @@ protected:
         mock_p2p = std::make_shared<MockP2PForTransfer>();
         sm = std::make_unique<StateManager>(test_root.string(), *mock_p2p, false, "test_sync");
         
-        auto send_cb = [this](const std::string& peer_id, const std::string& data) {
+        auto send_cb = [this](const std::string& /*peer_id*/, const std::string& /*data*/) {
             sent_packets++;
             return 0; 
         };

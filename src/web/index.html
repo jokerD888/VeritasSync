@@ -656,6 +656,35 @@
 
     <!-- 核心逻辑 (严格保留) -->
     <script>
+        // === Token 认证（用户无感知） ===
+        (function() {
+            // 1. 从 URL 参数中提取 token 并保存到 localStorage
+            const params = new URLSearchParams(location.search);
+            const urlToken = params.get('token');
+            if (urlToken) {
+                localStorage.setItem('vs_auth_token', urlToken);
+                // 从 URL 中移除 token 参数，防止泄露（地址栏不显示 token）
+                params.delete('token');
+                const cleanUrl = params.toString() ? (location.pathname + '?' + params) : location.pathname;
+                history.replaceState(null, '', cleanUrl);
+            }
+            // 2. 拦截全局 fetch，自动注入 Authorization 头
+            const _fetch = window.fetch;
+            window.fetch = function(url, opts) {
+                opts = opts || {};
+                const token = localStorage.getItem('vs_auth_token');
+                if (token) {
+                    opts.headers = opts.headers || {};
+                    if (opts.headers instanceof Headers) {
+                        opts.headers.set('Authorization', 'Bearer ' + token);
+                    } else {
+                        opts.headers['Authorization'] = 'Bearer ' + token;
+                    }
+                }
+                return _fetch.call(this, url, opts);
+            };
+        })();
+
         let rawLog = "";
         const id = x => document.getElementById(x);
 

@@ -233,7 +233,7 @@ void TrackerClient::send_signaling_message(const std::string& to_peer_id, const 
 void TrackerClient::do_read_header() {
     // 读取消息头固定长度4字节。注意：不调用 consume(size())，让 asio Streambuf 自动管理读取位置
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(4),
-        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
                 if (ec != boost::asio::error::eof && ec != boost::asio::error::operation_aborted) {
                     g_logger->error("[TrackerClient] 读取头部失败: {}", sys_err_to_utf8(ec));
@@ -262,7 +262,7 @@ void TrackerClient::do_read_header() {
  */
 void TrackerClient::do_read_body(unsigned int msg_len) {
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(msg_len),
-        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t bytes) {
+        [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
                 if (ec != boost::asio::error::operation_aborted) {
                     g_logger->error("[TrackerClient] 读取消息体失败: {}", sys_err_to_utf8(ec));

@@ -1,4 +1,5 @@
 #include <atomic>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,13 @@ std::mutex g_nodes_mutex;
 
 // --- 全局停止标志 (用于优雅关闭) ---
 std::atomic<bool> g_shutdown_requested{false};
+
+// --- 信号处理 (跨平台优雅关闭) ---
+void signal_handler(int signum) {
+    if (signum == SIGINT || signum == SIGTERM) {
+        g_shutdown_requested = true;
+    }
+}
 
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
@@ -69,11 +77,29 @@ int main(int argc, char* argv[]) {
         spdlog::shutdown();
         return 1;
     }
+
+    // 配置验证
+    auto config_errors = VeritasSync::validate_config(config);
+    if (!config_errors.empty()) {
+        VeritasSync::g_logger->warn("配置校验发现 {} 个问题:", config_errors.size());
+        for (const auto& err : config_errors) {
+            VeritasSync::g_logger->warn("  - {}", err);
+        }
+        VeritasSync::g_logger->warn("请检查 config.json 并修正上述问题。程序将使用当前配置继续运行。");
+    }
+
     VeritasSync::g_logger->info("Configuration loaded. Tracker at {}:{}. Found {} task(s).", config.tracker_host,
                                 config.tracker_port, config.tasks.size());
 
-    // 启动 Web UI
-    VeritasSync::WebUIServer web_ui(8800, "config.json");
+    // 根据配置设置日志级别 (修复: 之前 Config.log_level 未生效)
+    VeritasSync::set_log_level(config.log_level);
+
+    // 注册信号处理 (跨平台: SIGINT=Ctrl+C, SIGTERM=kill)
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    // 启动 Web UI (端口从配置读取，默认 8800)
+    VeritasSync::WebUIServer web_ui(config.webui_port, "config.json");
 
     // --- 设置动态添加任务回调 ---
     web_ui.set_on_task_add([](const VeritasSync::SyncTask& new_task, const VeritasSync::Config& current_cfg) {
@@ -207,7 +233,7 @@ int main(int argc, char* argv[]) {
         VeritasSync::g_logger->error("无法创建系统托盘图标");
     }
 
-    tray.add_menu_item("🌐 打开控制台", []() { VeritasSync::WebUIServer::open_url("http://127.0.0.1:8800"); });
+    tray.add_menu_item("🌐 打开控制台", [&web_ui]() { VeritasSync::WebUIServer::open_url(web_ui.get_auth_url()); });
 
     if (!config.tasks.empty()) {
         tray.add_separator();
@@ -244,10 +270,9 @@ int main(int argc, char* argv[]) {
     tray.run_loop();
 
 #else
-    VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:8800 | 按 Ctrl+C 退出 ---");
+    VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:{} | 按 Ctrl+C 退出 ---", config.webui_port);
     
-    // 非 Windows 平台：等待关闭信号
-    // 可以在这里添加 signal handler
+    // 非 Windows 平台：等待关闭信号 (SIGINT/SIGTERM 已注册)
     while (!g_shutdown_requested) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
