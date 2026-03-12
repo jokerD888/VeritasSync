@@ -36,9 +36,9 @@ public:
     std::optional<SyncHistory> get_sync_history(const std::string& peer_id, const std::string& path) const;
     std::string get_last_sent_hash(const std::string& peer_id, const std::string& path) const;
 
-    // 更新或插入文件元数据 (Upsert)
-    void update_file(const std::string& rel_path, const std::string& hash, int64_t mtime);
-    void remove_file(const std::string& rel_path);
+    // 更新或插入文件元数据 (Upsert)，返回 false 表示写入失败
+    bool update_file(const std::string& rel_path, const std::string& hash, int64_t mtime);
+    bool remove_file(const std::string& rel_path);
     std::vector<std::string> get_all_file_paths() const;
 
     // 开启事务的安全 Guard
@@ -56,8 +56,8 @@ public:
     void begin_transaction();
     void commit_transaction();
     void rollback_transaction();
-    void update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash);
-    void remove_sync_history(const std::string& path);
+    bool update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash);
+    bool remove_sync_history(const std::string& path);
 
 private:
     void init_schema();

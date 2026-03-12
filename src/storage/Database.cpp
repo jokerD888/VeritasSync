@@ -8,6 +8,10 @@
 #include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
+
+// E-1: 魔数统一为命名常量
+static constexpr int SQLITE_BUSY_TIMEOUT_MS = 5000;  // SQLite 繁忙重试超时（毫秒）
+
 // --- StmtDeleter 实现 ---
 void Database::StmtDeleter::operator()(sqlite3_stmt* s) {
     if (s) {
@@ -37,7 +41,7 @@ Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.str
 
     // --- 设置繁忙重试超时 (5秒) ---
     // 防止多线程写入时出现 "database is locked" 错误
-    sqlite3_busy_timeout(m_db, 5000);
+    sqlite3_busy_timeout(m_db, SQLITE_BUSY_TIMEOUT_MS);
 
     // --- 优化: 启用 WAL 模式和 Normal 同步 ---
     // WAL: 大幅提升并发性能，避免读写阻塞
@@ -163,20 +167,22 @@ std::optional<SyncHistory> Database::get_sync_history(const std::string& peer_id
     }
     return std::nullopt;
 }
-void Database::remove_sync_history(const std::string& path) {
+bool Database::remove_sync_history(const std::string& path) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (!m_db || !m_stmt_hist_delete) return;
+    if (!m_db || !m_stmt_hist_delete) return false;
 
     sqlite3_reset(m_stmt_hist_delete.get());
     sqlite3_bind_text(m_stmt_hist_delete.get(), 1, path.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(m_stmt_hist_delete.get()) != SQLITE_DONE) {
         g_logger->error("[Database] 删除历史记录失败: {}", sqlite3_errmsg(m_db));
+        return false;
     }
+    return true;
 }
-void Database::update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash) {
+bool Database::update_sync_history(const std::string& peer_id, const std::string& path, const std::string& hash) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (!m_db || !m_stmt_hist_update) return;
+    if (!m_db || !m_stmt_hist_update) return false;
 
     sqlite3_reset(m_stmt_hist_update.get());
     sqlite3_bind_text(m_stmt_hist_update.get(), 1, peer_id.c_str(), -1, SQLITE_STATIC);
@@ -184,7 +190,11 @@ void Database::update_sync_history(const std::string& peer_id, const std::string
     sqlite3_bind_text(m_stmt_hist_update.get(), 3, hash.c_str(), -1, SQLITE_STATIC);
     // 第 4 个参数 ts 已由 SQL 内置函数 STRFTIME 处理，无需 C++ 绑定
 
-    sqlite3_step(m_stmt_hist_update.get());
+    if (sqlite3_step(m_stmt_hist_update.get()) != SQLITE_DONE) {
+        g_logger->error("[Database] 更新同步历史失败: {}", sqlite3_errmsg(m_db));
+        return false;
+    }
+    return true;
 }
 std::string Database::get_last_sent_hash(const std::string& peer_id, const std::string& path) const {
     auto res = get_sync_history(peer_id, path);
@@ -210,9 +220,9 @@ std::optional<FileMetadata> Database::get_file(const std::string& rel_path) cons
     return std::nullopt;
 }
 
-void Database::update_file(const std::string& rel_path, const std::string& hash, int64_t mtime) {
+bool Database::update_file(const std::string& rel_path, const std::string& hash, int64_t mtime) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (!m_db || !m_stmt_update) return;
+    if (!m_db || !m_stmt_update) return false;
 
     sqlite3_reset(m_stmt_update.get());
     sqlite3_bind_text(m_stmt_update.get(), 1, rel_path.c_str(), -1, SQLITE_STATIC);
@@ -221,19 +231,23 @@ void Database::update_file(const std::string& rel_path, const std::string& hash,
 
     if (sqlite3_step(m_stmt_update.get()) != SQLITE_DONE) {
         g_logger->error("[Database] Update 失败: {}", sqlite3_errmsg(m_db));
+        return false;
     }
+    return true;
 }
 
-void Database::remove_file(const std::string& rel_path) {
+bool Database::remove_file(const std::string& rel_path) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (!m_db || !m_stmt_delete) return;
+    if (!m_db || !m_stmt_delete) return false;
 
     sqlite3_reset(m_stmt_delete.get());
     sqlite3_bind_text(m_stmt_delete.get(), 1, rel_path.c_str(), -1, SQLITE_STATIC);
 
     if (sqlite3_step(m_stmt_delete.get()) != SQLITE_DONE) {
         g_logger->error("[Database] Delete 失败: {}", sqlite3_errmsg(m_db));
+        return false;
     }
+    return true;
 }
 std::vector<std::string> Database::get_all_file_paths() const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
