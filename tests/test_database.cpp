@@ -1,11 +1,12 @@
 // tests/test_database.cpp
+// Database 写操作已从 void 改为 bool 返回值
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <memory>
 #include <thread>
 
 #include "VeritasSync/storage/Database.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
@@ -16,7 +17,7 @@ protected:
 
     void SetUp() override {
         // 如果文件残留（比如上次测试崩溃了），先强制清理
-        cleanup_files();
+        TestHelpers::cleanup_db_files(db_path);
         db = std::make_unique<Database>(db_path);
     }
 
@@ -28,19 +29,7 @@ protected:
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         // 3. 安全清理
-        cleanup_files();
-    }
-
-private:
-    void cleanup_files() {
-        std::error_code ec;
-        if (std::filesystem::exists(db_path)) {
-            std::filesystem::remove(db_path, ec);
-        }
-        // 同时清理 WAL 产生的临时文件，这些也会导致锁定
-        std::filesystem::remove(db_path + "-wal", ec);
-        std::filesystem::remove(db_path + "-shm", ec);
-        std::filesystem::remove(db_path + "-journal", ec);
+        TestHelpers::cleanup_db_files(db_path);
     }
 };
 

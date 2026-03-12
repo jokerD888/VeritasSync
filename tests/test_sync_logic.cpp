@@ -1,29 +1,15 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <optional>  // 引入 optional
 #include <vector>
 
 #include "VeritasSync/sync/SyncManager.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
+using namespace VeritasSync::TestHelpers;
 
-// 全局测试环境：初始化 Logger
-class SyncLogicTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-// 注册全局环境
-static ::testing::Environment* const sync_env =
-    ::testing::AddGlobalTestEnvironment(new SyncLogicTestEnvironment());
-
-// 辅助函数：创建 FileInfo
-FileInfo make_file(const std::string& path, const std::string& hash, uint64_t mtime = 1000) {
-    return {path, hash, mtime};
-}
+REGISTER_VERITAS_TEST_ENV();
 
 // 【关键修改】Mock 回调：始终返回“无历史记录”
 // 旧代码可能是返回 string，现在必须返回 optional<SyncHistory>

@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -13,7 +14,6 @@
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Config.h"
-#include "VeritasSync/common/Logger.h"
 #include "VeritasSync/p2p/PeerController.h"
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/sync/Protocol.h"
@@ -23,13 +23,7 @@
 using namespace VeritasSync;
 using json = nlohmann::json;
 
-// 全局测试环境：初始化 Logger
-class SyncHandlerTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override { init_logger(); }
-};
-static ::testing::Environment* const handler_env =
-    ::testing::AddGlobalTestEnvironment(new SyncHandlerTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ============================================================================
 // SyncHandler 角色/模式测试

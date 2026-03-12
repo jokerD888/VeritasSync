@@ -1,4 +1,6 @@
 // tests/test_database_advanced.cpp
+// Database 写操作已从 void 改为 bool 返回值
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <memory>
@@ -14,26 +16,14 @@ protected:
     std::unique_ptr<Database> db;
 
     void SetUp() override {
-        cleanup_files();
+        TestHelpers::cleanup_db_files(db_path);
         db = std::make_unique<Database>(db_path);
     }
 
     void TearDown() override {
         db.reset();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        cleanup_files();
-    }
-
-    void cleanup_files() {
-        std::error_code ec;
-        for (int i = 0; i < 3; ++i) {
-            std::filesystem::remove(db_path, ec);
-            std::filesystem::remove(db_path + "-wal", ec);
-            std::filesystem::remove(db_path + "-shm", ec);
-            std::filesystem::remove(db_path + "-journal", ec);
-            if (!ec) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
+        TestHelpers::cleanup_db_files(db_path);
     }
 };
 

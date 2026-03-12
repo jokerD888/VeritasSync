@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <optional>
@@ -5,26 +6,11 @@
 #include <stdexcept>
 
 #include "VeritasSync/sync/SyncManager.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
+using namespace VeritasSync::TestHelpers;
 
-// 全局测试环境：初始化 Logger
-class SyncManagerEnhancedTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-// 注册全局环境
-static ::testing::Environment* const enhanced_env =
-    ::testing::AddGlobalTestEnvironment(new SyncManagerEnhancedTestEnvironment());
-
-// 辅助函数：创建 FileInfo
-FileInfo make_file(const std::string& path, const std::string& hash, uint64_t mtime = 1000) {
-    return {path, hash, mtime};
-}
+REGISTER_VERITAS_TEST_ENV();
 
 // ============================================================================
 // 新增测试：路径大小写不敏感

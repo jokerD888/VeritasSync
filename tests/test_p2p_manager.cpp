@@ -1,6 +1,7 @@
 // tests/test_p2p_manager.cpp
 // P2PManager 单元测试
 
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <string>
 #include <cstring>
@@ -14,7 +15,6 @@
 #include <boost/asio/executor_work_guard.hpp>
 
 #include "VeritasSync/p2p/P2PManager.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
@@ -22,15 +22,7 @@ using namespace VeritasSync;
 // 测试环境设置
 // ═══════════════════════════════════════════════════════════════
 
-class P2PManagerTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const p2p_manager_env =
-    ::testing::AddGlobalTestEnvironment(new P2PManagerTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ═══════════════════════════════════════════════════════════════
 // 测试夹具

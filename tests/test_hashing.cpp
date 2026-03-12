@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -7,20 +8,10 @@
 #include <chrono>
 
 #include "VeritasSync/common/Hashing.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
-// 全局测试环境：初始化 Logger
-class HashingTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const hashing_env =
-    ::testing::AddGlobalTestEnvironment(new HashingTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 class HashingTest : public ::testing::Test {
 protected:

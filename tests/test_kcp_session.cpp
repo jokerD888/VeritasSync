@@ -1,6 +1,7 @@
 // tests/test_kcp_session.cpp
 // KCP 会话单元测试（全面改进版）
 
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -11,7 +12,6 @@
 #include <limits>
 
 #include "VeritasSync/net/KcpSession.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
@@ -19,15 +19,7 @@ using namespace VeritasSync;
 // 测试环境设置
 // ═══════════════════════════════════════════════════════════════
 
-class KcpTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const kcp_env =
-    ::testing::AddGlobalTestEnvironment(new KcpTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ═══════════════════════════════════════════════════════════════
 // 辅助工具类

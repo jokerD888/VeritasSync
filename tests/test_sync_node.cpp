@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -6,18 +7,11 @@
 #include <string>
 
 #include "VeritasSync/common/Config.h"
-#include "VeritasSync/common/Logger.h"
 #include "VeritasSync/sync/SyncNode.h"
 
 using namespace VeritasSync;
 
-// 全局测试环境
-class SyncNodeTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override { init_logger(); }
-};
-static ::testing::Environment* const node_env =
-    ::testing::AddGlobalTestEnvironment(new SyncNodeTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ============================================================================
 // SyncNode 工厂方法和构造

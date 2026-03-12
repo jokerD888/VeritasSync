@@ -1,6 +1,7 @@
 // tests/test_parallel_scan.cpp
 // 测试 StateManager 并行扫描功能的正确性
 
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -12,20 +13,10 @@
 #include <vector>
 
 #include "VeritasSync/common/Hashing.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
-// 全局测试环境：初始化 Logger
-class ParallelScanTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const parallel_scan_env =
-    ::testing::AddGlobalTestEnvironment(new ParallelScanTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 class ParallelHashingTest : public ::testing::Test {
 protected:

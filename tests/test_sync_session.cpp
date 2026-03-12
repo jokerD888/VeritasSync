@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -14,7 +15,6 @@
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Config.h"
-#include "VeritasSync/common/Logger.h"
 #include "VeritasSync/p2p/PeerController.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/sync/SyncSession.h"
@@ -22,13 +22,7 @@
 using namespace VeritasSync;
 using json = nlohmann::json;
 
-// 全局测试环境
-class SyncSessionTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override { init_logger(); }
-};
-static ::testing::Environment* const session_env =
-    ::testing::AddGlobalTestEnvironment(new SyncSessionTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ============================================================================
 // 测试辅助：Mock PeerController

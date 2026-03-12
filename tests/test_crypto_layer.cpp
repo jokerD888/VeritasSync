@@ -1,6 +1,7 @@
 // tests/test_crypto_layer.cpp
 // 测试加密层的正确性和安全性
 
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
@@ -9,20 +10,10 @@
 #include <chrono>
 
 #include "VeritasSync/common/CryptoLayer.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 
-// 全局测试环境：初始化 Logger
-class CryptoTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const crypto_env =
-    ::testing::AddGlobalTestEnvironment(new CryptoTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 class CryptoLayerTest : public ::testing::Test {
 protected:

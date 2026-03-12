@@ -1,3 +1,4 @@
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -5,18 +6,11 @@
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Config.h"
-#include "VeritasSync/common/Logger.h"
 
 using namespace VeritasSync;
 using json = nlohmann::json;
 
-// 全局测试环境：初始化 Logger
-class ConfigTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override { init_logger(); }
-};
-static ::testing::Environment* const config_env =
-    ::testing::AddGlobalTestEnvironment(new ConfigTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ============================================================================
 // SyncTask 序列化/反序列化

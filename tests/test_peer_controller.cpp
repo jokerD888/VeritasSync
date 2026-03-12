@@ -1,6 +1,7 @@
 // tests/test_peer_controller.cpp
 // PeerController 单元测试
 
+#include "test_helpers.h"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -12,7 +13,6 @@
 #include <boost/asio/executor_work_guard.hpp>
 
 #include "VeritasSync/p2p/PeerController.h"
-#include "VeritasSync/common/Logger.h"
 #include "VeritasSync/common/CryptoLayer.h"
 
 using namespace VeritasSync;
@@ -21,15 +21,7 @@ using namespace VeritasSync;
 // 测试环境设置
 // ═══════════════════════════════════════════════════════════════
 
-class PeerControllerTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        init_logger();
-    }
-};
-
-static ::testing::Environment* const peer_controller_env =
-    ::testing::AddGlobalTestEnvironment(new PeerControllerTestEnvironment());
+REGISTER_VERITAS_TEST_ENV();
 
 // ═══════════════════════════════════════════════════════════════
 // 测试夹具
@@ -203,12 +195,12 @@ TEST_F(PeerControllerTest, SyncSessionStateInitialization) {
     ASSERT_NE(controller, nullptr);
     
     // 同步会话状态初始化
-    EXPECT_EQ(controller->sync_session_id.load(), 0);
-    EXPECT_EQ(controller->expected_file_count.load(), 0);
-    EXPECT_EQ(controller->expected_dir_count.load(), 0);
-    EXPECT_EQ(controller->received_file_count.load(), 0);
-    EXPECT_EQ(controller->received_dir_count.load(), 0);
-    EXPECT_EQ(controller->connected_at_ts.load(), 0);
+    EXPECT_EQ(controller->get_sync_session_id(), 0u);
+    EXPECT_EQ(controller->get_expected_file_count(), 0u);
+    EXPECT_EQ(controller->get_expected_dir_count(), 0u);
+    EXPECT_EQ(controller->get_received_file_count(), 0u);
+    EXPECT_EQ(controller->get_received_dir_count(), 0u);
+    EXPECT_EQ(controller->get_connected_at_ts(), 0);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -315,14 +307,14 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerManagement) {
     
     ASSERT_NE(controller, nullptr);
     
-    // 设置同步超时定时器
-    controller->sync_timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
-    controller->sync_timeout_timer->expires_after(std::chrono::seconds(30));
+    // 通过封装方法设置同步超时定时器
+    controller->start_sync_timeout(30, [](const boost::system::error_code&) {});
+    EXPECT_TRUE(controller->has_sync_timeout_timer());
     
     // close() 应该取消定时器
     controller->close();
     
-    EXPECT_EQ(controller->sync_timeout_timer, nullptr);
+    EXPECT_FALSE(controller->has_sync_timeout_timer());
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -415,11 +407,10 @@ TEST_F(PeerControllerTest, AtomicConnectedAtTs) {
     
     ASSERT_NE(controller, nullptr);
     
-    // 测试原子操作
-    int64_t test_ts = 1234567890;
-    controller->connected_at_ts.store(test_ts);
-    
-    EXPECT_EQ(controller->connected_at_ts.load(), test_ts);
+    // 测试原子操作（connected_at_ts 现在通过 get_connected_at_ts 只读访问）
+    // 注意：set 方法未暴露（由内部 on_ice_state_changed 设置）
+    // 只验证初始值
+    EXPECT_EQ(controller->get_connected_at_ts(), 0);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -791,24 +782,24 @@ TEST_F(PeerControllerTest, SyncSessionCounters) {
     ASSERT_NE(controller, nullptr);
     
     // 测试原子计数器
-    controller->sync_session_id.store(12345);
-    EXPECT_EQ(controller->sync_session_id.load(), 12345);
+    controller->set_sync_session_id(12345);
+    EXPECT_EQ(controller->get_sync_session_id(), 12345u);
     
-    controller->expected_file_count.store(100);
-    controller->expected_dir_count.store(20);
-    EXPECT_EQ(controller->expected_file_count.load(), 100);
-    EXPECT_EQ(controller->expected_dir_count.load(), 20);
+    controller->set_expected_file_count(100);
+    controller->set_expected_dir_count(20);
+    EXPECT_EQ(controller->get_expected_file_count(), 100u);
+    EXPECT_EQ(controller->get_expected_dir_count(), 20u);
     
-    // 测试 fetch_add
-    controller->received_file_count.store(0);
-    controller->received_file_count.fetch_add(1);
-    controller->received_file_count.fetch_add(5);
-    EXPECT_EQ(controller->received_file_count.load(), 6);
+    // 测试 add
+    controller->reset_received_file_count();
+    controller->add_received_file_count(1);
+    controller->add_received_file_count(5);
+    EXPECT_EQ(controller->get_received_file_count(), 6u);
     
-    controller->received_dir_count.store(0);
-    controller->received_dir_count.fetch_add(1);
-    controller->received_dir_count.fetch_add(2);
-    EXPECT_EQ(controller->received_dir_count.load(), 3);
+    controller->reset_received_dir_count();
+    controller->add_received_dir_count(1);
+    controller->add_received_dir_count(2);
+    EXPECT_EQ(controller->get_received_dir_count(), 3u);
 }
 
 TEST_F(PeerControllerTest, ConcurrentCounterIncrements) {
@@ -821,14 +812,14 @@ TEST_F(PeerControllerTest, ConcurrentCounterIncrements) {
     
     ASSERT_NE(controller, nullptr);
     
-    controller->received_file_count.store(0);
+    controller->reset_received_file_count();
     
     // 多线程并发增加计数
     std::vector<std::thread> threads;
     for (int i = 0; i < 10; ++i) {
         threads.emplace_back([&controller]() {
             for (int j = 0; j < 100; ++j) {
-                controller->received_file_count.fetch_add(1);
+                controller->add_received_file_count(1);
             }
         });
     }
@@ -837,7 +828,7 @@ TEST_F(PeerControllerTest, ConcurrentCounterIncrements) {
         t.join();
     }
     
-    EXPECT_EQ(controller->received_file_count.load(), 1000);
+    EXPECT_EQ(controller->get_received_file_count(), 1000u);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -855,14 +846,10 @@ TEST_F(PeerControllerTest, ConnectedAtTimestamp) {
     ASSERT_NE(controller, nullptr);
     
     // 初始连接时间应该是 0
-    EXPECT_EQ(controller->connected_at_ts.load(), 0);
+    EXPECT_EQ(controller->get_connected_at_ts(), 0);
     
-    // 设置连接时间
-    auto now = std::chrono::system_clock::now();
-    int64_t ts = std::chrono::duration_cast<std::chrono::seconds>(
-        now.time_since_epoch()).count();
-    controller->connected_at_ts.store(ts);
-    EXPECT_EQ(controller->connected_at_ts.load(), ts);
+    // connected_at_ts 由内部 on_ice_state_changed 设置
+    // 通过封装只提供只读访问
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -879,8 +866,8 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerInitiallyNull) {
     
     ASSERT_NE(controller, nullptr);
     
-    // 初始时定时器应该是 nullptr
-    EXPECT_EQ(controller->sync_timeout_timer, nullptr);
+    // 初始时定时器应该是空
+    EXPECT_FALSE(controller->has_sync_timeout_timer());
 }
 
 TEST_F(PeerControllerTest, SyncTimeoutTimerAssignment) {
@@ -893,19 +880,20 @@ TEST_F(PeerControllerTest, SyncTimeoutTimerAssignment) {
     
     ASSERT_NE(controller, nullptr);
     
-    // 可以创建和赋值定时器
-    controller->sync_timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
-    EXPECT_NE(controller->sync_timeout_timer, nullptr);
+    // 通过封装方法创建定时器
+    controller->start_sync_timeout(60, [](const boost::system::error_code&) {});
+    EXPECT_TRUE(controller->has_sync_timeout_timer());
     
-    // 可以设置超时
-    controller->sync_timeout_timer->expires_after(std::chrono::seconds(60));
+    // 可以通过 refresh 续期
+    controller->set_sync_session_id(42);
+    EXPECT_TRUE(controller->refresh_sync_timeout(42, 30));
     
-    // 可以取消
-    controller->sync_timeout_timer->cancel();
+    // session_id 不匹配时刷新失败
+    EXPECT_FALSE(controller->refresh_sync_timeout(99, 30));
     
-    // 可以重置
-    controller->sync_timeout_timer.reset();
-    EXPECT_EQ(controller->sync_timeout_timer, nullptr);
+    // close() 清理定时器
+    controller->close();
+    EXPECT_FALSE(controller->has_sync_timeout_timer());
 }
 
 // ═══════════════════════════════════════════════════════════════
