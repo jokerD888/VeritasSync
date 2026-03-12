@@ -358,6 +358,112 @@
         .transfer-bar-fill.stalled::after {
             display: none !important;
         }
+
+        /* --- 自然语言规则生成器 --- */
+        .nl-gen-section {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(217, 70, 239, 0.08));
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 1.5rem;
+        }
+        .nl-gen-header {
+            display: flex; align-items: center; gap: 8px;
+            margin-bottom: 12px; font-size: 0.9rem; font-weight: 600; color: #fff;
+        }
+        .nl-gen-header .badge-ai {
+            font-size: 0.65rem; padding: 2px 8px; border-radius: 99px;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            color: #fff; font-weight: 700; letter-spacing: 0.5px;
+        }
+        .nl-input-row {
+            display: flex; gap: 10px; align-items: stretch;
+        }
+        .nl-input-row .form-input {
+            flex: 1; width: 0;
+            background: rgba(0, 0, 0, 0.3);
+            font-size: 0.9rem;
+        }
+        .nl-input-row .btn {
+            flex-shrink: 0;
+            background: linear-gradient(135deg, var(--primary), #6366f1);
+            color: #fff; border: none;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+        }
+        .nl-input-row .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+        }
+        .nl-input-row .btn:disabled {
+            opacity: 0.6; cursor: not-allowed; transform: none;
+            box-shadow: none;
+        }
+        .nl-preview {
+            margin-top: 12px; display: none;
+        }
+        .nl-preview.visible { display: block; }
+        .nl-preview-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 8px;
+        }
+        .nl-preview-label {
+            font-size: 0.8rem; color: var(--text-sub); font-weight: 600;
+        }
+        .nl-preview-source {
+            font-size: 0.7rem; padding: 2px 8px; border-radius: 99px;
+            background: rgba(16, 185, 129, 0.15); color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        .nl-preview-rules {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            border-radius: 8px; padding: 12px;
+            font-family: var(--font-mono); font-size: 0.85rem;
+            color: #a5f3fc; line-height: 1.8;
+            white-space: pre-wrap; word-break: break-all;
+            max-height: 160px; overflow-y: auto;
+        }
+        .nl-preview-explain {
+            margin-top: 8px; font-size: 0.8rem; color: var(--text-sub);
+            line-height: 1.5; padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.03); border-radius: 6px;
+        }
+        .nl-preview-actions {
+            display: flex; gap: 10px; margin-top: 12px; justify-content: flex-end;
+        }
+        .nl-preview-actions .btn { font-size: 0.85rem; padding: 8px 16px; }
+        .btn-success {
+            background: var(--secondary); color: #fff; border: none;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+        .btn-success:hover {
+            background: #059669; transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.5);
+        }
+
+        /* 生成中的加载动画 */
+        .nl-loading {
+            display: none; align-items: center; gap: 10px;
+            margin-top: 12px; padding: 12px;
+            background: rgba(0, 0, 0, 0.2); border-radius: 8px;
+        }
+        .nl-loading.visible { display: flex; }
+        .nl-loading-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--primary); animation: nlBounce 1.4s infinite ease-in-out both;
+        }
+        .nl-loading-dot:nth-child(1) { animation-delay: -0.32s; }
+        .nl-loading-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes nlBounce {
+            0%, 80%, 100% { transform: scale(0); opacity: 0.3; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+        .nl-error {
+            display: none; margin-top: 12px; padding: 10px 14px;
+            background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px; color: #fca5a5; font-size: 0.85rem;
+        }
+        .nl-error.visible { display: block; }
     </style>
 </head>
 <body>
@@ -636,6 +742,45 @@
                 <button class="btn btn-ghost" style="padding:6px 12px; font-size:1.2rem" onclick="closeIgnoreModal()">✕</button>
             </div>
             
+            <!-- 自然语言规则生成器 -->
+            <div class="nl-gen-section">
+                <div class="nl-gen-header">
+                    <span>✨</span> 用自然语言生成规则
+                    <span class="badge-ai">AI</span>
+                </div>
+                <div class="nl-input-row">
+                    <input id="nl-input" class="form-input" placeholder="例如：忽略所有日志和临时文件，但保留 error.log" 
+                           onkeydown="if(event.key==='Enter')generateNLRules()">
+                    <button class="btn" onclick="generateNLRules()" id="btn-nl-gen">🪄 生成</button>
+                </div>
+                
+                <!-- 加载动画 -->
+                <div class="nl-loading" id="nl-loading">
+                    <div class="nl-loading-dot"></div>
+                    <div class="nl-loading-dot"></div>
+                    <div class="nl-loading-dot"></div>
+                    <span style="color:var(--text-sub); font-size:0.85rem">正在生成规则...</span>
+                </div>
+
+                <!-- 错误提示 -->
+                <div class="nl-error" id="nl-error"></div>
+                
+                <!-- 预览区 -->
+                <div class="nl-preview" id="nl-preview">
+                    <div class="nl-preview-header">
+                        <span class="nl-preview-label">📋 生成的规则预览</span>
+                        <span class="nl-preview-source" id="nl-source"></span>
+                    </div>
+                    <div class="nl-preview-rules" id="nl-rules"></div>
+                    <div class="nl-preview-explain" id="nl-explain"></div>
+                    <div class="nl-preview-actions">
+                        <button class="btn btn-ghost" onclick="dismissNLPreview()" style="font-size:0.85rem; padding:8px 16px">忽略</button>
+                        <button class="btn btn-ghost" onclick="insertNLRulesToEditor()" style="font-size:0.85rem; padding:8px 16px">📝 插入到编辑器</button>
+                        <button class="btn btn-success" onclick="applyNLRules()" style="font-size:0.85rem; padding:8px 16px">✅ 直接应用</button>
+                    </div>
+                </div>
+            </div>
+            
             <div style="background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:10px; padding:15px; margin-bottom:1.5rem">
                 <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:10px">📄 .veritasignore 语法说明:</div>
                 <div style="font-size:0.8rem; color:var(--text-sub); line-height:1.8; font-family:var(--font-mono)">
@@ -855,6 +1000,7 @@
         function closeIgnoreModal() { 
             id('ignore-modal').classList.remove('open'); 
             currentIgnoreTaskId = -1;
+            resetNLState();
         }
         
         async function openIgnoreModal(taskIdx) {
@@ -914,6 +1060,144 @@
             } finally {
                 btn.disabled = false;
                 btn.innerText = '💾 保存规则';
+            }
+        }
+
+        // ═══ 自然语言规则生成器 ═══
+        let lastGeneratedRules = '';  // 缓存上次生成的规则文本
+
+        function resetNLState() {
+            id('nl-input').value = '';
+            id('nl-preview').classList.remove('visible');
+            id('nl-loading').classList.remove('visible');
+            id('nl-error').classList.remove('visible');
+            lastGeneratedRules = '';
+        }
+
+        async function generateNLRules() {
+            if (currentIgnoreTaskId < 0) return;
+            const description = id('nl-input').value.trim();
+            if (!description) {
+                id('nl-input').focus();
+                return;
+            }
+
+            const btn = id('btn-nl-gen');
+            btn.disabled = true;
+
+            // 隐藏之前的结果，显示加载
+            id('nl-preview').classList.remove('visible');
+            id('nl-error').classList.remove('visible');
+            id('nl-loading').classList.add('visible');
+
+            try {
+                const res = await fetch(`/api/tasks/${currentIgnoreTaskId}/ignore/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ description })
+                });
+                const data = await res.json();
+
+                id('nl-loading').classList.remove('visible');
+
+                if (data.success) {
+                    // 将规则数组拼接为文本
+                    const rulesText = Array.isArray(data.rules) ? data.rules.join('\n') : data.rules;
+                    lastGeneratedRules = rulesText;
+
+                    id('nl-rules').textContent = rulesText;
+                    id('nl-explain').textContent = data.explanation || '';
+                    id('nl-explain').style.display = data.explanation ? 'block' : 'none';
+
+                    // 显示来源标签
+                    const srcEl = id('nl-source');
+                    if (data.source === 'template') {
+                        srcEl.textContent = '⚡ 本地模板';
+                        srcEl.style.background = 'rgba(16, 185, 129, 0.15)';
+                        srcEl.style.color = '#34d399';
+                        srcEl.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    } else {
+                        srcEl.textContent = '🤖 AI 生成';
+                        srcEl.style.background = 'rgba(99, 102, 241, 0.15)';
+                        srcEl.style.color = '#a5b4fc';
+                        srcEl.style.borderColor = 'rgba(99, 102, 241, 0.3)';
+                    }
+
+                    id('nl-preview').classList.add('visible');
+                } else {
+                    id('nl-error').textContent = '❌ ' + (data.error || '生成失败，请换个描述试试');
+                    id('nl-error').classList.add('visible');
+                }
+            } catch (e) {
+                id('nl-loading').classList.remove('visible');
+                id('nl-error').textContent = '❌ 网络错误，请重试';
+                id('nl-error').classList.add('visible');
+                console.error('NL 规则生成失败', e);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function dismissNLPreview() {
+            id('nl-preview').classList.remove('visible');
+            lastGeneratedRules = '';
+        }
+
+        function insertNLRulesToEditor() {
+            if (!lastGeneratedRules) return;
+            const textarea = id('ignore-content');
+            let current = textarea.value;
+
+            // 追加到编辑器末尾
+            if (current && !current.endsWith('\n')) current += '\n';
+            if (current) current += '\n# --- 以下规则由自然语言生成 ---\n';
+            current += lastGeneratedRules;
+            if (!current.endsWith('\n')) current += '\n';
+
+            textarea.value = current;
+            // 滚动到底部
+            textarea.scrollTop = textarea.scrollHeight;
+
+            // 清理预览状态
+            id('nl-preview').classList.remove('visible');
+            id('nl-input').value = '';
+            lastGeneratedRules = '';
+        }
+
+        async function applyNLRules() {
+            if (!lastGeneratedRules || currentIgnoreTaskId < 0) return;
+
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '应用中...';
+
+            try {
+                const res = await fetch(`/api/tasks/${currentIgnoreTaskId}/ignore/append`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rules: lastGeneratedRules })
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    // 更新编辑器内容为服务器返回的完整内容
+                    if (data.content) {
+                        id('ignore-content').value = data.content;
+                    }
+                    // 清理预览
+                    id('nl-preview').classList.remove('visible');
+                    id('nl-input').value = '';
+                    lastGeneratedRules = '';
+                    alert('✅ 规则已追加到 .veritasignore！\n\n规则将立即生效，无需重启。');
+                } else {
+                    alert('应用失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('网络错误，请重试');
+                console.error('应用规则失败', e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '✅ 直接应用';
             }
         }
         

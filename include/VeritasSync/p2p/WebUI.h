@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Config.h"
+#include "VeritasSync/storage/NLFilterGenerator.h"
 
 namespace VeritasSync {
 
@@ -51,10 +52,21 @@ private:
     OnTaskAddCallback m_on_task_add;
     OnTaskRemoveCallback m_on_task_remove;
     std::string m_auth_token;
+    NLFilterGenerator m_nl_filter;
 
     static std::string generate_token(size_t bytes);
     bool check_auth(const httplib::Request& req, httplib::Response& res) const;
     void setup_routes();
+
+    // C-1: setup_routes() 拆分为按功能域分组的子函数
+    void setup_page_routes();           // GET / (首页)
+    void setup_status_routes();         // GET /api/status, GET /api/log
+    void setup_config_routes();         // GET/POST /api/config, POST /api/restart
+    void setup_task_routes();           // POST /api/tasks, DELETE /api/tasks/:id
+    void setup_task_detail_routes();    // GET /api/tasks/:id/log, POST /api/tasks/:id/open, POST /api/utils/pick_folder
+    void setup_ignore_routes();         // GET/POST /api/tasks/:id/ignore
+    void setup_nl_filter_routes();      // POST /api/tasks/:id/ignore/generate
+
     bool save_config_internal();
     static std::filesystem::path get_exe_dir();
     static std::string get_index_html();

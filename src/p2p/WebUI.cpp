@@ -27,6 +27,12 @@
 
 namespace VeritasSync {
 
+// E-1: 魔数统一为命名常量
+static constexpr size_t LOG_TAIL_SIZE_STATUS = 16384;   // GET /api/log 尾部读取字节数
+static constexpr size_t LOG_TAIL_SIZE_TASK   = 32768;   // GET /api/tasks/:id/log 尾部读取字节数
+static constexpr int    RESTART_DELAY_MS     = 1000;    // 重启前等待延迟（毫秒）
+static constexpr size_t AUTH_TOKEN_BYTES     = 32;      // 认证令牌字节数
+
 // ═══════════════════════════════════════════════════════════════
 // 构造函数
 // ═══════════════════════════════════════════════════════════════
@@ -38,8 +44,18 @@ WebUIServer::WebUIServer(int port, const std::string& config_path)
     } catch (...) {
         m_absolute_config_path = m_config_path;
     }
-    m_auth_token = generate_token(32);
+    m_auth_token = generate_token(AUTH_TOKEN_BYTES);
     reload_config();
+
+    // 初始化自然语言过滤规则生成器的 LLM 配置（如果有配置的话）
+    if (!m_config.llm_api_url.empty() && !m_config.llm_api_key.empty()) {
+        NLFilterGenerator::LLMConfig llm_cfg;
+        llm_cfg.api_url = m_config.llm_api_url;
+        llm_cfg.api_key = m_config.llm_api_key;
+        llm_cfg.model = m_config.llm_model;
+        m_nl_filter.set_llm_config(llm_cfg);
+    }
+
     setup_routes();
 }
 
@@ -188,8 +204,20 @@ bool WebUIServer::check_auth(const httplib::Request& req, httplib::Response& res
     return false;
 }
 
+// C-1: setup_routes() 拆分为按功能域分组的子函数
 void WebUIServer::setup_routes() {
-    // 1. 首页 — 带 token 参数访问则正常返回，否则返回未授权提示页
+    setup_page_routes();
+    setup_status_routes();
+    setup_config_routes();
+    setup_task_routes();
+    setup_task_detail_routes();
+    setup_ignore_routes();
+    setup_nl_filter_routes();
+}
+
+// ─── C-1 子函数：首页路由 ───────────────────────────────────────
+
+void WebUIServer::setup_page_routes() {
     m_svr.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
         if (req.has_param("token") && req.get_param_value("token") == m_auth_token) {
             res.set_content(get_index_html(), "text/html; charset=utf-8");
@@ -203,8 +231,12 @@ void WebUIServer::setup_routes() {
                 "text/html; charset=utf-8");
         }
     });
+}
 
-    // 2. 获取状态
+// ─── C-1 子函数：状态与日志路由 ─────────────────────────────────
+
+void WebUIServer::setup_status_routes() {
+    // GET /api/status
     m_svr.Get("/api/status", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         nlohmann::json j;
@@ -217,20 +249,24 @@ void WebUIServer::setup_routes() {
         res.set_content(j.dump(), "application/json");
     });
 
-    // 3. 获取日志
+    // GET /api/log
     m_svr.Get("/api/log", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
-        res.set_content(tail_log("veritas_sync.log", 16384), "text/plain; charset=utf-8");
+        res.set_content(tail_log("veritas_sync.log", LOG_TAIL_SIZE_STATUS), "text/plain; charset=utf-8");
     });
+}
 
-    // 4. 获取配置
+// ─── C-1 子函数：配置与重启路由 ─────────────────────────────────
+
+void WebUIServer::setup_config_routes() {
+    // GET /api/config
     m_svr.Get("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         std::lock_guard<std::mutex> lock(m_config_mutex);
         res.set_content(nlohmann::json(m_config).dump(2), "application/json; charset=utf-8");
     });
 
-    // 5. 更新配置
+    // POST /api/config
     m_svr.Post("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         std::lock_guard<std::mutex> lock(m_config_mutex);
@@ -280,14 +316,18 @@ void WebUIServer::setup_routes() {
         }
     });
 
-    // 6. 重启应用
+    // POST /api/restart
     m_svr.Post("/api/restart", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         res.set_content("{\"success\":true}", "application/json");
         std::thread([]() { restart_application(); }).detach();
     });
+}
 
-    // 7. 添加任务
+// ─── C-1 子函数：任务增删路由 ───────────────────────────────────
+
+void WebUIServer::setup_task_routes() {
+    // POST /api/tasks — 添加任务
     m_svr.Post("/api/tasks", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
@@ -323,7 +363,7 @@ void WebUIServer::setup_routes() {
         }
     });
 
-    // 8. 删除任务
+    // DELETE /api/tasks/:id — 删除任务
     // C-5 正确性修复: 删除任务时同步停止对应的 SyncNode
     m_svr.Delete("/api/tasks/:id", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
@@ -335,7 +375,6 @@ void WebUIServer::setup_routes() {
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
                 if (idx < m_config.tasks.size()) {
-                    // 先记住被删除任务的 sync_key，用于通知上层停止 SyncNode
                     removed_sync_key = m_config.tasks[idx].sync_key;
                     m_config.tasks.erase(m_config.tasks.begin() + idx);
                     save_ok = save_config_internal();
@@ -360,8 +399,12 @@ void WebUIServer::setup_routes() {
             res.status = 400;
         }
     });
+}
 
-    // 9. 获取任务日志
+// ─── C-1 子函数：任务详情路由（日志、打开文件夹、选择文件夹） ──
+
+void WebUIServer::setup_task_detail_routes() {
+    // GET /api/tasks/:id/log
     m_svr.Get("/api/tasks/:id/log", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
@@ -370,7 +413,7 @@ void WebUIServer::setup_routes() {
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
                 if (idx < m_config.tasks.size()) {
-                    std::string raw = tail_log("veritas_sync.log", 32768);
+                    std::string raw = tail_log("veritas_sync.log", LOG_TAIL_SIZE_TASK);
                     std::ostringstream oss;
                     std::istringstream iss(raw);
                     std::string line;
@@ -387,7 +430,7 @@ void WebUIServer::setup_routes() {
         }
     });
 
-    // 10. 打开文件夹
+    // POST /api/tasks/:id/open
     m_svr.Post("/api/tasks/:id/open", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
@@ -408,7 +451,7 @@ void WebUIServer::setup_routes() {
         }
     });
 
-    // 11. 选择文件夹
+    // POST /api/utils/pick_folder
     m_svr.Post("/api/utils/pick_folder", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         std::string p = pick_folder_dialog();
@@ -422,8 +465,12 @@ void WebUIServer::setup_routes() {
             res.set_content("{\"success\":false}", "application/json");
         }
     });
+}
 
-    // 12. 获取忽略规则
+// ─── C-1 子函数：忽略规则路由 ───────────────────────────────────
+
+void WebUIServer::setup_ignore_routes() {
+    // GET /api/tasks/:id/ignore
     m_svr.Get("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
@@ -456,7 +503,7 @@ void WebUIServer::setup_routes() {
         }
     });
 
-    // 13. 保存忽略规则
+    // POST /api/tasks/:id/ignore
     m_svr.Post("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
@@ -496,6 +543,160 @@ void WebUIServer::setup_routes() {
             res.set_content(j.dump(), "application/json");
             res.status = 400;
         }
+    });
+}
+
+// ─── C-1 子函数：自然语言过滤规则生成路由 ────────────────────────
+
+void WebUIServer::setup_nl_filter_routes() {
+    // POST /api/tasks/:id/ignore/generate — 自然语言生成过滤规则
+    m_svr.Post("/api/tasks/:id/ignore/generate", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_auth(req, res)) return;
+        try {
+            size_t idx = std::stoul(req.path_params.at("id"));
+            nlohmann::json body = nlohmann::json::parse(req.body);
+            std::string description = body.value("description", "");
+
+            if (description.empty()) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"请输入描述\"}", "application/json");
+                return;
+            }
+
+            // 读取现有规则（供 LLM 参考，避免重复）
+            std::string existing_rules;
+            {
+                std::lock_guard<std::mutex> lock(m_config_mutex);
+                if (idx < m_config.tasks.size()) {
+                    std::filesystem::path ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
+                    if (std::filesystem::exists(ignore_path)) {
+                        std::ifstream f(ignore_path);
+                        if (f.good()) {
+                            std::ostringstream oss;
+                            oss << f.rdbuf();
+                            existing_rules = oss.str();
+                        }
+                    }
+                } else {
+                    res.status = 404;
+                    res.set_content("{\"success\":false,\"error\":\"任务不存在\"}", "application/json");
+                    return;
+                }
+            }
+
+            // 调用自然语言规则生成器
+            auto result = m_nl_filter.generate(description, existing_rules);
+
+            nlohmann::json j;
+            j["success"] = result.success;
+            if (result.success) {
+                j["rules"] = result.rules;
+                j["explanation"] = result.explanation;
+                j["source"] = result.source;
+            } else {
+                j["error"] = result.error;
+            }
+            res.set_content(j.dump(), "application/json");
+
+            if (g_logger) {
+                if (result.success) {
+                    g_logger->info("[WebUI] 自然语言规则生成成功: source={}, 描述=\"{}\"",
+                        result.source, description);
+                } else {
+                    g_logger->warn("[WebUI] 自然语言规则生成失败: 描述=\"{}\", 错误={}",
+                        description, result.error);
+                }
+            }
+        } catch (const std::exception& e) {
+            nlohmann::json j;
+            j["success"] = false;
+            j["error"] = e.what();
+            res.set_content(j.dump(), "application/json");
+            res.status = 400;
+        }
+    });
+
+    // POST /api/tasks/:id/ignore/append — 将生成的规则追加到现有规则
+    m_svr.Post("/api/tasks/:id/ignore/append", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_auth(req, res)) return;
+        try {
+            size_t idx = std::stoul(req.path_params.at("id"));
+            nlohmann::json body = nlohmann::json::parse(req.body);
+            std::string new_rules = body.value("rules", "");
+
+            if (new_rules.empty()) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"规则不能为空\"}", "application/json");
+                return;
+            }
+
+            std::filesystem::path ignore_path;
+            std::string existing_content;
+            {
+                std::lock_guard<std::mutex> lock(m_config_mutex);
+                if (idx < m_config.tasks.size()) {
+                    ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
+                    // 读取现有内容
+                    if (std::filesystem::exists(ignore_path)) {
+                        std::ifstream f(ignore_path);
+                        if (f.good()) {
+                            std::ostringstream oss;
+                            oss << f.rdbuf();
+                            existing_content = oss.str();
+                        }
+                    }
+                } else {
+                    res.status = 404;
+                    res.set_content("{\"success\":false,\"error\":\"任务不存在\"}", "application/json");
+                    return;
+                }
+            }
+
+            if (!ignore_path.empty()) {
+                // 构建追加后的完整内容
+                std::string final_content = existing_content;
+                if (!final_content.empty() && final_content.back() != '\n') {
+                    final_content += "\n";
+                }
+                if (!final_content.empty()) {
+                    final_content += "\n# --- 以下规则由自然语言生成 ---\n";
+                }
+                final_content += new_rules;
+                if (final_content.back() != '\n') {
+                    final_content += "\n";
+                }
+
+                std::ofstream f(ignore_path);
+                if (f.good()) {
+                    f << final_content;
+                    f.close();
+                    nlohmann::json j;
+                    j["success"] = true;
+                    j["content"] = final_content;
+                    res.set_content(j.dump(), "application/json");
+                    if (g_logger) g_logger->info("[WebUI] 已追加自然语言生成的忽略规则: {}", PathToUtf8(ignore_path));
+                } else {
+                    res.status = 500;
+                    res.set_content("{\"success\":false,\"error\":\"无法写入文件\"}", "application/json");
+                }
+            }
+        } catch (const std::exception& e) {
+            nlohmann::json j;
+            j["success"] = false;
+            j["error"] = e.what();
+            res.set_content(j.dump(), "application/json");
+            res.status = 400;
+        }
+    });
+
+    // GET /api/nl-filter/status — 查询自然语言生成器状态
+    m_svr.Get("/api/nl-filter/status", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_auth(req, res)) return;
+        nlohmann::json j;
+        j["success"] = true;
+        j["template_engine"] = true;  // 模板引擎始终可用
+        j["llm_available"] = m_nl_filter.has_llm();
+        res.set_content(j.dump(), "application/json");
     });
 }
 
@@ -563,7 +764,7 @@ std::string WebUIServer::tail_log(const std::string& file, std::size_t max_bytes
 
 void WebUIServer::restart_application() {
     if (g_logger) g_logger->info("[WebUI] 正在重启...");
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(RESTART_DELAY_MS));
 #ifdef _WIN32
     char szPath[MAX_PATH];
     if (GetModuleFileNameA(NULL, szPath, MAX_PATH)) {
