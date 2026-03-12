@@ -1,288 +1,36 @@
 
+
 #pragma once
 
-#include <array>
-#include <boost/asio.hpp>
-#include <boost/asio/thread_pool.hpp>
+// === 标准库（仅头文件声明所需的最小集合）===
 #include <chrono>
-#include <fstream>
 #include <functional>
-#include <unordered_map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <nlohmann/json.hpp>
-#include <set>
 #include <string>
-#include <thread>
+#include <unordered_map>
 #include <vector>
 
-#include "VeritasSync/common/Config.h"
-#include "VeritasSync/common/CryptoLayer.h"
-#include "VeritasSync/sync/Protocol.h"
-#include "VeritasSync/sync/TransferManager.h"
-#include "VeritasSync/sync/SyncHandler.h"
-#include "VeritasSync/sync/SyncSession.h"
-#include "VeritasSync/p2p/PeerController.h"
+// === 第三方库（成员变量为值类型，需完整定义）===
+#include <boost/asio.hpp>
+#include <boost/asio/thread_pool.hpp>
 
-// --- UPnP 管理器 ---
-#include "VeritasSync/net/UpnpManager.h"
-// --------------------------
+// === 项目内部（成员变量为值类型或返回值需完整定义）===
+#include "VeritasSync/common/Config.h"         // SyncRole, SyncMode, FileInfo
+#include "VeritasSync/common/CryptoLayer.h"    // CryptoLayer（成员变量值类型）
+#include "VeritasSync/sync/Protocol.h"         // 协议常量
+#include "VeritasSync/sync/TransferManager.h"  // TransferManager::SessionStats（返回值类型）
+#include "VeritasSync/net/UpnpManager.h"       // UpnpManager（成员变量值类型）
 
+// === A-1 提取的子组件 ===
+#include "VeritasSync/p2p/HeartbeatService.h"  // HeartbeatService（成员变量值类型）
+#include "VeritasSync/p2p/ReconnectPolicy.h"   // ReconnectPolicy（unique_ptr）
+#include "VeritasSync/p2p/KcpScheduler.h"      // KcpScheduler（unique_ptr）
 
-
-/*
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              用户界面层 (UI)                                  │
-│                        (未来可能的 GUI / CLI)                                 │
-└───────────────────────────────────┬─────────────────────────────────────────┘
-                                    │ 调用
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           应用编排层 (App)                                   │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │  负责：启动各模块、注入依赖、协调生命周期                              │   │
-│   │  核心：设置 StateManager、P2PManager、TrackerClient 之间的关系        │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-└─────────┬───────────────────────────┬───────────────────────────┬───────────┘
-          │                           │                           │
-          ▼                           ▼                           ▼
-┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────────┐
-│   StateManager      │   │    P2PManager       │   │    TrackerClient        │
-│   (本地状态管理)     │   │   (P2P连接中枢)      │   │   (信令服务器客户端)     │
-└─────────────────────┘   └─────────────────────┘   └─────────────────────────┘
-          │                         │ ▲                           │
-          │                         │ │                           │
-          │   ┌─────────────────────┘ │                           │
-          │   │                       │                           │
-          ▼   ▼                       │                           │
-┌─────────────────────┐               │                           │
-│   TransferManager   │◄──────────────┘                           │
-│   (文件传输管理)     │                                           │
-└─────────────────────┘                                           │
-          │                                                       │
-          │                                                       │
-          ▼                                                       ▼
-┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────────┐
-│   SyncManager       │   │   PeerController    │   │   Tracker Server        │
-│   (同步算法)         │   │   (单个P2P连接)      │   │   (云端信令中继)         │
-└─────────────────────┘   └─────────────────────┘   └─────────────────────────┘
-          │                         │ │
-          ▼                         │ │
-┌─────────────────────┐             │ │
-│   FileFilter        │             │ │
-│   (文件过滤)         │             ▼ ▼
-└─────────────────────┘   ┌─────────────────────┐   ┌─────────────────────────┐
-          │               │   KcpSession        │   │   libjuice (ICE)        │
-          ▼               │   (可靠传输)         │   │   (NAT穿透)              │
-┌─────────────────────┐   └─────────────────────┘   └─────────────────────────┘
-│   Database          │
-│   (SQLite持久化)     │
-└─────────────────────┘
-
-
-                    ┌─────────────────────────────────────────┐
-                    │           通用工具层                     │
-                    │  ┌────────────┐  ┌────────────────────┐ │
-                    │  │ CryptoLayer│  │ Hashing / Logger   │ │
-                    │  │ (加解密)    │  │ EncodingUtils      │ │
-                    │  └────────────┘  └────────────────────┘ │
-                    └─────────────────────────────────────────┘
-
-二、各模块职责详解
-层级 1：核心管理层
-模块	                职责	                                一句话总结
-StateManager	        管理本地文件系统状态（扫描、监控、记录修改）	"我知道本地有什么文件"
-P2PManager	        管理所有对等点连接，协调消息收发和同步逻辑	        "我负责与其他节点通信"
-TrackerClient	    与信令服务器通信，用于发现对等点和交换 ICE 候选	"我帮你找到其他节点在哪里"
-
-层级 2：传输与同步层    
-模块	                职责	                                一句话总结
-TransferManager	        负责文件分块传输：分块、压缩、加密、发送、接收、组装	"我负责把大文件切成小块传过去"
-SyncManager	        纯算法模块：比较本地和远程状态，决定要做什么操作	"我告诉你哪些文件需要下载/删除/忽略"
-PeerController	    封装单个对等点的 ICE 连接 + KCP 会话	        "我是与某一个节点的连接管道"
-
-层级 3：底层支撑层
-模块	                职责	                                一句话总结
-KcpSession	            封装 KCP 协议，提供可靠 UDP 传输	        "我让 UDP 变得可靠"
-FileFilter	            根据规则过滤不需要同步的文件/目录	        "我告诉你哪些文件不用管"
-Database	            SQLite 持久化，存储同步历史、配置等	        "我把重要数据存到硬盘上"
-CryptoLayer	            AES-GCM 加解密	                        "我保护你的数据安全"
-libjuice	            ICE 协议实现（NAT 穿透）	                    "我帮你穿透 NAT"
-
-
-三、模块间的调用关系
-3.1 依赖注入关系
-App 启动时：
-    ┌──────────────────────────────────────────────────────────┐
-    │  1. 创建 StateManager                                     │
-    │     - 依赖: Database, FileFilter                         │
-    │                                                          │
-    │  2. 创建 P2PManager                                       │
-    │     - 依赖: CryptoLayer (内置)                            │
-    │     - 注入: StateManager (set_state_manager)             │
-    │     - 注入: TrackerClient (set_tracker_client)           │
-    │                                                          │
-    │  3. 创建 TrackerClient                                    │
-    │     - 注入: P2PManager (用于回调信令消息)                  │
-    │                                                          │
-    │  4. 设置角色和模式                                         │
-    │     - P2PManager.set_role(Source/Destination)            │
-    │     - P2PManager.set_mode(OneWay/BiDirectional)          │
-    └──────────────────────────────────────────────────────────┘
-3.2 数据流动路径
-场景 A：Source 发送文件更新给 Destination
-┌─────────────┐     文件变化      ┌─────────────────┐
-│  文件系统    │  ─────────────→  │  StateManager   │
-└─────────────┘       监控        └────────┬────────┘
-                                           │ 通知变化
-                                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        P2PManager                               │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ 1. broadcast_file_update(file_info)                     │   │
-│  │ 2. send_over_kcp() → 加密 → 发送给所有连接的 Peer        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ 通过 KCP/ICE
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      PeerController                             │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ send_message() → KcpSession.send() → libjuice.send()   │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                             │
-                             │ 网络传输 (UDP)
-                             ▼
-           ─────────────────────────────────────────
-                        互联网
-           ─────────────────────────────────────────
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Destination 端的 P2PManager                        │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ handle_kcp_message() → 解密 → 路由到 handle_file_update │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ 需要下载？
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      TransferManager                            │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │ 发送 request_file 消息请求文件内容                       │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-
-
-场景 B：Destination 请求文件，Source 发送
-Destination                                              Source
-    │                                                       │
-    │─── request_file {path: "a.txt"} ───────────────────→ │
-    │                                                       │
-    │                                    P2PManager.handle_kcp_message()
-    │                                    ↓ 路由到
-    │                                    TransferManager.queue_upload()
-    │                                    ↓
-    │                                    读取文件 → 分块 → 压缩 → 加密
-    │                                                       │
-    │ ←─────────────── chunk_1 {data, index, total} ────────│
-    │ ←─────────────── chunk_2 {data, index, total} ────────│
-    │ ←─────────────── chunk_N {data, index, total} ────────│
-    │                                                       │
-    │  TransferManager.handle_chunk()                       │
-    │  ↓ 解密 → 解压 → 写入临时文件                           │
-    │  ↓ 所有块收齐后，重命名为目标文件                        │
-    │                                                       │
-    │  StateManager.record_sync_success()                   │
-    │                                                       │
-
-
-场景 C：ICE 连接建立流程
-节点 A (Offer方)                 Tracker Server              节点 B (Answer方)
-    │                                │                           │
-    │  join_room(room_id)           │                           │
-    │───────────────────────────────→                           │
-    │                                │←── join_room(room_id) ────│
-    │                                │                           │
-    │←─ peer_list [B] ───────────────│                           │
-    │                                │─── peer_list [A] ─────────→
-    │                                │                           │
-    │  P2PManager.connect_to_peers([B])                         │
-    │  ↓                                                        │
-    │  创建 PeerController(A, B)                                 │
-    │  ↓  A > B → A 是 Offer 方                                  │
-    │  controller->initiate_connection()                        │
-    │  ↓                                                        │
-    │  生成 ICE Offer (SDP)                                      │
-    │                                │                           │
-    │──── ice_offer {SDP} ──────────→│                           │
-    │                                │── ice_offer {SDP} ───────→│
-    │                                │                           │
-    │                                │         PeerController.handle_signaling()
-    │                                │         ↓ 设置远端 SDP
-    │                                │         ↓ 生成 ICE Answer
-    │                                │                           │
-    │                                │←─ ice_answer {SDP} ───────│
-    │←── ice_answer {SDP} ──────────│                           │
-    │                                │                           │
-    │  PeerController.handle_signaling()                        │
-    │  ↓ 设置远端 SDP                                            │
-    │                                │                           │
-    │←───────────── ice_candidate (多次交换) ───────────────────→│
-    │                                │                           │
-    │  ICE 连接建立成功 (P2P 或 Relay)                            │
-    │  ↓                                                        │
-    │  KcpSession 初始化                                         │
-    │  ↓                                                        │
-    │←════════════ KCP 加密通信开始 ════════════════════════════→│
-
-
-五、核心模块关系图（简化版）
-                    ┌───────────────────┐
-                    │   TrackerClient   │ ←───── 信令服务器
-                    │   (发现 + 信令)    │
-                    └─────────┬─────────┘
-                              │ on_peer_list / on_signaling
-                              ▼
-┌──────────────────────────────────────────────────────────────┐
-│                        P2PManager                            │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │  管理所有 PeerController                                 │ │
-│  │  消息加密/解密/路由                                       │ │
-│  │  同步会话协调 (sync_begin/sync_ack)                      │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                         │            │                       │
-│           ┌─────────────┴────┐  ┌────┴─────────────┐        │
-│           ▼                  ▼  ▼                  │        │
-│  ┌────────────────┐  ┌────────────────────────┐   │        │
-│  │ PeerController │  │   TransferManager      │   │        │
-│  │ × N 个连接      │  │   (分块传输)            │   │        │
-│  │ ┌────────────┐ │  └────────────────────────┘   │        │
-│  │ │ KcpSession │ │                               │        │
-│  │ │ (可靠UDP)   │ │                               │        │
-│  │ └────────────┘ │                               │        │
-│  │ ┌────────────┐ │                               │        │
-│  │ │ libjuice   │ │                               │        │
-│  │ │ (ICE穿透)   │ │                               │        │
-│  │ └────────────┘ │                               │        │
-│  └────────────────┘                               │        │
-└───────────────────────────────────────────────────┼────────┘
-                                                    │
-                                                    ▼
-                                         ┌─────────────────┐
-                                         │  StateManager   │
-                                         │  (本地状态管理)  │
-                                         │  ┌───────────┐  │
-                                         │  │FileFilter │  │
-                                         │  └───────────┘  │
-                                         │  ┌───────────┐  │
-                                         │  │ Database  │  │
-                                         │  └───────────┘  │
-                                         └─────────────────┘
-
-                    */
+// === 前向声明（替代 #include，减少编译依赖）===
+// 以下类型在头文件中仅以指针/引用/智能指针形式出现，无需完整定义
+// 完整定义在各自 .cpp 中 #include
 
 
 
@@ -296,9 +44,14 @@ enum class ConnectionType {
 };
 // -------------------------
 
+// === 前向声明 ===
 class StateManager;
-class P2PManager;
 class TrackerClient;
+class PeerController;
+class SyncHandler;
+class SyncSession;
+struct IceConfig;
+enum class PeerState;
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
 public:
@@ -311,11 +64,7 @@ public:
     void set_state_manager(StateManager* sm);
     void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
-    void set_mode(SyncMode mode) {
-        m_mode = mode;
-        if (m_sync_handler) m_sync_handler->set_mode(mode);
-        if (m_sync_session) m_sync_session->set_mode(mode);
-    }
+    void set_mode(SyncMode mode);
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
 
@@ -372,15 +121,41 @@ protected:
     P2PManager();
     void init();
 
-    // --- KCP 集成 ---
-    void schedule_kcp_update();
-    void update_all_kcps();
+    // --- KCP 集成（已提取到 KcpScheduler）---
+
+    // --- Peer 访问辅助方法（A-3: 消除重复的锁+遍历/查找模式）---
+    // 收集所有已连接的 PeerController（在读锁内拷贝，锁外安全使用）
+    std::vector<std::shared_ptr<PeerController>> collect_connected_peers() const;
+    // 按 peer_id 查找 PeerController（读锁内拷贝 shared_ptr）
+    std::shared_ptr<PeerController> find_peer(const std::string& peer_id) const;
 
     // --- 上层应用逻辑（使用 PeerController）---
     void send_over_kcp(const std::string& msg);
     void send_over_kcp_peer(const std::string& msg, PeerController* peer);
     void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
     void handle_kcp_message(const std::string& msg, PeerController* from_peer);
+
+    // --- A-2: connect_to_peers 拆分子方法 ---
+    // 检查已存在的 peer 是否可复用，返回 true 表示应跳过该 peer
+    bool try_reuse_existing_peer(const std::string& peer_id, bool force);
+    // 创建 PeerController 及其回调
+    std::shared_ptr<PeerController> create_peer_controller(const std::string& self_id,
+                                                           const std::string& peer_id);
+    // Answer 方等待 Offer 超时处理
+    void setup_answer_timeout(std::shared_ptr<PeerController> controller,
+                              const std::string& peer_id);
+
+    // --- A-2: init 拆分子方法 ---
+    void create_transfer_manager();     // 创建 TransferManager 及其回调
+    void create_sync_components();      // 创建 SyncHandler 和 SyncSession
+    void start_background_services();   // 启动 IO 线程、定时器、UPnP
+
+    // --- A-2: handle_kcp_message 拆分子方法 ---
+    // JSON 消息分发路由
+    void dispatch_json_message(const std::string& json_msg_type,
+                               nlohmann::json& json_payload,
+                               PeerController* from_peer,
+                               bool can_receive);
 
     // --- 消息处理器（已迁移到 SyncHandler）---
 
@@ -398,20 +173,6 @@ protected:
     void wait_for_kcp_flush(int timeout_ms = 500);
     void handle_goodbye(PeerController* from_peer);
 
-    // 【重构】移除旧的 libjuice 回调
-#if 0
-    // --- libjuice 回调 (C 风格) ---
-    static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
-    static void on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr);
-    static void on_juice_gathering_done(juice_agent_t* agent, void* user_ptr);
-    static void on_juice_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr);
-
-    // --- libjuice 回调的 C++ 处理器 ---
-    void handle_juice_state_changed(juice_agent_t* agent, juice_state_t state);
-    void handle_juice_candidate(juice_agent_t* agent, const char* sdp);
-    void handle_juice_gathering_done(juice_agent_t* agent);
-    void handle_juice_recv(juice_agent_t* agent, const char* data, size_t size);
-#endif
 
     // --- UPnP 辅助函数（已迁移到 UpnpManager）---
 
@@ -419,8 +180,6 @@ protected:
     // m_io_context 所有网络事件的事件循环
     boost::asio::io_context m_io_context;
     std::jthread m_thread;
-    // 定时驱动 KCP 协议的 update()
-    boost::asio::steady_timer m_kcp_update_timer;
 
     TrackerClient* m_tracker_client = nullptr;
     StateManager* m_state_manager = nullptr;
@@ -431,14 +190,6 @@ protected:
     // 使用 shared_mutex: 读操作(查找)可并行，写操作(增删)互斥
     std::unordered_map<std::string, std::shared_ptr<PeerController>> m_peers;
     mutable std::shared_mutex m_peers_mutex;
-    
-    // 【重构】注释旧的双向映射
-#if 0
-    // --- 关键：双向映射 ---
-    std::map<juice_agent_t*, std::shared_ptr<PeerContext>> m_peers_by_agent;
-    std::map<std::string, std::shared_ptr<PeerContext>> m_peers_by_id;
-    // -----------------------
-#endif
 
     CryptoLayer m_crypto;
 
@@ -460,12 +211,6 @@ protected:
     uint16_t m_turn_port = 3478;
     std::string m_turn_username;
     std::string m_turn_password;
-    // 【重构】移除 libjuice 特定结构
-    // juice_turn_server_t m_turn_server_config;
-
-    // --- KCP更新频率自适应 ---
-    uint32_t m_kcp_update_interval_ms = 20;  // 默认20ms，在10-100ms之间动态调整
-    std::chrono::steady_clock::time_point m_last_data_time;
 
     // --- 文件组装缓冲区清理 ---
     // 清理过期的传输缓冲区
@@ -477,25 +222,11 @@ protected:
     UpnpManager m_upnp;
     // --------------------------
 
-    // --- ICE FAILED 自动重连机制 ---
-    std::mutex m_reconnect_mutex;
-    std::unordered_map<std::string, int> m_reconnect_attempts;  // peer_id -> 重试次数
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_last_reconnect_time;  // peer_id -> 上次重连时间
-    static constexpr int MAX_RECONNECT_ATTEMPTS = 5;  // 最大重试次数
-    static constexpr int BASE_RECONNECT_DELAY_MS = 3000;  // 基础重连延迟 3秒
-    void schedule_reconnect(const std::string& peer_id);
-    // ---------------------------------
-
-    // --- 心跳保活机制 ---
-    // NAT 映射通常在 30秒-5分钟 超时
-    // libjuice 内置 15 秒 STUN keepalive，我们在应用层额外增加 20 秒心跳作为双保险
-    boost::asio::steady_timer m_heartbeat_timer{m_io_context};
-    static constexpr int HEARTBEAT_INTERVAL_MS = 20000;  // 20秒
-    void schedule_heartbeat();
-    void send_heartbeats();
-    void handle_heartbeat(PeerController* from_peer);
-    void handle_heartbeat_ack(PeerController* from_peer);
-    // -----------------------
+    // --- A-1: 提取的子组件 ---
+    std::unique_ptr<KcpScheduler> m_kcp_scheduler;          // KCP 自适应更新调度
+    std::unique_ptr<HeartbeatService> m_heartbeat_service;   // 心跳保活服务
+    std::unique_ptr<ReconnectPolicy> m_reconnect_policy;     // 重连策略管理
+    // --------------------------
 
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作
