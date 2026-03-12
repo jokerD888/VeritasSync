@@ -60,9 +60,13 @@ add_executable(veritas_sync WIN32
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
+    src/p2p/HeartbeatService.cpp
+    src/p2p/ReconnectPolicy.cpp
+    src/p2p/KcpScheduler.cpp
     src/p2p/WebUI.cpp
     src/storage/StateManager.cpp
     src/storage/FileFilter.cpp
+    src/storage/NLFilterGenerator.cpp
     src/storage/Database.cpp
     src/sync/SyncManager.cpp
     src/sync/SyncHandler.cpp
@@ -237,8 +241,11 @@ add_executable(unit_tests
     tests/test_database_advanced.cpp
     tests/test_state_manager_enhanced.cpp
     tests/test_transfer_manager_async.cpp
+    tests/test_transfer_manager.cpp
+    tests/test_reconnect_heartbeat.cpp
     tests/test_common_utils_robustness.cpp
     tests/test_config.cpp
+    tests/test_nl_filter.cpp
     tests/test_sync_handler.cpp
     tests/test_sync_session.cpp
     tests/test_sync_node.cpp
@@ -253,12 +260,16 @@ add_executable(unit_tests
     src/common/Logger.cpp
     src/storage/Database.cpp
     src/storage/FileFilter.cpp
+    src/storage/NLFilterGenerator.cpp
     src/net/KcpSession.cpp
     src/net/IceTransport.cpp
     src/net/UpnpManager.cpp
     src/p2p/PeerController.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
+    src/p2p/HeartbeatService.cpp
+    src/p2p/ReconnectPolicy.cpp
+    src/p2p/KcpScheduler.cpp
     src/storage/StateManager.cpp
     src/sync/TransferManager.cpp
 )
@@ -282,6 +293,7 @@ target_link_libraries(unit_tests PRIVATE
     miniupnpc::miniupnpc
     Snappy::snappy
     efsw::efsw
+    httplib::httplib
 )
 
 # 注册测试
