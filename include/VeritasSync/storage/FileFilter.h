@@ -28,11 +28,34 @@ public:
     bool should_ignore(std::string_view path) const;
 
 private:
-    void classify_rule(const std::string& rule);
+    // 编译后的单条规则
+    struct CompiledRule {
+        std::regex regex;          // 匹配用的正则
+        bool negated = false;      // 是否为 ! 取反规则
+        std::string original;      // 原始规则文本（调试用）
+    };
 
-    std::unordered_set<std::string, StringHash, std::equal_to<>> m_ignored_exts; 
-    std::unordered_set<std::string, StringHash, std::equal_to<>> m_ignored_dirs; 
-    std::vector<std::regex> m_complex_rules;
+    // 快速路径：后缀和目录的匹配缓存（仅用于非取反的默认规则）
+    struct FastPath {
+        std::unordered_set<std::string, StringHash, std::equal_to<>> exts;   // ".ext"
+        std::unordered_set<std::string, StringHash, std::equal_to<>> dirs;   // "dirname"
+    };
+
+    void parse_rule(const std::string& raw_rule, bool is_default = false, bool bang_escaped = false);
+    static std::string glob_to_regex(const std::string& glob);
+
+    // 默认规则的快速路径（不可被取反覆盖）
+    FastPath m_default_fast;
+    // 默认规则中需要正则的（不可被取反覆盖）
+    std::vector<std::regex> m_default_complex;
+
+    // 用户规则列表（按声明顺序，支持取反）
+    std::vector<CompiledRule> m_user_rules;
+
+    // 用户非取反规则的快速路径缓存（加速常见匹配）
+    FastPath m_user_fast;
+    // 标记：用户规则中是否包含任何取反规则
+    bool m_has_negation = false;
 
     mutable std::shared_mutex m_mutex;
 };
