@@ -5,6 +5,10 @@
 
 namespace VeritasSync {
 
+// E-1: 魔数统一为命名常量
+static constexpr size_t SDP_BUFFER_SIZE       = 4096;  // SDP 描述缓冲区大小
+static constexpr size_t CANDIDATE_BUFFER_SIZE = 1024;  // ICE 候选地址缓冲区大小
+
 // --- 工厂方法 ---
 std::shared_ptr<IceTransport> IceTransport::create(
     const IceConfig& config,
@@ -120,7 +124,7 @@ void IceTransport::set_remote_gathering_done() {
 std::string IceTransport::get_local_description() const {
     if (!m_agent) return "";
     
-    char buffer[4096];
+    char buffer[SDP_BUFFER_SIZE];
     if (juice_get_local_description(m_agent, buffer, sizeof(buffer)) == 0) {
         return std::string(buffer);
     }
@@ -130,8 +134,8 @@ std::string IceTransport::get_local_description() const {
 bool IceTransport::get_selected_candidates(std::string& out_local, std::string& out_remote) const {
     if (!m_agent) return false;
     
-    char local_buf[1024];
-    char remote_buf[1024];
+    char local_buf[CANDIDATE_BUFFER_SIZE];
+    char remote_buf[CANDIDATE_BUFFER_SIZE];
     if (juice_get_selected_candidates(m_agent, local_buf, sizeof(local_buf), 
                                        remote_buf, sizeof(remote_buf)) == 0) {
         out_local = local_buf;

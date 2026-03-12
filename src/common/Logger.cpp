@@ -9,6 +9,12 @@
 #include <unordered_map>
 
 namespace VeritasSync {
+
+// E-1: 魔数统一为命名常量
+static constexpr size_t LOG_MAX_FILE_SIZE    = 1024 * 1024 * 5;  // 单个日志文件最大 5MB
+static constexpr size_t LOG_MAX_FILES        = 3;                // 最多保留 3 个日志文件
+static constexpr size_t LOG_THREAD_POOL_SIZE = 8192;             // 异步日志线程池队列大小
+
 // 定义全局 logger 变量
 std::shared_ptr<spdlog::logger> g_logger;
 
@@ -20,10 +26,10 @@ void init_logger() {
         try {
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
             console_sink->set_level(spdlog::level::info);  // 调试级别: info
-            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", 1024 * 1024 * 5, 3);
+            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", LOG_MAX_FILE_SIZE, LOG_MAX_FILES);
             file_sink->set_level(spdlog::level::info);     // 调试级别: info
 
-            spdlog::init_thread_pool(8192, 1);
+            spdlog::init_thread_pool(LOG_THREAD_POOL_SIZE, 1);
 
             g_logger =
                 std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},

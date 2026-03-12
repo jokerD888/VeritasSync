@@ -12,6 +12,11 @@
 
 namespace VeritasSync {
 
+// E-1: 魔数统一为命名常量
+static constexpr int SYNC_TIMEOUT_SECONDS          = 60;    // 同步会话超时（秒）
+static constexpr int FLOW_CONTROL_THRESHOLD         = 1024;  // KCP 发送队列流控阈值
+static constexpr int FLOW_CONTROL_SLEEP_MS          = 20;    // 流控等待间隔（毫秒）
+
 SyncSession::SyncSession(StateManager* state_manager,
                          boost::asio::thread_pool& worker_pool,
                          boost::asio::io_context& io_context,
@@ -68,27 +73,25 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         g_logger->info("[Sync] 收到同步开始: session={}, files={}, dirs={}", 
                        session_id, file_count, dir_count);
         
-        from_peer->sync_session_id.store(session_id);
-        from_peer->expected_file_count.store(file_count);
-        from_peer->expected_dir_count.store(dir_count);
-        from_peer->received_file_count.store(0);
-        from_peer->received_dir_count.store(0);
+        from_peer->set_sync_session_id(session_id);
+        from_peer->set_expected_file_count(file_count);
+        from_peer->set_expected_dir_count(dir_count);
+        from_peer->reset_received_file_count();
+        from_peer->reset_received_dir_count();
         
-        // 设置超时定时器
+        // A-6: 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
         std::string peer_id = from_peer->get_peer_id();
-        from_peer->sync_timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
-        from_peer->sync_timeout_timer->expires_after(std::chrono::seconds(60));
-        from_peer->sync_timeout_timer->async_wait(
+        from_peer->start_sync_timeout(SYNC_TIMEOUT_SECONDS,
             [this, peer_id, session_id](const boost::system::error_code& ec) {
                 if (ec) return;  // 被取消
                 
                 m_with_peer(peer_id, [this, session_id](PeerController* peer) {
-                    if (peer->sync_session_id.load() != session_id) return;
+                    if (peer->get_sync_session_id() != session_id) return;
                     
-                    size_t recv_files = peer->received_file_count.load();
-                    size_t expect_files = peer->expected_file_count.load();
-                    size_t recv_dirs = peer->received_dir_count.load();
-                    size_t expect_dirs = peer->expected_dir_count.load();
+                    size_t recv_files = peer->get_received_file_count();
+                    size_t expect_files = peer->get_expected_file_count();
+                    size_t recv_dirs = peer->get_received_dir_count();
+                    size_t expect_dirs = peer->get_expected_dir_count();
                     
                     if (recv_files < expect_files || recv_dirs < expect_dirs) {
                         g_logger->warn("[Sync] 同步会话 {} 超时 (文件: {}/{}, 目录: {}/{})", 
@@ -96,7 +99,7 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
                     }
                     
                     send_sync_ack(peer, session_id, recv_files, recv_dirs);
-                    peer->sync_session_id.store(0);
+                    peer->set_sync_session_id(0);
                 });
             });
             
@@ -114,7 +117,7 @@ void SyncSession::handle_sync_ack(const nlohmann::json& payload, PeerController*
         size_t received_dirs = payload.at("received_dirs").get<size_t>();
         
         // 【关键】检查这是否针对当前活跃会话的回复
-        uint64_t current_id = from_peer->sync_session_id.load();
+        uint64_t current_id = from_peer->get_sync_session_id();
         if (ack_session_id != current_id) {
             g_logger->warn("[Sync] 收到过时或不匹配的 ACK (ACK ID: {}, 当前 ID: {})，忽略。", 
                            ack_session_id, current_id);
@@ -128,7 +131,7 @@ void SyncSession::handle_sync_ack(const nlohmann::json& payload, PeerController*
         // 生成一个新的 ID 并重新开始推送
         std::string peer_id = from_peer->get_peer_id();
         uint64_t new_session_id = std::chrono::steady_clock::now().time_since_epoch().count();
-        from_peer->sync_session_id.store(new_session_id);
+        from_peer->set_sync_session_id(new_session_id);
         
         boost::asio::post(m_worker_pool, [this, peer_id, new_session_id]() {
             // 重新获取 controller 的 shared_ptr
@@ -151,7 +154,7 @@ void SyncSession::perform_flood_sync(std::shared_ptr<PeerController> controller,
     std::string peer_id = controller->get_peer_id();
     
     // 检查 session_id 是否一致（防止重复执行旧会话）
-    if (controller->sync_session_id.load() != session_id) {
+    if (controller->get_sync_session_id() != session_id) {
         g_logger->info("[Sync] 会话 ID 已变更，跳过本次同步");
         return;
     }
@@ -206,7 +209,7 @@ void SyncSession::perform_flood_sync(std::shared_ptr<PeerController> controller,
             return;
         }
         
-        if (controller->sync_session_id.load() != session_id) {
+        if (controller->get_sync_session_id() != session_id) {
             g_logger->info("[Sync] 会话 ID 已变更，停止本次同步 (已发送 {}/{})", i, files.size());
             return;
         }
@@ -231,8 +234,8 @@ void SyncSession::perform_flood_sync(std::shared_ptr<PeerController> controller,
 
         // 【流控】每发送一个批次检查一次 KCP 发送队列积压量
         int pending = controller->get_kcp_wait_send();
-        while (pending > 1024 && controller->is_valid()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        while (pending > FLOW_CONTROL_THRESHOLD && controller->is_valid()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(FLOW_CONTROL_SLEEP_MS));
             pending = controller->get_kcp_wait_send();
         }
         

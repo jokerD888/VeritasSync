@@ -6,6 +6,9 @@
 
 namespace VeritasSync {
 
+// E-1: 魔数统一为命名常量
+static constexpr int UPNP_DISCOVER_TIMEOUT_MS = 2000;  // UPnP 设备发现超时（毫秒）
+
 // ═══════════════════════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════════════════════
@@ -43,7 +46,7 @@ void UpnpManager::init_async(boost::asio::thread_pool& pool) {
     boost::asio::post(pool, [this]() {
         int error = 0;
         // 发现路由器 (2000ms 超时)
-        struct UPNPDev* devlist = upnpDiscover(2000, nullptr, nullptr, 0, 0, 2, &error);
+        struct UPNPDev* devlist = upnpDiscover(UPNP_DISCOVER_TIMEOUT_MS, nullptr, nullptr, 0, 0, 2, &error);
 
         std::lock_guard<std::mutex> lock(m_mutex);
         if (devlist) {

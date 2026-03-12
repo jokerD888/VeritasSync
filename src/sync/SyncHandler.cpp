@@ -14,6 +14,9 @@
 
 namespace VeritasSync {
 
+// E-1: 魔数统一为命名常量
+static constexpr int SYNC_TIMEOUT_SECONDS = 60;  // 同步会话超时（秒）
+
 SyncHandler::SyncHandler(StateManager* state_manager,
                          std::shared_ptr<TransferManager> transfer_manager,
                          boost::asio::thread_pool& worker_pool,
@@ -141,13 +144,12 @@ void SyncHandler::refresh_peer_timeout(PeerController* from_peer) {
     if (!from_peer) return;
 
     std::string pid = from_peer->get_peer_id();
-    uint64_t sid = from_peer->sync_session_id.load();
+    uint64_t sid = from_peer->get_sync_session_id();
 
     boost::asio::post(m_io_context, [this, pid, sid]() {
         m_with_peer(pid, [sid](PeerController* peer) {
-            if (peer->sync_session_id.load() == sid && peer->sync_timeout_timer) {
-                peer->sync_timeout_timer->expires_after(std::chrono::seconds(60));
-            }
+            // A-6: 通过封装方法刷新定时器（内部加锁，线程安全）
+            peer->refresh_sync_timeout(sid, SYNC_TIMEOUT_SECONDS);
         });
     });
 }
@@ -162,10 +164,10 @@ void SyncHandler::handle_share_state(const nlohmann::json& payload, PeerControll
     std::string peer_id = from_peer ? from_peer->get_peer_id() : "";
     if (peer_id.empty()) return;
 
-    int64_t safe_threshold_ts = from_peer ? (from_peer->connected_at_ts.load() - 5) : 0;
+    int64_t safe_threshold_ts = from_peer ? (from_peer->get_connected_at_ts() - 5) : 0;
 
     g_logger->info("[KCP] (Destination) 收到来自 {} 的状态。连接TS: {}, 历史阈值: {}", peer_id,
-                   from_peer->connected_at_ts.load(), safe_threshold_ts);
+                   from_peer->get_connected_at_ts(), safe_threshold_ts);
 
     boost::asio::post(m_worker_pool, [this, payload, peer_id, safe_threshold_ts]() {
         if (!m_state_manager) {
@@ -315,7 +317,7 @@ void SyncHandler::handle_file_update(const nlohmann::json& payload, PeerControll
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
 
     if (from_peer) {
-        from_peer->received_file_count.fetch_add(1);
+        from_peer->add_received_file_count(1);
         refresh_peer_timeout(from_peer);
     }
     
@@ -364,7 +366,7 @@ void SyncHandler::handle_file_delete(const nlohmann::json& payload, PeerControll
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
     
     if (from_peer) {
-        from_peer->received_file_count.fetch_add(1);
+        from_peer->add_received_file_count(1);
         refresh_peer_timeout(from_peer);
     }
 
@@ -405,7 +407,7 @@ void SyncHandler::handle_dir_create(const nlohmann::json& payload, PeerControlle
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
     
     if (from_peer) {
-        from_peer->received_dir_count.fetch_add(1);
+        from_peer->add_received_dir_count(1);
         refresh_peer_timeout(from_peer);
     }
     
@@ -442,7 +444,7 @@ void SyncHandler::handle_dir_delete(const nlohmann::json& payload, PeerControlle
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
     
     if (from_peer) {
-        from_peer->received_dir_count.fetch_add(1);
+        from_peer->add_received_dir_count(1);
         refresh_peer_timeout(from_peer);
     }
     
@@ -512,7 +514,7 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
     g_logger->info("[KCP] (Destination) 收到批量文件更新: {} 个文件", files.size());
     
     if (from_peer) {
-        from_peer->received_file_count.fetch_add(static_cast<int>(files.size()));
+        from_peer->add_received_file_count(files.size());
         refresh_peer_timeout(from_peer);
     }
     
@@ -588,7 +590,7 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     g_logger->info("[KCP] (Destination) 收到批量文件删除: {} 个文件", paths.size());
     
     if (from_peer) {
-        from_peer->received_file_count.fetch_add(static_cast<int>(paths.size()));
+        from_peer->add_received_file_count(paths.size());
     }
     
     boost::asio::post(m_worker_pool, [this, paths]() {
@@ -634,7 +636,7 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
                    creates.size(), deletes.size());
     
     if (from_peer) {
-        from_peer->received_dir_count.fetch_add(static_cast<int>(creates.size() + deletes.size()));
+        from_peer->add_received_dir_count(creates.size() + deletes.size());
     }
     
     boost::asio::post(m_worker_pool, [this, creates, deletes]() {

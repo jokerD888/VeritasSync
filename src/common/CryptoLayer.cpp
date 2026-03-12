@@ -3,7 +3,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
+
 #include <openssl/crypto.h>
 
 #include <cstring>
@@ -16,6 +16,7 @@ namespace VeritasSync {
 
 static const int GCM_IV_LEN = 12;
 static const int GCM_TAG_LEN = 16;
+static constexpr size_t AES256_KEY_SIZE = 32;  // E-1: AES-256 密钥长度（字节）
 
 // --- 构造/析构 ---
 CryptoLayer::CryptoLayer() = default;
@@ -77,7 +78,7 @@ void CryptoLayer::set_key(const std::string& key_string) {
     static const unsigned char salt[] = "VeritasSync-v1-salt";
     static const unsigned char info[] = "veritassync-aes256-gcm";
 
-    unsigned char derived_key[32]; // 256 bits
+    unsigned char derived_key[AES256_KEY_SIZE]; // 256 bits
 
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
     if (!ctx) {
@@ -93,7 +94,7 @@ void CryptoLayer::set_key(const std::string& key_string) {
             key_string.length()) == 1);
     ok = ok && (EVP_PKEY_CTX_add1_hkdf_info(ctx, info, sizeof(info) - 1) == 1);
 
-    size_t outlen = 32;
+    size_t outlen = AES256_KEY_SIZE;
     ok = ok && (EVP_PKEY_derive(ctx, derived_key, &outlen) == 1);
     EVP_PKEY_CTX_free(ctx);
 
@@ -102,7 +103,7 @@ void CryptoLayer::set_key(const std::string& key_string) {
         return;
     }
 
-    m_key.assign(reinterpret_cast<const char*>(derived_key), 32);
+    m_key.assign(reinterpret_cast<const char*>(derived_key), AES256_KEY_SIZE);
     OPENSSL_cleanse(derived_key, sizeof(derived_key));  // S-4: 清零临时密钥
 
     // 注意：由于使用了 thread_local，这里的密钥更改是全局生效的，

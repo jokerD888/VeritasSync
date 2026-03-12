@@ -1,32 +1,75 @@
 #include "VeritasSync/common/Hashing.h"
 
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
 #include <chrono>
 #include <fstream>
-#include <iomanip>
-#include <sstream>
+#include <format>
 #include <thread>
 #include <vector>
-#include <format>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
 
-    // --- 辅助函数：将二进制哈希转换为十六进制字符串 ---
-    static std::string HashToHexString(const unsigned char* hash, size_t length) {
-        std::string res;
-        res.reserve(length * 2); // 预留空间，避免频繁扩容
-        for (size_t i = 0; i < length; ++i) {
-            // {:02x} 表示 16 进制、2位宽、0填充
-            res += std::format("{:02x}", hash[i]);
+    // E-1: 魔数统一为命名常量
+    static constexpr size_t HASH_READ_BUFFER_SIZE = 64 * 1024;  // 文件哈希读取缓冲区 64KB
+    static constexpr int FILE_LOCK_RETRY_DELAY_MS = 250;        // 文件锁定重试延迟（毫秒）
+
+    // --- EVP SHA256 上下文 RAII 封装 ---
+    // 统一管理 EVP_MD_CTX 的生命周期，消除三个函数中重复的 Init/Update/Final 流程
+    class SHA256Context {
+    public:
+        SHA256Context() : ctx_(EVP_MD_CTX_new()) {
+            if (ctx_) {
+                ok_ = (EVP_DigestInit_ex(ctx_, EVP_sha256(), nullptr) == 1);
+            }
         }
-        return res;
-    }
+
+        ~SHA256Context() {
+            if (ctx_) {
+                EVP_MD_CTX_free(ctx_);
+            }
+        }
+
+        // 禁止拷贝
+        SHA256Context(const SHA256Context&) = delete;
+        SHA256Context& operator=(const SHA256Context&) = delete;
+
+        // 是否初始化成功
+        [[nodiscard]] bool valid() const { return ctx_ && ok_; }
+
+        // 喂入数据
+        bool update(const void* data, size_t length) {
+            if (!valid()) return false;
+            ok_ = (EVP_DigestUpdate(ctx_, data, length) == 1);
+            return ok_;
+        }
+
+        // 计算最终摘要，返回十六进制字符串；失败返回空串
+        [[nodiscard]] std::string finalize() {
+            if (!valid()) return "";
+            unsigned char hash[EVP_MAX_MD_SIZE];
+            unsigned int hash_len = 0;
+            if (EVP_DigestFinal_ex(ctx_, hash, &hash_len) != 1) {
+                return "";
+            }
+            // 转换为十六进制字符串
+            std::string res;
+            res.reserve(hash_len * 2);
+            for (unsigned int i = 0; i < hash_len; ++i) {
+                res += std::format("{:02x}", hash[i]);
+            }
+            return res;
+        }
+
+    private:
+        EVP_MD_CTX* ctx_ = nullptr;
+        bool ok_ = false;
+    };
 
     // --- 缓冲区版本的 SHA256 (用于验证和小数据) ---
     std::string Hashing::CalculateSHA256_Buffer(const char* data, size_t length) {
@@ -34,24 +77,15 @@ namespace VeritasSync {
         // 空数据的 SHA256 是一个固定值：e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         // 之前的 bug：返回 "" 会被 StateManager 误判为"哈希失败"，导致空文件无限重试
 
-        SHA256_CTX sha256Context;
-        if (!SHA256_Init(&sha256Context)) {     // 初始化上下文
-            return "";
-        }
+        SHA256Context ctx;
+        if (!ctx.valid()) return "";
 
         // 只有当有数据时才更新，但 length == 0 时跳过更新也是合法的
         if (data && length > 0) {
-            if (!SHA256_Update(&sha256Context, data, length)) {     // 处理数据
-                return "";
-            }
+            if (!ctx.update(data, length)) return "";
         }
 
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        if (!SHA256_Final(hash, &sha256Context)) {     // 计算最终哈希
-            return "";
-        }
-
-        return HashToHexString(hash, SHA256_DIGEST_LENGTH);
+        return ctx.finalize();
     }
 
     // --- 跨平台 MMIO 实现 (使用 Boost.Interprocess) ---
@@ -88,11 +122,9 @@ namespace VeritasSync {
             // 在 Linux 上，filePath.c_str() 返回 char*。
             bi::file_mapping m_file(filePath.c_str(), bi::read_only);
 
-            // 3. 初始化 SHA256 上下文
-            SHA256_CTX sha256Context;
-            if (!SHA256_Init(&sha256Context)) {
-                return "";
-            }
+            // 3. 初始化 SHA256 上下文 (EVP RAII)
+            SHA256Context ctx;
+            if (!ctx.valid()) return "";
 
             // 4. 分块映射并计算哈希 (滑动窗口)
             // 使用 256MB 的视图窗口，平衡内存使用和性能
@@ -107,7 +139,7 @@ namespace VeritasSync {
                 bi::mapped_region region(m_file, bi::read_only, offset, view_size);
 
                 // 更新哈希
-                if (!SHA256_Update(&sha256Context, region.get_address(), region.get_size())) {
+                if (!ctx.update(region.get_address(), region.get_size())) {
                     return "";
                 }
 
@@ -116,12 +148,7 @@ namespace VeritasSync {
             }
 
             // 5. 计算最终哈希
-            unsigned char hash[SHA256_DIGEST_LENGTH];
-            if (!SHA256_Final(hash, &sha256Context)) {
-                return "";
-            }
-
-            return HashToHexString(hash, SHA256_DIGEST_LENGTH);
+            return ctx.finalize();
 
         } catch (const std::exception& e) {
             if (g_logger) {
@@ -154,7 +181,7 @@ namespace VeritasSync {
                 g_logger->warn("[Hashing] ⚠️ 文件被锁定, 250ms 后重试: {} | {}", PathToUtf8(filePath), sys_err);
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::milliseconds(FILE_LOCK_RETRY_DELAY_MS));
             file.open(filePath, std::ios::binary);
 
             if (!file.is_open()) {
@@ -166,32 +193,25 @@ namespace VeritasSync {
             }
         }
 
-        // 3. 初始化SHA256上下文
-        SHA256_CTX sha256Context;
-        if (!SHA256_Init(&sha256Context)) {
-            return "";
-        }
+        // 3. 初始化 SHA256 上下文 (EVP RAII)
+        SHA256Context ctx;
+        if (!ctx.valid()) return "";
 
         // 4. 分块读取文件并更新哈希值
         // 使用 64KB 缓冲区，对于顺序读取是较优的块大小
-        std::vector<char> buffer(64 * 1024);
+        std::vector<char> buffer(HASH_READ_BUFFER_SIZE);
         while (file.good()) {
             file.read(buffer.data(), buffer.size());
             std::streamsize bytesRead = file.gcount();
             if (bytesRead > 0) {
-                if (!SHA256_Update(&sha256Context, buffer.data(), bytesRead)) {
+                if (!ctx.update(buffer.data(), bytesRead)) {
                     return "";
                 }
             }
         }
 
         // 5. 计算最终的哈希摘要
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        if (!SHA256_Final(hash, &sha256Context)) {
-            return "";
-        }
-
-        return HashToHexString(hash, SHA256_DIGEST_LENGTH);
+        return ctx.finalize();
     }
 
 }  // namespace VeritasSync

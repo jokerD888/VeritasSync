@@ -13,6 +13,9 @@
 
 extern std::shared_ptr<spdlog::logger> g_logger;
 
+// E-1: 魔数统一为命名常量
+static constexpr unsigned int MAX_MESSAGE_LENGTH = 65536;  // 消息体最大长度 64KB
+
 // ═══════════════════════════════════════════════════════════════
 // Windows UTF-8 辅助函数（消除 handle_read_header / handle_read_body 中的重复）
 // ═══════════════════════════════════════════════════════════════
@@ -110,7 +113,7 @@ void Session::handle_read_header(const boost::system::error_code& ec, std::size_
     is.read(reinterpret_cast<char*>(&msg_len_net), 4);
     unsigned int msg_len = boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
 
-    if (msg_len > 65536) {
+    if (msg_len > MAX_MESSAGE_LENGTH) {
         g_logger->error("[Session] {} 消息体过长 ({} bytes)。断开连接。", m_id, msg_len);
         m_server.leave(shared_from_this());
         return;

@@ -61,6 +61,12 @@ struct Config {
     unsigned short webui_port = 8800;  // Web 控制台端口
     // ----------------------------
 
+    // --- LLM API 配置（用于自然语言生成过滤规则，可选）---
+    std::string llm_api_url;                    // API 端点（如 https://api.deepseek.com）
+    std::string llm_api_key;                    // API 密钥
+    std::string llm_model = "deepseek-chat";    // 模型名称
+    // ----------------------------
+
     std::vector<SyncTask> tasks;
 };
 
@@ -100,6 +106,9 @@ inline void to_json(nlohmann::json& j, const Config& config) {
                        {"kcp_window_size", config.kcp_window_size},
                        {"file_hash_retry_delay_ms", config.file_hash_retry_delay_ms},
                        {"webui_port", config.webui_port},
+                       {"llm_api_url", config.llm_api_url},
+                       {"llm_api_key", config.llm_api_key},
+                       {"llm_model", config.llm_model},
                        {"tasks", config.tasks}};
 }
 
@@ -134,6 +143,12 @@ inline void from_json(const nlohmann::json& j, Config& config) {
 
     // --- 加载 WebUI 配置 (如果存在) ---
     if (j.contains("webui_port")) j.at("webui_port").get_to(config.webui_port);
+    // ---------------------------------
+
+    // --- 加载 LLM API 配置 (如果存在) ---
+    if (j.contains("llm_api_url")) j.at("llm_api_url").get_to(config.llm_api_url);
+    if (j.contains("llm_api_key")) j.at("llm_api_key").get_to(config.llm_api_key);
+    if (j.contains("llm_model")) j.at("llm_model").get_to(config.llm_model);
     // ---------------------------------
 
     j.at("tasks").get_to(config.tasks);
