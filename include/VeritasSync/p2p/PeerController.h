@@ -166,22 +166,68 @@ public:
     IceConnectionType get_connection_type() const;
     int get_kcp_wait_send() const;
     
-    // --- 同步会话状态 ---
-    
-    std::atomic<uint64_t> sync_session_id{0};
-    std::atomic<size_t> expected_file_count{0};
-    std::atomic<size_t> expected_dir_count{0};
-    std::atomic<size_t> received_file_count{0};
-    std::atomic<size_t> received_dir_count{0};
-    std::atomic<int64_t> connected_at_ts{0};  // 改为 atomic，线程安全
-    
-    /// 同步超时定时器
-    std::shared_ptr<boost::asio::steady_timer> sync_timeout_timer;
-    
+    // --- 同步会话状态（封装访问，线程安全） ---
+
+    /// 设置同步会话 ID
+    void set_sync_session_id(uint64_t id) { m_sync_session_id.store(id); }
+    /// 获取同步会话 ID
+    uint64_t get_sync_session_id() const { return m_sync_session_id.load(); }
+
+    /// 设置预期文件数量
+    void set_expected_file_count(size_t count) { m_expected_file_count.store(count); }
+    size_t get_expected_file_count() const { return m_expected_file_count.load(); }
+
+    /// 设置预期目录数量
+    void set_expected_dir_count(size_t count) { m_expected_dir_count.store(count); }
+    size_t get_expected_dir_count() const { return m_expected_dir_count.load(); }
+
+    /// 累加已接收文件数量
+    void add_received_file_count(size_t delta = 1) { m_received_file_count.fetch_add(delta); }
+    /// 重置已接收文件数量
+    void reset_received_file_count() { m_received_file_count.store(0); }
+    size_t get_received_file_count() const { return m_received_file_count.load(); }
+
+    /// 累加已接收目录数量
+    void add_received_dir_count(size_t delta = 1) { m_received_dir_count.fetch_add(delta); }
+    /// 重置已接收目录数量
+    void reset_received_dir_count() { m_received_dir_count.store(0); }
+    size_t get_received_dir_count() const { return m_received_dir_count.load(); }
+
+    /// 获取连接时间戳
+    int64_t get_connected_at_ts() const { return m_connected_at_ts.load(); }
+
+    /**
+     * @brief 启动同步超时定时器（线程安全）
+     * 
+     * 在 m_mutex 保护下创建 steady_timer 并设置异步等待，
+     * 消除与 close() 之间的数据竞争。
+     * @param timeout_seconds 超时秒数
+     * @param callback 超时回调
+     */
+    void start_sync_timeout(int timeout_seconds,
+                            std::function<void(const boost::system::error_code&)> callback);
+
+    /**
+     * @brief 刷新同步超时定时器（线程安全）
+     * 
+     * 如果定时器存在且 session_id 匹配，重新设置超时时间。
+     * @param session_id 期望的会话 ID
+     * @param timeout_seconds 新的超时秒数
+     * @return true 如果成功刷新
+     */
+    bool refresh_sync_timeout(uint64_t session_id, int timeout_seconds);
+
+    /**
+     * @brief 检查同步超时定时器是否为空（线程安全）
+     */
+    bool has_sync_timeout_timer() const;
+
     // --- 断点续传相关 ---
-    
-    /// 是否收到过 goodbye 消息（标记对端是主动退出而非掉线）
-    std::atomic<bool> is_graceful_shutdown{false};
+
+    /// 标记对端主动退出（收到 goodbye）
+    void set_graceful_shutdown(bool value) { m_is_graceful_shutdown.store(value); }
+    /// 是否收到过 goodbye 消息
+    bool is_graceful_shutdown() const { return m_is_graceful_shutdown.load(); }
     
     /**
      * @brief 强制刷新 KCP 发送缓冲区
@@ -240,7 +286,19 @@ private:
     std::atomic<bool> m_closed{false};             // C-1: 替代 m_is_valid，close() 后为 true
     std::atomic<bool> m_kcp_initialized{false};  // 防止重复初始化
     
-    mutable std::mutex m_mutex;  // 保护 m_ice 和 m_kcp
+    mutable std::mutex m_mutex;  // 保护 m_ice、m_kcp 和 m_sync_timeout_timer
+    
+    // --- 同步会话状态（private）---
+    std::atomic<uint64_t> m_sync_session_id{0};
+    std::atomic<size_t>   m_expected_file_count{0};
+    std::atomic<size_t>   m_expected_dir_count{0};
+    std::atomic<size_t>   m_received_file_count{0};
+    std::atomic<size_t>   m_received_dir_count{0};
+    std::atomic<int64_t>  m_connected_at_ts{0};
+    std::atomic<bool>     m_is_graceful_shutdown{false};
+    
+    /// 同步超时定时器（非 atomic shared_ptr，所有访问必须持有 m_mutex）
+    std::shared_ptr<boost::asio::steady_timer> m_sync_timeout_timer;
 };
 
 } // namespace VeritasSync

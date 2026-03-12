@@ -200,14 +200,18 @@ void PeerController::close() {
     m_closed.store(true);
     m_state.store(PeerState::Disconnected);
     
+    // A-6 修复：所有资源释放统一在 m_mutex 保护下进行
+    // sync_timeout_timer 是 shared_ptr（非 atomic），必须在锁内操作
+    // 防止与 io_context 线程中 SyncSession::handle_sync_begin 对 timer 的赋值产生数据竞争
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
     // 取消同步超时定时器
-    if (sync_timeout_timer) {
-        sync_timeout_timer->cancel();
-        sync_timeout_timer.reset();
+    if (m_sync_timeout_timer) {
+        m_sync_timeout_timer->cancel();
+        m_sync_timeout_timer.reset();
     }
     
     // 释放资源
-    std::lock_guard<std::mutex> lock(m_mutex);
     m_kcp.reset();
     m_ice.reset();
     m_kcp_initialized.store(false);
@@ -316,7 +320,7 @@ void PeerController::on_ice_state_changed(IceState state) {
             
             // 记录连接时间
             auto now = std::chrono::system_clock::now();
-            connected_at_ts.store(
+            m_connected_at_ts.store(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     now.time_since_epoch()).count());
         }
@@ -455,6 +459,41 @@ void PeerController::setup_kcp_session() {
         g_logger->info("[PeerController] KCP session created for {} <-> {} with conv {} (offer_side={})", 
                        m_self_id, m_peer_id, conv, m_is_offer_side);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// A-6: 同步超时定时器封装（线程安全）
+// ═══════════════════════════════════════════════════════════════
+
+void PeerController::start_sync_timeout(
+    int timeout_seconds,
+    std::function<void(const boost::system::error_code&)> callback) {
+    
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    // 取消旧的定时器（如果有）
+    if (m_sync_timeout_timer) {
+        m_sync_timeout_timer->cancel();
+    }
+    
+    m_sync_timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
+    m_sync_timeout_timer->expires_after(std::chrono::seconds(timeout_seconds));
+    m_sync_timeout_timer->async_wait(std::move(callback));
+}
+
+bool PeerController::refresh_sync_timeout(uint64_t session_id, int timeout_seconds) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    if (m_sync_session_id.load() == session_id && m_sync_timeout_timer) {
+        m_sync_timeout_timer->expires_after(std::chrono::seconds(timeout_seconds));
+        return true;
+    }
+    return false;
+}
+
+bool PeerController::has_sync_timeout_timer() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_sync_timeout_timer != nullptr;
 }
 
 } // namespace VeritasSync
