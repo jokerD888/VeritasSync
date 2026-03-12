@@ -160,6 +160,35 @@ private:
         std::chrono::steady_clock::time_point last_active = std::chrono::steady_clock::now();
     };
 
+    // C-2 超长函数拆分：handle_chunk 的子步骤
+
+    /// handle_chunk 解析二进制头部并解压数据
+    struct ChunkHeader {
+        std::string file_path;
+        uint32_t chunk_index = 0;
+        uint32_t total_chunks = 0;
+        std::string uncompressed_data;
+        bool valid = false;
+    };
+    static ChunkHeader parse_chunk_payload(const std::string& payload);
+
+    /// handle_chunk 查找/创建 ReceivingFile 条目（短暂全局锁内）
+    struct ChunkLookupResult {
+        std::shared_ptr<ReceivingFile> recv_ptr;
+        bool need_open_stream = false;
+        bool need_create_dirs = false;
+        std::filesystem::path full_path;
+        std::filesystem::path temp_path;
+    };
+    ChunkLookupResult lookup_or_create_receiving(const std::string& file_path_str,
+                                                  uint32_t total_chunks,
+                                                  const std::string& peer_id);
+
+    /// handle_chunk 完成接收后的收尾（rename / hash / 记录）
+    void finalize_received_file(const std::string& file_path_str,
+                                std::shared_ptr<ReceivingFile>& recv_ptr,
+                                const std::string& peer_id);
+
     // 正在接收的文件映射 (Path -> State)
     // C-2: 使用 shared_ptr 因为 ReceivingFile 含 std::mutex 不可移动
     std::map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
