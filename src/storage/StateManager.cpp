@@ -26,6 +26,9 @@ namespace VeritasSync {
     // 最小间隔：两次批量处理之间的最小间隔（毫秒），避免过于频繁触发
     static constexpr int64_t MIN_BATCH_INTERVAL_MS = 1000;
 
+    // 防抖定时器延迟（毫秒）
+    static constexpr int DEBOUNCE_DELAY_MS = 5000;
+
     // UpdateListener 现在更简单了
     // 它只负责通知 StateManager 发生了变化，并处理防抖
     class UpdateListener : public efsw::FileWatchListener {
@@ -72,7 +75,7 @@ namespace VeritasSync {
             // 3. 如果没有触发阈值，则使用正常的防抖定时器
             if (!triggered) {
                 m_debounce_timer.cancel();
-                m_debounce_timer.expires_after(std::chrono::milliseconds(5000));
+                m_debounce_timer.expires_after(std::chrono::milliseconds(DEBOUNCE_DELAY_MS));
 
                 // 计时器触发后，调用 StateManager 的处理函数
                 m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
@@ -231,6 +234,8 @@ namespace VeritasSync {
     }
 
     // --- 由 UpdateListener 定时器调用 ---
+    // B-1 锁粒度优化：将 I/O、哈希计算、数据库操作移到锁外执行，
+    // 仅在更新内存映射时短暂持锁，避免秒级阻塞其他线程。
     void StateManager::process_debounced_changes() {
         std::unordered_set<std::string> changes_to_process;
         {
@@ -241,18 +246,8 @@ namespace VeritasSync {
         if (changes_to_process.empty()) return;
 
         std::unordered_set<std::string> failed_changes;
-        
-        // 【阶段1优化】批量收集变更
-        std::vector<FileInfo> file_updates;
-        std::vector<std::string> file_deletes;
-        std::vector<std::string> dir_creates;
-        std::vector<std::string> dir_deletes;
 
-        std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
-        std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
-
-        // --- 优化：按需重载规则 ---
-        // 只有当变动列表中包含 .veritasignore 时才重载正则，避免昂贵的重复编译
+        // --- 优化：按需重载规则（无锁，仅操作 m_file_filter）---
         bool need_reload_filter = false;
         for (const auto& full_path_str : changes_to_process) {
             if (full_path_str.find(".veritasignore") != std::string::npos) {
@@ -265,9 +260,29 @@ namespace VeritasSync {
             m_file_filter.load_rules(m_root_path);
         }
 
-        // --- 开启事务 ---
-        // 使用新实现的 TransactionGuard 替代旧的手动 begin/commit
-        Database::TransactionGuard trans_guard(*m_db); 
+        // ═══════════════════════════════════════════════════════════
+        // Phase 1（无锁）：执行所有 I/O 密集操作 — 路径解析、文件属性读取、
+        //   SHA256 哈希计算。结果收集到临时容器中。
+        // ═══════════════════════════════════════════════════════════
+
+        // 中间结果容器
+        struct FileUpdateResult {
+            FileInfo info;
+            bool is_echo = false;  // 回声标记（需要在锁内判定）
+        };
+
+        struct DeleteCheckResult {
+            std::string rel_path;
+            enum Type { Unknown, FileDelete, DirDelete } type = Unknown;
+        };
+
+        struct DirCreateResult {
+            std::string rel_path;
+        };
+
+        std::vector<FileUpdateResult> file_update_results;
+        std::vector<DeleteCheckResult> delete_check_results;
+        std::vector<DirCreateResult> dir_create_results;
 
         for (const auto& full_path_str : changes_to_process) {
             try {
@@ -282,7 +297,7 @@ namespace VeritasSync {
                     continue;
                 }
 
-                const std::u8string u8_path_str = relative_path.generic_u8string(); // 👈 使用 generic 确保统一使用 '/'
+                const std::u8string u8_path_str = relative_path.generic_u8string();
                 std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
 
                 if (m_file_filter.should_ignore(rel_path_str)) {
@@ -292,7 +307,7 @@ namespace VeritasSync {
 
                 if (std::filesystem::exists(full_path, ec) && !ec) {
                     if (std::filesystem::is_regular_file(full_path, ec) && !ec) {
-                        // --- 文件更新 ---
+                        // --- 文件更新：无锁执行 I/O 和哈希 ---
                         FileInfo info;
                         info.path = rel_path_str;
 
@@ -305,56 +320,42 @@ namespace VeritasSync {
                         auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(ftime);
                         info.modified_time = sctp.time_since_epoch().count();
 
-                        info.hash = Hashing::CalculateSHA256_MMIO(full_path);
-                        if (info.hash.empty()) {
-                            g_logger->warn("[StateManager] 哈希计算失败 (可能被锁定) {}. 稍后重试。", rel_path_str);
-                            failed_changes.insert(full_path_str);
-                            continue;
+                        // ⑥ mtime 预检：如果数据库中已有该文件且 mtime 未变，
+                        // 直接复用缓存的 hash，跳过昂贵的 SHA256 计算。
+                        // （与 scan_directory 中的缓存策略一致）
+                        bool need_hash = true;
+                        if (m_db) {
+                            auto cached = m_db->get_file(rel_path_str);
+                            if (cached && static_cast<uint64_t>(cached->mtime) == info.modified_time) {
+                                info.hash = cached->hash;
+                                need_hash = false;
+                                g_logger->debug("[{}] [StateManager] mtime 未变，跳过哈希: {}", m_sync_key, rel_path_str);
+                            }
                         }
-                        
+
+                        if (need_hash) {
+                            info.hash = Hashing::CalculateSHA256_MMIO(full_path);
+                            if (info.hash.empty()) {
+                                g_logger->warn("[StateManager] 哈希计算失败 (可能被锁定) {}. 稍后重试。", rel_path_str);
+                                failed_changes.insert(full_path_str);
+                                continue;
+                            }
+                        }
+
                         // 【断点续传】获取文件大小
                         info.size = std::filesystem::file_size(full_path, ec);
                         if (ec) {
-                            info.size = 0;  // 获取失败时设为 0
+                            info.size = 0;
                         }
 
-                        // 更新内存
-                        m_file_map[info.path] = info;
-
-                        // 更新数据库
-                        if (m_db) m_db->update_file(info.path, info.hash, info.modified_time);
-
-                        // 【源头抑制】检查是否为接收文件的回声
-                        if (check_and_clear_echo(info.path, info.hash)) {
-                            continue;  // 跳过广播，不加入 file_updates
-                        }
-
-                        // 【阶段1优化】收集而非立即广播
-                        file_updates.push_back(info);
-                        g_logger->debug("[{}] [StateManager] 收集文件更新: {}", m_sync_key, info.path);
+                        file_update_results.push_back({std::move(info), false});
 
                     } else if (std::filesystem::is_directory(full_path, ec) && !ec) {
-                        if (m_dir_map.find(rel_path_str) == m_dir_map.end()) {
-                            m_dir_map.insert(rel_path_str);
-                            // 【阶段1优化】收集而非立即广播
-                            dir_creates.push_back(rel_path_str);
-                            g_logger->debug("[{}] [StateManager] 收集目录创建: {}", m_sync_key, rel_path_str);
-                        }
+                        dir_create_results.push_back({std::move(rel_path_str)});
                     }
                 } else {
-                    // --- 文件删除 ---
-                    if (m_file_map.erase(rel_path_str) > 0) {
-                        // 从数据库删除
-                        if (m_db) m_db->remove_file(rel_path_str);
-
-                        // 【阶段1优化】收集而非立即广播
-                        file_deletes.push_back(rel_path_str);
-                        g_logger->debug("[{}] [StateManager] 收集文件删除: {}", m_sync_key, rel_path_str);
-                    } else if (m_dir_map.erase(rel_path_str) > 0) {
-                        // 【阶段1优化】收集而非立即广播
-                        dir_deletes.push_back(rel_path_str);
-                        g_logger->debug("[{}] [StateManager] 收集目录删除: {}", m_sync_key, rel_path_str);
-                    }
+                    // --- 文件/目录删除：先记录，锁内判定类型 ---
+                    delete_check_results.push_back({std::move(rel_path_str), DeleteCheckResult::Unknown});
                 }
             } catch (const std::exception& e) {
                 g_logger->error("[{}] [StateManager] 处理变更异常: {} ({}) - 将重试", m_sync_key, full_path_str, e.what());
@@ -362,8 +363,94 @@ namespace VeritasSync {
             }
         }
 
-        // --- 提交事务 ---
-        trans_guard.commit();
+        // ═══════════════════════════════════════════════════════════
+        // Phase 2（短锁）：批量更新内存映射（m_file_map / m_dir_map）
+        //   仅执行内存操作，不做 I/O。
+        // ═══════════════════════════════════════════════════════════
+
+        // 批量广播收集容器
+        std::vector<FileInfo> file_updates;
+        std::vector<std::string> file_deletes;
+        std::vector<std::string> dir_creates;
+        std::vector<std::string> dir_deletes;
+
+        {
+            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
+            std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
+
+            // 处理文件更新
+            for (auto& result : file_update_results) {
+                m_file_map[result.info.path] = result.info;
+
+                // 【源头抑制】检查是否为接收文件的回声
+                if (check_and_clear_echo(result.info.path, result.info.hash)) {
+                    result.is_echo = true;
+                    continue;
+                }
+
+                file_updates.push_back(result.info);
+                g_logger->debug("[{}] [StateManager] 收集文件更新: {}", m_sync_key, result.info.path);
+            }
+
+            // 处理目录创建
+            for (const auto& result : dir_create_results) {
+                if (m_dir_map.find(result.rel_path) == m_dir_map.end()) {
+                    m_dir_map.insert(result.rel_path);
+                    dir_creates.push_back(result.rel_path);
+                    g_logger->debug("[{}] [StateManager] 收集目录创建: {}", m_sync_key, result.rel_path);
+                }
+            }
+
+            // 处理文件/目录删除（需要在锁内查询归属）
+            for (auto& result : delete_check_results) {
+                if (m_file_map.erase(result.rel_path) > 0) {
+                    result.type = DeleteCheckResult::FileDelete;
+                    file_deletes.push_back(result.rel_path);
+                    g_logger->debug("[{}] [StateManager] 收集文件删除: {}", m_sync_key, result.rel_path);
+                } else if (m_dir_map.erase(result.rel_path) > 0) {
+                    result.type = DeleteCheckResult::DirDelete;
+                    dir_deletes.push_back(result.rel_path);
+                    g_logger->debug("[{}] [StateManager] 收集目录删除: {}", m_sync_key, result.rel_path);
+                }
+            }
+        }
+        // --- 锁已释放 ---
+
+        // ═══════════════════════════════════════════════════════════
+        // Phase 3（无锁）：数据库持久化 + 触发回调
+        // ═══════════════════════════════════════════════════════════
+
+        if (m_db) {
+            Database::TransactionGuard trans_guard(*m_db);
+            bool db_ok = true;
+
+            // 写入文件更新（包括回声文件，也需要持久化到数据库）
+            for (const auto& result : file_update_results) {
+                if (!m_db->update_file(result.info.path, result.info.hash, result.info.modified_time)) {
+                    g_logger->error("[{}] [StateManager] 持久化文件更新失败: {}", m_sync_key, result.info.path);
+                    db_ok = false;
+                    break;
+                }
+            }
+
+            // 删除已移除的文件
+            if (db_ok) {
+                for (const auto& result : delete_check_results) {
+                    if (result.type == DeleteCheckResult::FileDelete) {
+                        if (!m_db->remove_file(result.rel_path)) {
+                            g_logger->error("[{}] [StateManager] 持久化文件删除失败: {}", m_sync_key, result.rel_path);
+                            db_ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (db_ok) {
+                trans_guard.commit();
+            }
+            // db_ok == false 时 TransactionGuard 析构自动 rollback
+        }
 
         // 【解耦】通过回调通知外部变更，StateManager 不再知道 P2PManager 的存在
         if (!file_updates.empty()) {
@@ -593,7 +680,9 @@ namespace VeritasSync {
             }
         }
         
-        // Phase 3: 批量更新内存映射和数据库
+        // Phase 3a（短锁）：仅更新内存映射，收集需要写数据库的脏数据
+        // B-2 锁粒度优化：数据库事务移到锁外执行
+        std::vector<FileInfo> db_dirty_entries;
         {
             std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
             std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
@@ -604,21 +693,7 @@ namespace VeritasSync {
             // 更新目录
             m_dir_map = std::move(pending_dirs);
             
-            // 准备数据库批量更新
-            std::vector<FileInfo> db_batch_updates;
-            const size_t BATCH_SIZE = 500; // 调大窗口，平衡性能与锁定时间
-            
-            auto flush_to_db = [&]() {
-                if (db_batch_updates.empty()) return;
-                // 真正的窗口化提交：在这里开启事务，执行完立即提交释放锁
-                Database::TransactionGuard window_guard(*m_db);
-                for (const auto& f : db_batch_updates) {
-                    m_db->update_file(f.path, f.hash, f.modified_time);
-                }
-                window_guard.commit();
-                db_batch_updates.clear();
-            };
-
+            // 更新文件映射，同时收集脏条目
             for (auto& pf : pending_files) {
                 if (!pf.cached_hash.empty()) {
                     FileInfo info;
@@ -630,16 +705,33 @@ namespace VeritasSync {
                     m_file_map[info.path] = info;
                     
                     if (pf.is_dirty) {
-                        db_batch_updates.push_back(info);
-                    }
-                    
-                    if (db_batch_updates.size() >= BATCH_SIZE) {
-                        flush_to_db();
+                        db_dirty_entries.push_back(info);
                     }
                 }
             }
-            // 提交最后一批不满 BATCH_SIZE 的数据
-            flush_to_db();
+        }
+        // --- 锁已释放 ---
+        
+        // Phase 3b（无锁）：数据库批量写入
+        if (m_db && !db_dirty_entries.empty()) {
+            constexpr size_t DB_BATCH_WRITE_SIZE = 500;
+            
+            for (size_t i = 0; i < db_dirty_entries.size(); i += DB_BATCH_WRITE_SIZE) {
+                size_t end = std::min(i + DB_BATCH_WRITE_SIZE, db_dirty_entries.size());
+                Database::TransactionGuard window_guard(*m_db);
+                bool window_ok = true;
+                for (size_t j = i; j < end; ++j) {
+                    const auto& f = db_dirty_entries[j];
+                    if (!m_db->update_file(f.path, f.hash, f.modified_time)) {
+                        g_logger->error("[StateManager] scan_directory 批量写入失败: {}", f.path);
+                        window_ok = false;
+                        break;
+                    }
+                }
+                if (window_ok) {
+                    window_guard.commit();
+                }
+            }
         }
         
         // Phase 4: 清理数据库中的僵尸记录 (文件在磁盘已删但库里还有)
@@ -659,10 +751,17 @@ namespace VeritasSync {
             if (!paths_to_remove.empty()) {
                 g_logger->info("[StateManager] 正在清理 {} 个数据库僵尸记录...", paths_to_remove.size());
                 Database::TransactionGuard cleanup_guard(*m_db);
+                bool cleanup_ok = true;
                 for (const auto& p : paths_to_remove) {
-                    m_db->remove_file(p);
+                    if (!m_db->remove_file(p)) {
+                        g_logger->error("[StateManager] 清理僵尸记录失败: {}", p);
+                        cleanup_ok = false;
+                        break;
+                    }
                 }
-                cleanup_guard.commit();
+                if (cleanup_ok) {
+                    cleanup_guard.commit();
+                }
             }
         }
         
