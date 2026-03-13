@@ -30,9 +30,11 @@ public:
     /**
      * @param io_context    事件循环引用
      * @param collect_peers 获取已连接 Peer 列表的回调
+     * @param initial_interval_ms 初始更新间隔（毫秒），默认 20ms
      */
     KcpScheduler(boost::asio::io_context& io_context,
-                 CollectPeersFunc collect_peers);
+                 CollectPeersFunc collect_peers,
+                 uint32_t initial_interval_ms = 20);
 
     /// 启动 KCP 更新定时器
     void start();

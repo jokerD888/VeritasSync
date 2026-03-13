@@ -313,7 +313,5 @@ TEST(SyncSessionProtocol, AllProtocolTypes_NotEmpty) {
     EXPECT_NE(std::string(Protocol::TYPE_DIR_BATCH), "");
     EXPECT_NE(std::string(Protocol::TYPE_DIR_CREATE), "");
     EXPECT_NE(std::string(Protocol::TYPE_DIR_DELETE), "");
-    EXPECT_NE(std::string(Protocol::TYPE_HEARTBEAT), "");
-    EXPECT_NE(std::string(Protocol::TYPE_HEARTBEAT_ACK), "");
     EXPECT_NE(std::string(Protocol::TYPE_GOODBYE), "");
 }

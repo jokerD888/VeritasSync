@@ -161,7 +161,7 @@ TEST_F(TransferManagerTest, ReceiveBasic) {
 // ═══════════════════════════════════════════════════════════════
 TEST_F(TransferManagerTest, ReceiveMultiChunk) {
     const std::string file_path = "multi_chunk.bin";
-    const size_t chunk_size = TransferManager::CHUNK_DATA_SIZE;
+    const size_t chunk_size = TransferManager::DEFAULT_CHUNK_DATA_SIZE;
 
     // 构造 3 个 chunk 的数据
     std::string chunk0(chunk_size, 'A');
@@ -257,7 +257,7 @@ TEST_F(TransferManagerTest, ResumeEligibility_CanResume) {
     tm->register_expected_metadata(path, "peer_1", "same_hash", 50000);
 
     // 发送第一个 chunk（不完成整个传输）
-    std::string chunk_data(TransferManager::CHUNK_DATA_SIZE, 'R');
+    std::string chunk_data(TransferManager::DEFAULT_CHUNK_DATA_SIZE, 'R');
     tm->handle_chunk(build_chunk_payload(path, 0, 4, chunk_data), "peer_1");
     drain_workers(2000);
 
@@ -314,7 +314,7 @@ TEST_F(TransferManagerTest, CancelReceivesForPeer) {
 // ═══════════════════════════════════════════════════════════════
 TEST_F(TransferManagerTest, ConnectionLostDuringSend) {
     // 创建一个足够大的文件（多于 1 chunk）
-    create_dummy_file("disconnect_test.bin", TransferManager::CHUNK_DATA_SIZE * 3);
+    create_dummy_file("disconnect_test.bin", TransferManager::DEFAULT_CHUNK_DATA_SIZE * 3);
 
     // 设置 send_cb 返回 -1，模拟连接断开
     last_send_return = -1;

@@ -10,6 +10,7 @@
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/common/PathUtils.h"
 #include "VeritasSync/net/BinaryFrame.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/storage/StateManager.h"
@@ -23,6 +24,10 @@ static constexpr int  FILE_OPEN_EMFILE_DELAY_MS   = 1000;   // 文件句柄耗�
 static constexpr int  STALL_THRESHOLD_MS          = 5000;   // 传输停滞判定阈值（毫秒）
 static constexpr int  ZOMBIE_THRESHOLD_SECONDS    = 10;     // 僵尸任务判定阈值（秒）
 static constexpr int  RECEIVE_TIMEOUT_MINUTES     = 10;     // 接收超时关闭文件流阈值（分钟）
+static constexpr int  CONGESTION_WAIT_HIGH_MS     = 200;    // 高积压时流控等待（毫秒）
+static constexpr int  CONGESTION_WAIT_LOW_MS      = 100;    // 低积压时流控等待（毫秒）
+static constexpr int  CONGESTION_HIGH_MULTIPLIER  = 4;      // 高积压判定倍数
+static constexpr double SPEED_UPDATE_INTERVAL_SEC = 0.5;    // 速度更新间隔（秒）
 
 // --- 上传任务上下文 (用于异步管理状态) ---
 struct UploadContext {
@@ -41,10 +46,14 @@ struct UploadContext {
 
     // 流控阈值：当 KCP 发送队列超过此值时触发流控等待
     // 注意：旧版本 (b1148f9) 使用 1024，新版本因锁层次增加，需要更早触发流控
-    const int CONGESTION_THRESHOLD = 256;
+    static constexpr int CONGESTION_THRESHOLD = 256;
 
-    UploadContext(boost::asio::io_context& ioc) : timer(ioc), buffer(TransferManager::CHUNK_DATA_SIZE) {
-        compressed_data.reserve(TransferManager::CHUNK_DATA_SIZE * 2);
+    // 运行时 chunk 大小
+    size_t chunk_data_size;
+
+    UploadContext(boost::asio::io_context& ioc, size_t chunk_size) 
+        : timer(ioc), buffer(chunk_size), chunk_data_size(chunk_size) {
+        compressed_data.reserve(chunk_size * 2);
     }
 };
 
@@ -54,8 +63,10 @@ TransferManager::SessionStats TransferManager::get_session_stats() const {
     return {m_session_total.load(), m_session_done.load()};
 }
 TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
-                                 boost::asio::thread_pool& pool, SendCallback send_cb)
-    : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)) {}
+                                 boost::asio::thread_pool& pool, SendCallback send_cb,
+                                 size_t chunk_size)
+    : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)),
+      CHUNK_DATA_SIZE(chunk_size) {}
 
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
@@ -84,7 +95,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     if (!m_state_manager) return;
 
     // 创建上下文，持有 io_context 用于定时器
-    auto ctx = std::make_shared<UploadContext>(m_io_context);
+    auto ctx = std::make_shared<UploadContext>(m_io_context, CHUNK_DATA_SIZE);
     ctx->peer_id = peer_id;
     ctx->path = requested_path_str;
 
@@ -192,7 +203,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 if (ctx->total_chunks == 0) {
                     ctx->file.seekg(0, std::ios::end);
                     std::streamsize size = ctx->file.tellg();
-                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + TransferManager::CHUNK_DATA_SIZE - 1) / TransferManager::CHUNK_DATA_SIZE) : 1;
+                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + ctx->chunk_data_size - 1) / ctx->chunk_data_size) : 1;
                     
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                     if (self->m_sending_files.count(ctx->path)) {
@@ -201,12 +212,12 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 }
                 
                 // 定位并继续
-                ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * TransferManager::CHUNK_DATA_SIZE, std::ios::beg);
+                ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * ctx->chunk_data_size, std::ios::beg);
             }
             // 使用 while 循环来处理非阻塞的情况，提高效率
             while (ctx->current_chunk < ctx->total_chunks) {
                 // 读取数据
-                ctx->file.read(ctx->buffer.data(), CHUNK_DATA_SIZE);
+                ctx->file.read(ctx->buffer.data(), ctx->chunk_data_size);
                 std::streamsize bytes_read = ctx->file.gcount();
 
                 // 压缩
@@ -215,8 +226,9 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
                 // 组包
                 std::string packet_payload;
-                // 预估大小：PathLen(2) + Path(N) + Idx(4) + Total(4) + Data(M)
-                packet_payload.reserve(12 + ctx->path.length() + ctx->compressed_data.length());
+                // 预估大小：PathLen(2) + Path(N) + ChunkIdx(4) + TotalChunks(4) + CompressedData(M)
+                static constexpr size_t CHUNK_HEADER_OVERHEAD = 2 + 4 + 4;  // PathLen + ChunkIdx + TotalChunks
+                packet_payload.reserve(CHUNK_HEADER_OVERHEAD + ctx->path.length() + ctx->compressed_data.length());
 
                 append_uint16(packet_payload, static_cast<uint16_t>(ctx->path.length()));
                 packet_payload.append(ctx->path);
@@ -265,7 +277,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
                     // 增加等待时间，给 KCP 更多时间消耗发送队列
                     // 新版本锁层次增加，需要更长的等待时间
-                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * 4) ? 200 : 100;
+                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * CONGESTION_HIGH_MULTIPLIER) ? CONGESTION_WAIT_HIGH_MS : CONGESTION_WAIT_LOW_MS;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
                     ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
                         if (!ec) {
@@ -335,6 +347,13 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
     const std::string& peer_id) {
 
     ChunkLookupResult result;
+
+    // 【安全】路径遍历攻击防护：验证网络传入的路径不会逃逸出同步根目录
+    if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), file_path_str)) {
+        g_logger->error("[Transfer] ⚠️ 路径安全检查失败，拒绝接收: {}", file_path_str);
+        return result;  // result.recv_ptr 为 nullptr，上层会跳过
+    }
+
     std::lock_guard<std::mutex> map_lock(m_transfer_mutex);
 
     auto it = m_receiving_files.find(file_path_str);
@@ -351,6 +370,8 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
 
         new_file->temp_path = PathToUtf8(result.temp_path);
         new_file->total_chunks = total_chunks;
+        // 【修复】初始化 bitmap 用于去重
+        new_file->received_bitmap.resize(total_chunks, false);
         new_file->peer_id = peer_id;
         new_file->busy = true;
         result.need_create_dirs = result.full_path.has_parent_path();
@@ -418,6 +439,7 @@ void TransferManager::finalize_received_file(
 
 void TransferManager::handle_chunk(const std::string& payload, const std::string& peer_id) {
     boost::asio::post(m_worker_pool, [self = shared_from_this(), payload, peer_id]() {
+        std::shared_ptr<ReceivingFile> recv_ptr;  // 提到 try 外部，供 catch 块清理用
         try {
             // 阶段 0: 解析头部 + Snappy 解压（无锁）
             auto hdr = parse_chunk_payload(payload);
@@ -425,7 +447,7 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
 
             // 阶段 A: 短暂全局锁，查找/创建 ReceivingFile
             auto lookup = self->lookup_or_create_receiving(hdr.file_path, hdr.total_chunks, peer_id);
-            auto& recv_ptr = lookup.recv_ptr;
+            recv_ptr = lookup.recv_ptr;
 
             // 阶段 B: per-file 锁，执行所有 I/O 操作
             std::lock_guard<std::mutex> file_lock(recv_ptr->file_mutex);
@@ -438,6 +460,8 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
                 if (hdr.chunk_index == 0) {
                     g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", hdr.file_path);
                     recv_ptr->received_chunks = 0;
+                    // 【修复】重置 bitmap
+                    std::fill(recv_ptr->received_bitmap.begin(), recv_ptr->received_bitmap.end(), false);
                 } else {
                     g_logger->info("[Transfer] 检测到僵尸任务恢复 (断网重连): {}", hdr.file_path);
                 }
@@ -480,8 +504,21 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
                 g_logger->debug("[Transfer] 打开文件流: {}", recv_ptr->temp_path);
             }
 
+            // 【修复】使用 bitmap 去重：如果这个 chunk 已经收过，跳过写入
+            // 确保 bitmap 大小足够
+            if (recv_ptr->received_bitmap.size() <= hdr.chunk_index) {
+                recv_ptr->received_bitmap.resize(hdr.total_chunks, false);
+            }
+            if (recv_ptr->received_bitmap[hdr.chunk_index]) {
+                // 重复 chunk（KCP 重传），跳过写入但更新活跃时间
+                g_logger->debug("[Transfer] 跳过重复 chunk {}/{}: {}", 
+                               hdr.chunk_index, hdr.total_chunks, hdr.file_path);
+                recv_ptr->busy = false;
+                return;
+            }
+
             // 写入数据
-            size_t offset = static_cast<size_t>(hdr.chunk_index) * CHUNK_DATA_SIZE;
+            size_t offset = static_cast<size_t>(hdr.chunk_index) * self->CHUNK_DATA_SIZE;
             recv_ptr->file_stream.seekp(offset);
             recv_ptr->file_stream.write(hdr.uncompressed_data.data(), hdr.uncompressed_data.size());
 
@@ -498,6 +535,8 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
                 self->m_receiving_files.erase(hdr.file_path);
                 return;
             }
+            // 【修复】标记 bitmap 并递增计数器（仅新 chunk 时）
+            recv_ptr->received_bitmap[hdr.chunk_index] = true;
             recv_ptr->received_chunks++;
 
             // 阶段 C: 检查完成 → 调用收尾方法
@@ -508,8 +547,23 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
             }
         } catch (const std::exception& e) {
             g_logger->error("[Transfer] handle_chunk 异常: {}", e.what());
+            // 【修复】异常路径下必须重置 busy 标志并关闭文件流，
+            // 否则该条目将永远为 busy，cleanup_stale_buffers 和
+            // cancel_receives_for_peer 都会跳过它，导致永久僵尸和句柄泄漏
+            if (recv_ptr) {
+                if (recv_ptr->file_stream.is_open()) {
+                    recv_ptr->file_stream.close();
+                }
+                recv_ptr->busy = false;
+            }
         } catch (...) {
             g_logger->error("[Transfer] handle_chunk 未知异常");
+            if (recv_ptr) {
+                if (recv_ptr->file_stream.is_open()) {
+                    recv_ptr->file_stream.close();
+                }
+                recv_ptr->busy = false;
+            }
         }
     });
 }
@@ -525,7 +579,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
         auto& recv = *recv_ptr;
         // --- 速度计算逻辑 ---
         std::chrono::duration<double> elapsed = now - recv.last_tick_time;
-        if (elapsed.count() >= 0.5) {  // 每 500ms 更新一次速度
+        if (elapsed.count() >= SPEED_UPDATE_INTERVAL_SEC) {  // 每 500ms 更新一次速度
             uint32_t delta_chunks = recv.received_chunks - recv.last_tick_chunks;
             recv.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
             recv.last_tick_chunks = recv.received_chunks;
@@ -555,7 +609,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
     for (auto& [path, send] : m_sending_files) {
         // --- 速度计算逻辑 ---
         std::chrono::duration<double> elapsed = now - send.last_tick_time;
-        if (elapsed.count() >= 0.5) {
+        if (elapsed.count() >= SPEED_UPDATE_INTERVAL_SEC) {
             uint32_t delta_chunks = send.sent_chunks - send.last_tick_chunks;
             send.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
             send.last_tick_chunks = send.sent_chunks;

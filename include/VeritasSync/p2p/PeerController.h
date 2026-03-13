@@ -88,7 +88,8 @@ public:
         boost::asio::io_context& io_context,
         const IceConfig& ice_config,
         CryptoLayer& crypto,
-        PeerControllerCallbacks callbacks);
+        PeerControllerCallbacks callbacks,
+        const KcpConfig& kcp_config = KcpConfig{});
     
     ~PeerController();
     
@@ -247,7 +248,8 @@ private:
         const std::string& peer_id,
         boost::asio::io_context& io_context,
         CryptoLayer& crypto,
-        PeerControllerCallbacks callbacks);
+        PeerControllerCallbacks callbacks,
+        const KcpConfig& kcp_config);
     
     /// 第一阶段初始化：创建 IceTransport
     bool initialize_ice(const IceConfig& ice_config);
@@ -278,6 +280,7 @@ private:
     boost::asio::io_context& m_io_context;
     CryptoLayer& m_crypto;
     PeerControllerCallbacks m_callbacks;
+    KcpConfig m_kcp_config;  // KCP 配置（窗口大小等）
     
     std::shared_ptr<IceTransport> m_ice;
     std::shared_ptr<KcpSession> m_kcp;

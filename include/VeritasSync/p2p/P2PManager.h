@@ -24,8 +24,6 @@
 #include "VeritasSync/net/UpnpManager.h"       // UpnpManager（成员变量值类型）
 
 // === A-1 提取的子组件 ===
-#include "VeritasSync/p2p/HeartbeatService.h"  // HeartbeatService（成员变量值类型）
-#include "VeritasSync/p2p/ReconnectPolicy.h"   // ReconnectPolicy（unique_ptr）
 #include "VeritasSync/p2p/KcpScheduler.h"      // KcpScheduler（unique_ptr）
 
 // === 前向声明（替代 #include，减少编译依赖）===
@@ -67,6 +65,11 @@ public:
     void set_mode(SyncMode mode);
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
+    
+    // 【修复 #7】性能参数配置
+    void set_chunk_size(size_t chunk_size) { m_chunk_size = chunk_size; }
+    void set_kcp_window_size(uint32_t window_size) { m_kcp_window_size = window_size; }
+    void set_kcp_update_interval(uint32_t interval_ms) { m_kcp_update_interval_ms = interval_ms; }
 
     virtual ~P2PManager();
 
@@ -170,7 +173,8 @@ protected:
     
     // --- 断点续传相关 ---
     void broadcast_goodbye();
-    void wait_for_kcp_flush(int timeout_ms = 500);
+    static constexpr int GRACEFUL_SHUTDOWN_TIMEOUT_MS = 500;  // 优雅关闭等待超时
+    void wait_for_kcp_flush(int timeout_ms = GRACEFUL_SHUTDOWN_TIMEOUT_MS);
     void handle_goodbye(PeerController* from_peer);
 
 
@@ -224,13 +228,16 @@ protected:
 
     // --- A-1: 提取的子组件 ---
     std::unique_ptr<KcpScheduler> m_kcp_scheduler;          // KCP 自适应更新调度
-    std::unique_ptr<HeartbeatService> m_heartbeat_service;   // 心跳保活服务
-    std::unique_ptr<ReconnectPolicy> m_reconnect_policy;     // 重连策略管理
     // --------------------------
 
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作
     boost::asio::thread_pool m_worker_pool;
+    
+    // 【修复 #7】可配置性能参数
+    size_t m_chunk_size = 16384;             // 文件分块大小
+    uint32_t m_kcp_window_size = 256;        // KCP 窗口大小
+    uint32_t m_kcp_update_interval_ms = 20;  // KCP 更新间隔（毫秒）
 };
 
 }  // namespace VeritasSync

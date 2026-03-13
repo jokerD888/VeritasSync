@@ -14,8 +14,7 @@
 
 namespace VeritasSync {
 
-static const int GCM_IV_LEN = 12;
-static const int GCM_TAG_LEN = 16;
+// GCM_IV_LEN 和 GCM_TAG_LEN 已统一定义在 CryptoLayer.h 中
 static constexpr size_t AES256_KEY_SIZE = 32;  // E-1: AES-256 密钥长度（字节）
 
 // --- 构造/析构 ---

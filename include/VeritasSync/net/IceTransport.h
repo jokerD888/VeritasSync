@@ -200,6 +200,12 @@ private:
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
     
+    // 【安全】保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
+    std::string m_stun_host;
+    std::string m_turn_host;
+    std::string m_turn_username;
+    std::string m_turn_password;
+    
     std::atomic<IceState> m_state{IceState::New};
     std::atomic<IceConnectionType> m_connection_type{IceConnectionType::None};
     

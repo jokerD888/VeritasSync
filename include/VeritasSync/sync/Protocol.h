@@ -67,11 +67,10 @@ namespace VeritasSync {
         // --- 断点续传相关 ---
         static constexpr const char* TYPE_GOODBYE = "goodbye";  // 程序正常退出通知
         // --------------------
-        
-        // --- 心跳保活 ---
-        static constexpr const char* TYPE_HEARTBEAT = "heartbeat";      // 心跳请求
-        static constexpr const char* TYPE_HEARTBEAT_ACK = "heartbeat_ack";  // 心跳响应
-        // ----------------
+
+        // --- 同步协议常量 ---
+        static constexpr int SYNC_TIMEOUT_SECONDS = 60;  // 同步会话超时（秒）
+        // --------------------
     };
 
 }  // namespace VeritasSync

@@ -41,19 +41,25 @@ IceTransport::~IceTransport() {
 bool IceTransport::initialize(const IceConfig& config) {
     juice_config_t jconfig = {};
     
+    // 【安全】将配置字符串拷贝到成员变量，确保 c_str() 在 agent 生命周期内有效
+    m_stun_host = config.stun_host;
+    m_turn_host = config.turn_host;
+    m_turn_username = config.turn_username;
+    m_turn_password = config.turn_password;
+    
     // 配置 STUN
-    if (!config.stun_host.empty()) {
-        jconfig.stun_server_host = config.stun_host.c_str();
+    if (!m_stun_host.empty()) {
+        jconfig.stun_server_host = m_stun_host.c_str();
         jconfig.stun_server_port = config.stun_port;
     }
     
-    // TURN 配置需要静态存储（libjuice 的限制）
-    static juice_turn_server_t turn_server = {};
-    if (!config.turn_host.empty()) {
-        turn_server.host = config.turn_host.c_str();
+    // 【修复】TURN 配置改为成员变量，避免 static 导致多实例覆盖
+    juice_turn_server_t turn_server = {};
+    if (!m_turn_host.empty()) {
+        turn_server.host = m_turn_host.c_str();
         turn_server.port = config.turn_port;
-        turn_server.username = config.turn_username.c_str();
-        turn_server.password = config.turn_password.c_str();
+        turn_server.username = m_turn_username.c_str();
+        turn_server.password = m_turn_password.c_str();
         jconfig.turn_servers = &turn_server;
         jconfig.turn_servers_count = 1;
     }

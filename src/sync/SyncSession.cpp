@@ -13,7 +13,7 @@
 namespace VeritasSync {
 
 // E-1: 魔数统一为命名常量
-static constexpr int SYNC_TIMEOUT_SECONDS          = 60;    // 同步会话超时（秒）
+// SYNC_TIMEOUT_SECONDS 已统一定义在 Protocol.h (Protocol::SYNC_TIMEOUT_SECONDS)
 static constexpr int FLOW_CONTROL_THRESHOLD         = 1024;  // KCP 发送队列流控阈值
 static constexpr int FLOW_CONTROL_SLEEP_MS          = 20;    // 流控等待间隔（毫秒）
 
@@ -81,7 +81,7 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         
         // A-6: 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
         std::string peer_id = from_peer->get_peer_id();
-        from_peer->start_sync_timeout(SYNC_TIMEOUT_SECONDS,
+        from_peer->start_sync_timeout(Protocol::SYNC_TIMEOUT_SECONDS,
             [this, peer_id, session_id](const boost::system::error_code& ec) {
                 if (ec) return;  // 被取消
                 

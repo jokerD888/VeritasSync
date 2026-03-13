@@ -16,7 +16,8 @@ std::shared_ptr<PeerController> PeerController::create(
     boost::asio::io_context& io_context,
     const IceConfig& ice_config,
     CryptoLayer& crypto,
-    PeerControllerCallbacks callbacks) {
+    PeerControllerCallbacks callbacks,
+    const KcpConfig& kcp_config) {
     
     // 使用内部派生类绕过 private 构造函数
     struct PeerControllerMaker : public PeerController {
@@ -25,12 +26,13 @@ std::shared_ptr<PeerController> PeerController::create(
             const std::string& peer, 
             boost::asio::io_context& ioc, 
             CryptoLayer& cry,
-            PeerControllerCallbacks cb)
-            : PeerController(self, peer, ioc, cry, std::move(cb)) {}
+            PeerControllerCallbacks cb,
+            const KcpConfig& kcp_cfg)
+            : PeerController(self, peer, ioc, cry, std::move(cb), kcp_cfg) {}
     };
     
     auto controller = std::make_shared<PeerControllerMaker>(
-        self_id, peer_id, io_context, crypto, std::move(callbacks));
+        self_id, peer_id, io_context, crypto, std::move(callbacks), kcp_config);
     
     // 第一阶段：创建 IceTransport（但不绑定回调）
     if (!controller->initialize_ice(ice_config)) {
@@ -52,13 +54,15 @@ PeerController::PeerController(
     const std::string& peer_id,
     boost::asio::io_context& io_context,
     CryptoLayer& crypto,
-    PeerControllerCallbacks callbacks)
+    PeerControllerCallbacks callbacks,
+    const KcpConfig& kcp_config)
     : m_self_id(self_id)
     , m_peer_id(peer_id)
     , m_is_offer_side(self_id < peer_id)  // 自动判断角色
     , m_io_context(io_context)
     , m_crypto(crypto)
-    , m_callbacks(std::move(callbacks)) {
+    , m_callbacks(std::move(callbacks))
+    , m_kcp_config(kcp_config) {
 }
 
 PeerController::~PeerController() {
@@ -239,19 +243,17 @@ int PeerController::send_message(const std::string& message) {
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::update_kcp(uint32_t current_ms) {
-    // 获取 KcpSession 的 shared_ptr，在锁外使用
+    // 【修复】在锁内仅拷贝 KcpSession 的 shared_ptr
     std::shared_ptr<KcpSession> kcp;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
         if (!m_kcp) return;
-        
         kcp = m_kcp;
-        kcp->update(current_ms);
     }
-    // ⚠️ 关键修复：在锁外调用 receive()
-    // receive() 的回调 (on_message_received) 可能会调用 send_message()
-    // send_message() 需要获取 m_mutex，如果在锁内调用会死锁
+    // 在锁外执行 update() 和 receive()
+    // update() 内部会触发 on_kcp_output 回调（加密+网络I/O），不应持锁
+    // receive() 的回调可能调用 send_message()，需要获取 m_mutex
+    kcp->update(current_ms);
     kcp->receive();
 }
 
@@ -453,7 +455,7 @@ void PeerController::setup_kcp_session() {
         on_kcp_message_received(message);
     };
     
-    m_kcp = KcpSession::create(conv, std::move(kcp_callbacks));
+    m_kcp = KcpSession::create(conv, std::move(kcp_callbacks), m_kcp_config);
     
     if (m_kcp && g_logger) {
         g_logger->info("[PeerController] KCP session created for {} <-> {} with conv {} (offer_side={})", 

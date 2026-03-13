@@ -110,8 +110,9 @@ namespace VeritasSync {
         boost::asio::io_context& m_io_context;  // 外部注入的 io_context
         StateManagerCallbacks m_callbacks;       // 变更通知回调
 
-        // 文件状态的核心存储结构
-        std::map<std::string, FileInfo> m_file_map;
+    // 文件状态的核心存储结构
+    // 【优化 #10】使用 unordered_map 替代 map，查找从 O(log n) 提升到 O(1)
+    std::unordered_map<std::string, FileInfo> m_file_map;
         std::unique_ptr<Database> m_db;
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
 

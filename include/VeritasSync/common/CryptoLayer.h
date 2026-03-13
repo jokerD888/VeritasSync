@@ -11,6 +11,10 @@ typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
 
 namespace VeritasSync {
 
+// GCM 加密参数常量（统一定义，消除 CryptoLayer.cpp / P2PManager.cpp 中的重复）
+static constexpr int GCM_IV_LEN  = 12;  // AES-GCM IV 长度（字节）
+static constexpr int GCM_TAG_LEN = 16;  // AES-GCM Tag 长度（字节）
+
 class CryptoLayer {
 public:
     CryptoLayer();

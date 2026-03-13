@@ -682,18 +682,11 @@ namespace VeritasSync {
         
         // Phase 3a（短锁）：仅更新内存映射，收集需要写数据库的脏数据
         // B-2 锁粒度优化：数据库事务移到锁外执行
+        // 【修复 #6】先在锁外构建临时 map，再原子替换，避免 clear() 后其他线程读到空 map
         std::vector<FileInfo> db_dirty_entries;
         {
-            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
-            std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
-            
-            m_file_map.clear();
-            m_dir_map.clear();
-            
-            // 更新目录
-            m_dir_map = std::move(pending_dirs);
-            
-            // 更新文件映射，同时收集脏条目
+            // 在锁外预先构建新的 map
+            std::unordered_map<std::string, FileInfo> new_file_map;
             for (auto& pf : pending_files) {
                 if (!pf.cached_hash.empty()) {
                     FileInfo info;
@@ -702,13 +695,19 @@ namespace VeritasSync {
                     info.modified_time = pf.modified_time;
                     info.size = pf.file_size;  // 【断点续传】添加 size
                     
-                    m_file_map[info.path] = info;
+                    new_file_map[info.path] = info;
                     
                     if (pf.is_dirty) {
                         db_dirty_entries.push_back(info);
                     }
                 }
             }
+
+            // 短暂锁内原子替换
+            std::lock_guard<std::mutex> file_lock(m_file_map_mutex);
+            std::lock_guard<std::mutex> dir_lock(m_dir_map_mutex);
+            m_file_map = std::move(new_file_map);
+            m_dir_map = std::move(pending_dirs);
         }
         // --- 锁已释放 ---
         

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <string>
 #include <functional>
 
@@ -96,6 +97,65 @@ public:
             return std::hash<std::string>{}(lower);
         }
     };
+
+    /**
+     * @brief 验证相对路径是否安全（不逃逸出根目录）
+     * 
+     * 防止路径遍历攻击：检查 relative_path 与 root 拼接后
+     * 是否仍在 root 目录下。
+     * 
+     * 检查规则：
+     * 1. 拒绝包含 ".." 路径组件的路径（直接在字符串层面检查）
+     * 2. 拒绝绝对路径（防止覆盖 root）
+     * 3. 归一化后确认最终路径以 root 为前缀
+     * 
+     * @param root 同步根目录（必须是已存在的绝对路径）
+     * @param relative_path 来自网络的相对路径字符串
+     * @return true 路径安全，false 存在遍历风险
+     */
+    static bool is_path_safe(const std::filesystem::path& root, const std::string& relative_path) {
+        // 空路径不安全
+        if (relative_path.empty()) return false;
+
+        // 检查是否包含 ".." 组件（逐组件检查，避免被 "a..b" 误判）
+        std::filesystem::path rel(relative_path);
+        for (const auto& component : rel) {
+            if (component == "..") return false;
+        }
+        
+        // 检查是否是绝对路径（绝对路径会覆盖 root）
+        if (rel.is_absolute()) return false;
+        
+        // 最终确认：拼接后归一化，确保在 root 下
+        std::error_code ec;
+        auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+        if (ec) return false;
+        
+        auto full = std::filesystem::weakly_canonical(root / rel, ec);
+        if (ec) return false;
+        
+        // 检查 full 路径是否以 root 为前缀
+        auto root_str = canonical_root.string();
+        auto full_str = full.string();
+        
+        #ifdef _WIN32
+        // Windows 路径不区分大小写
+        std::transform(root_str.begin(), root_str.end(), root_str.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        std::transform(full_str.begin(), full_str.end(), full_str.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        #endif
+        
+        // full_str 必须以 root_str 为前缀，且紧接着是分隔符或结尾
+        if (full_str.length() < root_str.length()) return false;
+        if (full_str.compare(0, root_str.length(), root_str) != 0) return false;
+        if (full_str.length() > root_str.length()) {
+            char next_char = full_str[root_str.length()];
+            if (next_char != '/' && next_char != '\\') return false;
+        }
+        
+        return true;
+    }
 
     /**
      * @brief 检查两个路径是否相等（不区分大小写）

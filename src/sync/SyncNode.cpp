@@ -149,8 +149,17 @@ void SyncNode::start() {
 
     // 6. 配置 P2PManager
     p2p->set_role(role);
-    p2p->set_encryption_key(m_task.sync_key);
+    // 【安全修复 #16】sync_key 安全分离：
+    // Tracker 使用原始 sync_key 作为房间分组键（在 connect() 中传入）
+    // 加密密钥使用 "encrypt:" + sync_key 的派生值，避免相同字符串同时
+    // 暴露在 Tracker 明文通信和用于 AES 密钥派生
+    p2p->set_encryption_key("encrypt:" + m_task.sync_key);
     p2p->set_mode(m_task.mode);
+    
+    // 【修复 #7】将性能参数传递到实际组件
+    p2p->set_chunk_size(m_global_config.chunk_size);
+    p2p->set_kcp_window_size(m_global_config.kcp_window_size);
+    p2p->set_kcp_update_interval(m_global_config.kcp_update_interval_ms);
     
     // 记录关键配置参数
     g_logger->info("[Config] Sync Mode: {}", 
@@ -158,6 +167,7 @@ void SyncNode::start() {
     g_logger->info("[Config] File Watcher: {}", enable_watcher ? "Enabled" : "Disabled");
     g_logger->info("[Config] Chunk Size: {} bytes", m_global_config.chunk_size);
     g_logger->info("[Config] KCP Window Size: {}", m_global_config.kcp_window_size);
+    g_logger->info("[Config] KCP Update Interval: {} ms", m_global_config.kcp_update_interval_ms);
 
 
 

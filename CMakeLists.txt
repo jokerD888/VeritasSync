@@ -53,6 +53,7 @@ add_executable(veritas_sync WIN32
     src/common/TrayIcon.cpp
     src/common/Hashing.cpp
     src/common/CryptoLayer.cpp
+    src/common/Config.cpp
     src/common/Logger.cpp
     src/net/IceTransport.cpp
     src/net/KcpSession.cpp
@@ -60,8 +61,6 @@ add_executable(veritas_sync WIN32
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
-    src/p2p/HeartbeatService.cpp
-    src/p2p/ReconnectPolicy.cpp
     src/p2p/KcpScheduler.cpp
     src/p2p/WebUI.cpp
     src/storage/StateManager.cpp
@@ -242,13 +241,18 @@ add_executable(unit_tests
     tests/test_state_manager_enhanced.cpp
     tests/test_transfer_manager_async.cpp
     tests/test_transfer_manager.cpp
-    tests/test_reconnect_heartbeat.cpp
     tests/test_common_utils_robustness.cpp
     tests/test_config.cpp
     tests/test_nl_filter.cpp
     tests/test_sync_handler.cpp
     tests/test_sync_session.cpp
     tests/test_sync_node.cpp
+    tests/test_database_coverage.cpp
+    tests/test_state_manager_coverage.cpp
+    tests/test_logger_coverage.cpp
+    tests/test_binary_frame_coverage.cpp
+    tests/test_protocol_coverage.cpp
+    tests/test_transfer_manager_coverage.cpp
     
     # --- 被测试的源文件 ---
     src/sync/SyncManager.cpp 
@@ -257,6 +261,7 @@ add_executable(unit_tests
     src/sync/SyncNode.cpp
     src/common/Hashing.cpp
     src/common/CryptoLayer.cpp
+    src/common/Config.cpp
     src/common/Logger.cpp
     src/storage/Database.cpp
     src/storage/FileFilter.cpp
@@ -267,8 +272,6 @@ add_executable(unit_tests
     src/p2p/PeerController.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
-    src/p2p/HeartbeatService.cpp
-    src/p2p/ReconnectPolicy.cpp
     src/p2p/KcpScheduler.cpp
     src/storage/StateManager.cpp
     src/sync/TransferManager.cpp

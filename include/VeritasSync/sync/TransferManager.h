@@ -7,12 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace VeritasSync {
@@ -44,7 +44,8 @@ public:
 
     // 构造函数注入所有依赖
     TransferManager(StateManager* sm, boost::asio::io_context& io_context,
-                    boost::asio::thread_pool& pool, SendCallback send_cb);
+                    boost::asio::thread_pool& pool, SendCallback send_cb,
+                    size_t chunk_size = DEFAULT_CHUNK_DATA_SIZE);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
@@ -63,7 +64,10 @@ public:
 
     SessionStats get_session_stats() const;
 
-    static constexpr size_t CHUNK_DATA_SIZE = 16384;
+    // 【修复 #7】默认 chunk 大小（静态常量，向后兼容）
+    static constexpr size_t DEFAULT_CHUNK_DATA_SIZE = 16384;
+    // 运行时实际使用的 chunk 大小（从配置读取）
+    const size_t CHUNK_DATA_SIZE;
     
     // ====== 断点续传相关 ======
     
@@ -134,7 +138,10 @@ private:
         std::ofstream file_stream;
         std::string temp_path;
         uint32_t total_chunks = 0;
+        // 【修复】使用 bitset 替代简单计数器，正确处理 KCP 重传导致的重复 chunk
+        // received_chunks 仍然用于快速计数（只在新 chunk 时递增）
         uint32_t received_chunks = 0;
+        std::vector<bool> received_bitmap;  // 标记每个 chunk 是否已接收
         std::chrono::steady_clock::time_point last_active = std::chrono::steady_clock::now();
 
         uint32_t last_tick_chunks = 0;
@@ -191,9 +198,9 @@ private:
 
     // 正在接收的文件映射 (Path -> State)
     // C-2: 使用 shared_ptr 因为 ReceivingFile 含 std::mutex 不可移动
-    std::map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
+    std::unordered_map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
     std::mutex m_transfer_mutex;  // 全局锁：保护 map 结构（insert/erase/遍历）
-    std::map<std::string, SendingFile> m_sending_files;  // 追踪上传
+    std::unordered_map<std::string, SendingFile> m_sending_files;  // 追踪上传
 
     std::atomic<uint64_t> m_session_total{0};
     std::atomic<uint64_t> m_session_done{0};

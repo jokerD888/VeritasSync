@@ -8,14 +8,14 @@
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/common/PathUtils.h"
 #include "VeritasSync/p2p/PeerController.h"
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/sync/SyncManager.h"
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
-static constexpr int SYNC_TIMEOUT_SECONDS = 60;  // 同步会话超时（秒）
+// SYNC_TIMEOUT_SECONDS 已统一定义在 Protocol.h (Protocol::SYNC_TIMEOUT_SECONDS)
 
 SyncHandler::SyncHandler(StateManager* state_manager,
                          std::shared_ptr<TransferManager> transfer_manager,
@@ -72,9 +72,9 @@ SyncHandler::ConflictResult SyncHandler::resolve_conflict(
     } else if (local_changed && !remote_changed) {
         g_logger->info("[Sync] 本地版本更新，忽略远程旧版本: {} (local={}, remote={}, base={})",
                        remote_info.path,
-                       local_hash.substr(0, 6),
-                       remote_hash.substr(0, 6),
-                       base_hash.substr(0, 6));
+                       local_hash.substr(0, 8),
+                       remote_hash.substr(0, 8),
+                       base_hash.substr(0, 8));
         m_state_manager->record_sync_success(peer_id, remote_info.path, local_hash);
         return ConflictResult::NoAction;
 
@@ -149,7 +149,7 @@ void SyncHandler::refresh_peer_timeout(PeerController* from_peer) {
     boost::asio::post(m_io_context, [this, pid, sid]() {
         m_with_peer(pid, [sid](PeerController* peer) {
             // A-6: 通过封装方法刷新定时器（内部加锁，线程安全）
-            peer->refresh_sync_timeout(sid, SYNC_TIMEOUT_SECONDS);
+            peer->refresh_sync_timeout(sid, Protocol::SYNC_TIMEOUT_SECONDS);
         });
     });
 }
@@ -381,6 +381,12 @@ void SyncHandler::handle_file_delete(const nlohmann::json& payload, PeerControll
             return;
         }
 
+        // 【安全】路径遍历攻击防护
+        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
+            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝删除文件: {}", relative_path_str);
+            return;
+        }
+
         g_logger->info("[KCP] (Destination) 收到增量删除: {}", relative_path_str);
 
         std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(relative_path_str);
@@ -422,6 +428,12 @@ void SyncHandler::handle_dir_create(const nlohmann::json& payload, PeerControlle
             return;
         }
 
+        // 【安全】路径遍历攻击防护
+        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
+            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝创建目录: {}", relative_path_str);
+            return;
+        }
+
         g_logger->info("[KCP] (Destination) 收到增量目录创建: {}", relative_path_str);
 
         std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(relative_path_str);
@@ -459,6 +471,12 @@ void SyncHandler::handle_dir_delete(const nlohmann::json& payload, PeerControlle
             return;
         } catch (...) {
             g_logger->error("[KCP] 解析增量目录删除消息时发生未知异常");
+            return;
+        }
+
+        // 【安全】路径遍历攻击防护
+        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
+            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝删除目录: {}", relative_path_str);
             return;
         }
 
@@ -595,6 +613,12 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     
     boost::asio::post(m_worker_pool, [this, paths]() {
         for (const auto& relative_path_str : paths) {
+            // 【安全】路径遍历攻击防护
+            if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
+                g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过批量删除: {}", relative_path_str);
+                continue;
+            }
+
             std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(relative_path_str);
             
             std::error_code ec;
@@ -643,6 +667,12 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
         try {
             // 先处理创建
             for (const auto& dir_path_str : creates) {
+                // 【安全】路径遍历攻击防护
+                if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), dir_path_str)) {
+                    g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过创建目录: {}", dir_path_str);
+                    continue;
+                }
+
                 std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
                 
                 std::error_code ec;
@@ -659,6 +689,12 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
                       [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
             
             for (const auto& dir_path_str : sorted_deletes) {
+                // 【安全】路径遍历攻击防护
+                if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), dir_path_str)) {
+                    g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过删除目录: {}", dir_path_str);
+                    continue;
+                }
+
                 std::filesystem::path full_path = m_state_manager->get_root_path() / Utf8ToPath(dir_path_str);
                 
                 std::error_code ec;

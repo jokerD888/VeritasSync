@@ -6,10 +6,12 @@
 namespace VeritasSync {
 
 KcpScheduler::KcpScheduler(boost::asio::io_context& io_context,
-                           CollectPeersFunc collect_peers)
+                           CollectPeersFunc collect_peers,
+                           uint32_t initial_interval_ms)
     : m_io_context(io_context),
       m_timer(io_context),
       m_collect_peers(std::move(collect_peers)),
+      m_interval_ms(initial_interval_ms),
       m_last_data_time(std::chrono::steady_clock::now()) {
 }
 
