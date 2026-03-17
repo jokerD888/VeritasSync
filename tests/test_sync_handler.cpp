@@ -272,27 +272,6 @@ protected:
     }
 };
 
-TEST_F(SyncHandlerCallbackTest, HandleFileRequest_IsPlaceholder) {
-    // handle_file_request 目前是占位方法，应该不做任何操作
-    SyncHandler::SendToPeerFunc send = [this](const std::string& msg, PeerController*) {
-        std::lock_guard lk(sent_mutex);
-        sent_messages.push_back(msg);
-    };
-    SyncHandler::SendToPeerSafeFunc send_safe = [](const std::string&, const std::string&) {};
-    SyncHandler::WithPeerFunc with_peer = [](const std::string&, std::function<void(PeerController*)>) {};
-
-    SyncHandler handler(nullptr, tm, worker_pool, io_ctx,
-                        send, send_safe, with_peer);
-
-    json payload = {{"path", "request.txt"}};
-    handler.handle_file_request(payload, nullptr);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    std::lock_guard lk(sent_mutex);
-    EXPECT_TRUE(sent_messages.empty()) << "handle_file_request should be a no-op placeholder";
-}
-
 TEST_F(SyncHandlerCallbackTest, SetStateManager_NullSafety) {
     SyncHandler::SendToPeerFunc noop_send = [](const std::string&, PeerController*) {};
     SyncHandler::SendToPeerSafeFunc noop_send_safe = [](const std::string&, const std::string&) {};

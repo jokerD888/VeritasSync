@@ -334,6 +334,10 @@ DirSyncActions SyncManager::compare_dir_states(const std::set<std::string>& loca
  *        → 判定：不是冲突，直接下载远程版本
  *      - 如果 local != base：本地修改了，且已知远程也不同
  *        → 判定：冲突（基于旧版本的并发修改）
+ * 
+ * LOGIC-001: 关于哈希碰撞的说明
+ * 本函数仅基于SHA256哈希值进行冲突检测。SHA256的碰撞概率极低（约2^-256），
+ * 对于文件同步场景可以忽略不计。如需更高安全性，可额外比较文件大小或内容。
  */
 bool SyncManager::detect_conflict(
     const std::string& local_hash,

@@ -10,8 +10,8 @@ std::vector<std::string> validate_config(const Config& config) {
 
     // --- 端口范围验证 ---
     auto check_port = [&](const std::string& name, unsigned short port) {
-        if (port == 0) {
-            errors.push_back(name + " 端口不能为 0");
+        if (!is_valid_port(port)) {
+            errors.push_back(name + " 端口无效 (必须在 1-65535 之间)");
         }
     };
     check_port("tracker_port", config.tracker_port);
@@ -60,8 +60,9 @@ std::vector<std::string> validate_config(const Config& config) {
     for (size_t i = 0; i < config.tasks.size(); ++i) {
         const auto& task = config.tasks[i];
         std::string prefix = "tasks[" + std::to_string(i) + "]: ";
-        if (task.sync_key.empty()) {
-            errors.push_back(prefix + "sync_key 不能为空");
+        const std::string sync_key_error = get_sync_key_validation_error(task.sync_key);
+        if (!sync_key_error.empty()) {
+            errors.push_back(prefix + sync_key_error);
         }
         if (task.role != "source" && task.role != "destination") {
             errors.push_back(prefix + "role 必须是 'source' 或 'destination' (当前: '" + task.role + "')");
@@ -75,11 +76,24 @@ std::vector<std::string> validate_config(const Config& config) {
 }
 
 std::string generate_uuid_v4() {
-    boost::uuids::random_generator gen;
-    boost::uuids::uuid uuid = gen();
-    std::ostringstream ss;
-    ss << uuid;
-    return ss.str();
+    try {
+        boost::uuids::random_generator gen;
+        boost::uuids::uuid uuid = gen();
+        std::ostringstream ss;
+        ss << uuid;
+        return ss.str();
+    } catch (const std::exception& e) {
+        // LOGIC-002: 处理 random_generator 可能的异常（如随机数源不可用）
+        if (g_logger) {
+            g_logger->error("[Config] UUID生成失败: {}", e.what());
+        }
+        return "";
+    } catch (...) {
+        if (g_logger) {
+            g_logger->error("[Config] UUID生成失败: 未知异常");
+        }
+        return "";
+    }
 }
 
 Config load_config_or_create_default(const std::string& config_path) {
@@ -113,15 +127,9 @@ Config load_config_or_create_default(const std::string& config_path) {
             }
             
             // 使用默认配置
+            // LOGIC-004: Config{} 已包含所有默认值，只需显式设置需要动态生成的字段
             config = Config{};
-            config.device_id = generate_uuid_v4();
-            config.turn_host = "";
-            config.turn_port = 3478;
-            config.turn_username = "";
-            config.turn_password = "";
-            config.stun_host = "stun.l.google.com";
-            config.stun_port = 19302;
-            config.tasks = {};
+            config.device_id = generate_uuid_v4();  // 动态生成唯一设备ID
             need_save = true;
         }
     } else {

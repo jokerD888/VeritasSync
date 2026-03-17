@@ -31,6 +31,9 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
+    // 【修复】检查数据库是否成功初始化
+    bool is_valid() const { return m_db != nullptr; }
+
     // 获取文件的元数据 (标记为 const，因为不改变 DB 状态)
     std::optional<FileMetadata> get_file(const std::string& rel_path) const;
     std::optional<SyncHistory> get_sync_history(const std::string& peer_id, const std::string& path) const;

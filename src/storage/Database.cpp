@@ -33,9 +33,12 @@ Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.str
     rc = sqlite3_open(m_db_path.c_str(), &m_db);
 #endif
     if (rc) {
-        g_logger->error("[Database] 无法打开数据库 {}: {}", m_db_path, sqlite3_errmsg(m_db));
-        sqlite3_close(m_db);
-        m_db = nullptr;
+        g_logger->error("[Database] 无法打开数据库 {}: {}", m_db_path, 
+                        m_db ? sqlite3_errmsg(m_db) : "未知错误");
+        if (m_db) {
+            sqlite3_close(m_db);
+            m_db = nullptr;
+        }
         return;
     }
 

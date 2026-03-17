@@ -106,6 +106,9 @@ void P2PManager::broadcast_current_state() {
     if (!m_state_manager) return;
 
     boost::asio::post(m_worker_pool, [self = shared_from_this()]() {
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!self->m_state_manager) return;
+        
         self->m_state_manager->scan_directory();
         std::string json_state = self->m_state_manager->get_state_as_json_string();
 
@@ -132,36 +135,45 @@ void P2PManager::broadcast_file_update(const FileInfo& file_info) {
     nlohmann::json msg;
     msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
     msg[Protocol::MSG_PAYLOAD] = file_info;
-    send_over_kcp(msg.dump());
+    if (!send_over_kcp(msg.dump())) {
+        g_logger->warn("[P2P] 广播文件更新失败（无可用对等点）: {}", file_info.path);
+    }
 }
 
 // --- A-3: 通用路径广播辅助（消除 3 个函数的重复结构）---
-static void broadcast_path_event(SyncRole role, SyncMode mode,
+// LOGIC-003: 返回bool表示是否成功发送
+static bool broadcast_path_event(SyncRole role, SyncMode mode,
                                  const std::string& msg_type,
                                  const std::string& log_label,
                                  const std::string& relative_path,
-                                 std::function<void(const std::string&)> send_fn) {
-    if (!can_broadcast(role, mode)) return;
+                                 std::function<bool(const std::string&)> send_fn) {
+    if (!can_broadcast(role, mode)) return false;
     g_logger->info("[P2P] (Source) 广播增量{}: {}", log_label, relative_path);
     nlohmann::json msg;
     msg[Protocol::MSG_TYPE] = msg_type;
     msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
-    send_fn(msg.dump());
+    return send_fn(msg.dump());
 }
 
 void P2PManager::broadcast_file_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
-                         [this](const std::string& s){ send_over_kcp(s); });
+    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); })) {
+        g_logger->warn("[P2P] 广播文件删除失败（无可用对等点）: {}", relative_path);
+    }
 }
 
 void P2PManager::broadcast_dir_create(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
-                         [this](const std::string& s){ send_over_kcp(s); });
+    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); })) {
+        g_logger->warn("[P2P] 广播目录创建失败（无可用对等点）: {}", relative_path);
+    }
 }
 
 void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
-                         [this](const std::string& s){ send_over_kcp(s); });
+    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); })) {
+        g_logger->warn("[P2P] 广播目录删除失败（无可用对等点）: {}", relative_path);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -179,6 +191,7 @@ void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files
     g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
     
     // 分批发送
+    bool any_failed = false;
     for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
         size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
         
@@ -190,12 +203,18 @@ void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files
             msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
         }
         
-        send_over_kcp(msg.dump());
+        if (!send_over_kcp(msg.dump())) {
+            any_failed = true;
+        }
         
         g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)", 
                        (i / FILE_UPDATE_BATCH_SIZE) + 1,
                        (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
                        end - i);
+    }
+    
+    if (any_failed) {
+        g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
     }
 }
 
@@ -206,6 +225,7 @@ void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& pa
     g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
     
     // 分批发送
+    bool any_failed = false;
     for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
         size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
         
@@ -217,7 +237,13 @@ void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& pa
             msg[Protocol::MSG_PAYLOAD]["paths"].push_back(paths[j]);
         }
         
-        send_over_kcp(msg.dump());
+        if (!send_over_kcp(msg.dump())) {
+            any_failed = true;
+        }
+    }
+    
+    if (any_failed) {
+        g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
     }
 }
 
@@ -234,7 +260,9 @@ void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& cre
     msg[Protocol::MSG_PAYLOAD]["creates"] = creates;
     msg[Protocol::MSG_PAYLOAD]["deletes"] = deletes;
     
-    send_over_kcp(msg.dump());
+    if (!send_over_kcp(msg.dump())) {
+        g_logger->warn("[P2P] 广播目录变更失败（无可用对等点）");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -246,7 +274,10 @@ std::shared_ptr<P2PManager> P2PManager::create() {
         P2PManagerMaker() : P2PManager() {}
     };
     auto manager = std::make_shared<P2PManagerMaker>();
-    manager->init();
+    // 【修复 Bug A】不再在 create() 中调用 init()
+    // init() 会创建 TransferManager（使用 m_chunk_size）和 KcpScheduler（使用 m_kcp_update_interval_ms），
+    // 这些参数在 create() 时还是默认值，必须等外部调用 set_chunk_size/set_kcp_update_interval 配置完成后，
+    // 再由外部显式调用 init() 来创建子组件，否则用户的自定义配置永远不生效。
     return manager;
 }
 
@@ -497,7 +528,6 @@ void P2PManager::setup_answer_timeout(std::shared_ptr<PeerController> controller
     timeout_timer->expires_after(std::chrono::seconds(ANSWER_WAIT_TIMEOUT_SECONDS));
     timeout_timer->async_wait([weak_controller = std::weak_ptr<PeerController>(controller), 
                                peer_id, 
-                               timeout_timer,
                                self = shared_from_this()](const boost::system::error_code& ec) {
         if (ec) return;  // 定时器被取消
 
@@ -687,18 +717,23 @@ void P2PManager::handle_peer_leave(const std::string& peer_id) {
 // ═══════════════════════════════════════════════════════════════
 
 // 广播给所有连接的对等点
-void P2PManager::send_over_kcp(const std::string& msg) {
+// LOGIC-003: 返回bool表示是否至少有一个对等点成功接收
+bool P2PManager::send_over_kcp(const std::string& msg) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
 
     auto peers = collect_connected_peers();
+    bool any_sent = false;
     for (auto& controller : peers) {
-        controller->send_message(json_packet);
+        if (controller->send_message(json_packet) >= 0) {
+            any_sent = true;
+        }
     }
     if (!peers.empty()) {
         g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", peers.size(), json_packet.length());
     }
+    return any_sent;
 }
 // 发给特定对等点
 void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer) {
@@ -806,14 +841,23 @@ TransferManager::SessionStats P2PManager::get_transfer_stats() {
 }
 
 std::vector<P2PManager::PeerInfo> P2PManager::get_peers_info() {
+    // 【修复 #4阶段1】锁内只拷贝controller引用，锁外构建PeerInfo
+    std::vector<std::shared_ptr<PeerController>> controllers;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+        controllers.reserve(m_peers.size());
+        for (const auto& [peer_id, controller] : m_peers) {
+            controllers.push_back(controller);
+        }
+    } // 锁在此处释放
+    
+    // 锁外构建PeerInfo
     std::vector<PeerInfo> result;
+    result.reserve(controllers.size());
     
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    result.reserve(m_peers.size());
-    
-    for (const auto& [peer_id, controller] : m_peers) {
+    for (const auto& controller : controllers) {
         PeerInfo info;
-        info.peer_id = peer_id;
+        info.peer_id = controller->get_peer_id();
         info.connected_since = controller->get_connected_at_ts();
         
         // 转换 PeerState 到字符串
@@ -853,22 +897,24 @@ std::vector<P2PManager::PeerInfo> P2PManager::get_peers_info() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 业务逻辑处理器（已迁移到 SyncHandler）
-// ═══════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════
 // 文件传输相关
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::schedule_cleanup_task() {
     m_cleanup_timer.expires_after(std::chrono::minutes(CLEANUP_INTERVAL_MINUTES));
-    m_cleanup_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
-        if (!ec) {
+    std::weak_ptr<P2PManager> weak_self = shared_from_this();
+    m_cleanup_timer.async_wait([weak_self](const boost::system::error_code& ec) {
+        if (ec == boost::asio::error::operation_aborted) {
+            return;
+        }
+
+        if (auto self = weak_self.lock()) {
             self->cleanup_stale_buffers();
             self->schedule_cleanup_task();
         }
     });
 }
+
 
 std::vector<TransferStatus> P2PManager::get_active_transfers() {
     if (m_transfer_manager) {
@@ -882,14 +928,6 @@ void P2PManager::cleanup_stale_buffers() {
         m_transfer_manager->cleanup_stale_buffers();
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-// UPnP（已迁移到 UpnpManager）
-// ═══════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════
-// 同步会话管理（已迁移到 SyncSession）
-// ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
 // 断点续传相关方法
@@ -912,7 +950,10 @@ void P2PManager::broadcast_goodbye() {
     msg[Protocol::MSG_TYPE] = Protocol::TYPE_GOODBYE;
     msg[Protocol::MSG_PAYLOAD] = nlohmann::json::object();
     
-    std::string msg_str = msg.dump();
+    // 【修复】必须加 MSG_TYPE_JSON 前缀，否则接收端 handle_kcp_message 无法正确解析
+    std::string msg_str;
+    msg_str.push_back(MSG_TYPE_JSON);
+    msg_str.append(msg.dump());
     
     auto peers = collect_connected_peers();
     

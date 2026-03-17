@@ -242,16 +242,21 @@ void TrayIcon::set_autostart(bool enable) {
 #else
 // 非 Windows 平台的空实现 (占位)
 struct TrayIcon::Impl {};
-TrayIcon::TrayIcon() {}
+TrayIcon::TrayIcon() : m_impl(nullptr), m_running(true) {}
 TrayIcon::~TrayIcon() {}
 bool TrayIcon::init(const std::string&) { return false; }
 void TrayIcon::add_menu_item(const std::string&, VoidCallback, CheckCallback) {}
 void TrayIcon::add_separator() {}
 void TrayIcon::run_loop() {
-    // Linux/Mac 暂时用 sleep 模拟阻塞，或者后续集成 GTK tray
-    while (true) std::this_thread::sleep_for(std::chrono::seconds(1));
+    // 【修复】Linux/Mac 使用 atomic 标志控制循环退出
+    while (m_running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 }
-void TrayIcon::quit() { exit(0); }
+void TrayIcon::quit() { 
+    m_running.store(false);
+    exit(0); 
+}
 bool TrayIcon::is_autostart_enabled() { return false; }
 void TrayIcon::set_autostart(bool) {}
 #endif

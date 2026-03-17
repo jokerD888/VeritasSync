@@ -55,15 +55,17 @@ namespace VeritasSync {
             // 4. (可选) 忽略常见的系统垃圾文件，减少噪音
             if (filename == ".DS_Store" || filename == "Thumbs.db") return;
 
+            // 目录路径只转换一次，避免同一回调内重复 Utf8ToPath(dir)
+            const std::filesystem::path dir_path = Utf8ToPath(dir);
+
             if (action == efsw::Actions::Moved && !oldFilename.empty()) {
-                // 拼接路径：Utf8ToPath 确保 dir(UTF-8) 和 filename(UTF-8) 被正确解析为 path
-                std::filesystem::path old_file_path = Utf8ToPath(dir) / Utf8ToPath(oldFilename);
+                std::filesystem::path old_file_path = dir_path / Utf8ToPath(oldFilename);
 
                 // 转回 UTF-8 存入 map/数据库
                 m_owner->notify_change_detected(PathToUtf8(old_file_path));
             }
 
-            std::filesystem::path file_path = Utf8ToPath(dir) / Utf8ToPath(filename);
+            std::filesystem::path file_path = dir_path / Utf8ToPath(filename);
 
             // 1. 通知 StateManager 将变化暂存
             m_owner->notify_change_detected(PathToUtf8(file_path));
@@ -102,7 +104,8 @@ namespace VeritasSync {
           m_io_context(io_context),
           m_callbacks(std::move(callbacks)),
           m_sync_key(sync_key),
-          m_retry_timer(nullptr) {
+          // B-06: 重试计时器与 watcher 解耦，Destination+OneWay 也可用
+          m_retry_timer(std::make_unique<boost::asio::steady_timer>(m_io_context)) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
             std::error_code ec;
@@ -118,6 +121,14 @@ namespace VeritasSync {
         try {
             std::filesystem::path db_path = m_root_path / ".veritas.db";
             m_db = std::make_unique<Database>(db_path);
+            // 【修复】检查数据库是否成功初始化
+            if (!m_db->is_valid()) {
+                g_logger->error("[StateManager] 数据库初始化失败，将不使用数据库缓存");
+                m_db.reset();  // 释放无效的数据库对象
+            } else {
+                // 【修复 #1】启动时全量预加载数据库元数据到内存缓存
+                load_metadata_cache();
+            }
         } catch (const std::exception& e) {
             g_logger->error("[StateManager] 数据库初始化失败: {}", e.what());
         }
@@ -127,9 +138,6 @@ namespace VeritasSync {
             // --- 初始加载忽略规则 ---
             m_file_filter.load_rules(m_root_path);
 
-            // 初始化重试计时器
-            m_retry_timer = std::make_unique<boost::asio::steady_timer>(m_io_context);
-
             m_file_watcher = std::make_unique<efsw::FileWatcher>();
             m_listener = std::make_unique<UpdateListener>(this);
             // true表示递归监控
@@ -137,8 +145,50 @@ namespace VeritasSync {
             m_file_watcher->watch();        // 非阻塞监控
             g_logger->info("[StateManager] 已启动对目录 '{}' 的实时监控 (Source 模式)。", PathToUtf8(m_root_path));
         } else {
-            g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用。");
+            g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用（重试计时器仍可用）。");
         }
+    }
+
+    // 【修复 #1】启动时全量预加载数据库元数据到内存缓存
+    void StateManager::load_metadata_cache() {
+        if (!m_db) return;
+        
+        auto all_paths = m_db->get_all_file_paths();
+        g_logger->info("[{}] [StateManager] 正在预加载 {} 个文件的元数据到内存...", m_sync_key, all_paths.size());
+        
+        std::unique_lock lock(m_metadata_cache_mutex);
+        for (const auto& path : all_paths) {
+            auto meta = m_db->get_file(path);
+            if (meta) {
+                m_metadata_cache[path] = *meta;
+            }
+        }
+        
+        size_t memory_usage = m_metadata_cache.size() * (sizeof(FileMetadata) + 100); // 粗略估算
+        g_logger->info("[{}] [StateManager] 元数据缓存加载完成，约占用 {} MB 内存", 
+                       m_sync_key, memory_usage / 1024 / 1024);
+    }
+    
+    // 【修复 #1】从内存缓存获取文件元数据（O(1)）
+    std::optional<FileMetadata> StateManager::get_cached_file(const std::string& path) const {
+        std::shared_lock lock(m_metadata_cache_mutex);
+        auto it = m_metadata_cache.find(path);
+        if (it != m_metadata_cache.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+    
+    // 【修复 #1】更新内存缓存
+    void StateManager::update_cached_file(const std::string& path, const FileMetadata& meta) {
+        std::unique_lock lock(m_metadata_cache_mutex);
+        m_metadata_cache[path] = meta;
+    }
+    
+    // 【修复 #1】从内存缓存移除
+    void StateManager::remove_cached_file(const std::string& path) {
+        std::unique_lock lock(m_metadata_cache_mutex);
+        m_metadata_cache.erase(path);
     }
 
     StateManager::~StateManager() {
@@ -322,15 +372,13 @@ namespace VeritasSync {
 
                         // ⑥ mtime 预检：如果数据库中已有该文件且 mtime 未变，
                         // 直接复用缓存的 hash，跳过昂贵的 SHA256 计算。
-                        // （与 scan_directory 中的缓存策略一致）
+                        // 【修复 #1】使用内存缓存代替直接查询数据库
                         bool need_hash = true;
-                        if (m_db) {
-                            auto cached = m_db->get_file(rel_path_str);
-                            if (cached && static_cast<uint64_t>(cached->mtime) == info.modified_time) {
-                                info.hash = cached->hash;
-                                need_hash = false;
-                                g_logger->debug("[{}] [StateManager] mtime 未变，跳过哈希: {}", m_sync_key, rel_path_str);
-                            }
+                        auto cached = get_cached_file(rel_path_str);
+                        if (cached && static_cast<uint64_t>(cached->mtime) == info.modified_time) {
+                            info.hash = cached->hash;
+                            need_hash = false;
+                            g_logger->debug("[{}] [StateManager] mtime 未变，跳过哈希: {}", m_sync_key, rel_path_str);
                         }
 
                         if (need_hash) {
@@ -431,6 +479,9 @@ namespace VeritasSync {
                     db_ok = false;
                     break;
                 }
+                // 【修复 #1】同步更新内存缓存
+                FileMetadata meta{result.info.path, result.info.hash, result.info.modified_time};
+                update_cached_file(result.info.path, meta);
             }
 
             // 删除已移除的文件
@@ -442,6 +493,8 @@ namespace VeritasSync {
                             db_ok = false;
                             break;
                         }
+                        // 【修复 #1】同步移除内存缓存
+                        remove_cached_file(result.rel_path);
                     }
                 }
             }
@@ -507,8 +560,10 @@ namespace VeritasSync {
         // 同时也从数据库移除，保持一致性
         if (m_db) {
             m_db->remove_file(relative_path);
-            m_db->remove_sync_history(relative_path);  // 移除“僵尸”同步历史！
+            m_db->remove_sync_history(relative_path);  // 移除"僵尸"同步历史！
         }
+        // 【修复 #1】同步移除内存缓存
+        remove_cached_file(relative_path);
     }
 
     void StateManager::scan_directory() {
@@ -537,6 +592,10 @@ namespace VeritasSync {
         std::atomic<int> cache_hit_count{0};
         std::atomic<int> calc_count{0};
         
+        // 【修复】错误计数和上限，防止无限错误循环
+        size_t error_count = 0;
+        constexpr size_t MAX_ERROR_COUNT = 100;
+        
         {
             std::error_code ec;
             auto iterator = std::filesystem::recursive_directory_iterator(m_root_path, ec);
@@ -547,8 +606,19 @@ namespace VeritasSync {
             }
             
             for (const auto& entry : iterator) {
+                // 【修复】检查错误上限，避免无限错误循环
+                if (error_count >= MAX_ERROR_COUNT) {
+                    g_logger->error("[StateManager] 扫描过程中错误过多 (>{})，中止扫描", MAX_ERROR_COUNT);
+                    break;
+                }
+                
                 std::filesystem::path relative_path = std::filesystem::relative(entry.path(), m_root_path, ec);
-                if (ec) continue;
+                if (ec) {
+                    g_logger->warn("[StateManager] 无法获取相对路径: {} | {}", 
+                                  PathToUtf8(entry.path()), ec.message());
+                    error_count++;
+                    continue;
+                }
 
                 // 3. 路径标准化
                 // generic_u8string() 确保在 Windows 上也使用 '/'，实现跨平台一致性
@@ -567,10 +637,25 @@ namespace VeritasSync {
                     continue;
                 }
                 
-                if (entry.is_regular_file(ec) && !ec) {
+                if (entry.is_regular_file(ec)) {
+                    if (ec) {
+                        // 【修复】详细的错误分类处理
+                        if (ec == std::errc::permission_denied) {
+                            g_logger->warn("[StateManager] 权限被拒绝，跳过文件: {}", rel_path_str);
+                        } else {
+                            g_logger->warn("[StateManager] 无法访问文件: {} | {}", 
+                                          rel_path_str, ec.message());
+                        }
+                        error_count++;
+                        retry_list.push_back(entry.path().string());
+                        continue;
+                    }
+                    
                     auto ftime = std::filesystem::last_write_time(entry, ec);
                     if (ec) {
-                        g_logger->warn("[Scan] 获取时间失败: {}", rel_path_str);
+                        g_logger->warn("[StateManager] 获取文件时间失败: {} | {}", 
+                                      rel_path_str, ec.message());
+                        error_count++;
                         retry_list.push_back(entry.path().string());
                         continue;
                     }
@@ -578,17 +663,16 @@ namespace VeritasSync {
                     int64_t mtime = sctp.time_since_epoch().count();
                     
                     // 检查数据库缓存
+                    // 【修复 #1】使用内存缓存代替直接查询数据库
                     bool need_calc = true;
                     bool is_dirty = true;
                     std::string cached_hash;
-                    if (m_db) {
-                        auto cached_meta = m_db->get_file(rel_path_str);
-                        if (cached_meta && cached_meta->mtime == mtime) {
-                            cached_hash = cached_meta->hash;
-                            need_calc = false;
-                            is_dirty = false; // 命中了且时间戳一致，不脏
-                            cache_hit_count++;
-                        }
+                    auto cached_meta = get_cached_file(rel_path_str);
+                    if (cached_meta && cached_meta->mtime == mtime) {
+                        cached_hash = cached_meta->hash;
+                        need_calc = false;
+                        is_dirty = false; // 命中了且时间戳一致，不脏
+                        cache_hit_count++;
                     }
                     
                     // 【断点续传】获取文件大小
@@ -726,6 +810,9 @@ namespace VeritasSync {
                         window_ok = false;
                         break;
                     }
+                    // 【修复 #1】同步更新内存缓存
+                    FileMetadata meta{f.path, f.hash, f.modified_time};
+                    update_cached_file(f.path, meta);
                 }
                 if (window_ok) {
                     window_guard.commit();
@@ -757,6 +844,8 @@ namespace VeritasSync {
                         cleanup_ok = false;
                         break;
                     }
+                    // 【修复 #1】同步移除内存缓存
+                    remove_cached_file(p);
                 }
                 if (cleanup_ok) {
                     cleanup_guard.commit();
@@ -778,8 +867,14 @@ namespace VeritasSync {
             schedule_retry(2);
         }
         
-        g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", 
-                      m_file_map.size(), cache_hit_count.load(), calc_count.load());
+        // 【修复】添加错误统计到日志
+        if (error_count > 0) {
+            g_logger->warn("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {}), 错误: {}", 
+                          m_file_map.size(), cache_hit_count.load(), calc_count.load(), error_count);
+        } else {
+            g_logger->info("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {})", 
+                          m_file_map.size(), cache_hit_count.load(), calc_count.load());
+        }
     }
 
     std::string StateManager::get_state_as_json_string() {

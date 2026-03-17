@@ -40,19 +40,52 @@ bool SyncNode::is_started() const {
 }
 
 void SyncNode::stop() {
-    if (!m_started.exchange(false)) {
-        return;  // 已经停止或从未启动
+    // 【修复问题6】使用 std::call_once 简化双重停止保护
+    // 替代原来的 m_started.exchange(false) + m_is_stopping.store(true) 模式
+    bool stop_invoked = false;
+    std::call_once(m_stop_once, [&stop_invoked, this]() {
+        stop_invoked = true;
+        m_started.store(false, std::memory_order_release);
+        m_is_stopping.store(true, std::memory_order_release);
+    });
+    
+    if (!stop_invoked) {
+        return;  // stop() 已经被调用过，直接返回
     }
     
-    // 立即标记停止状态（防止僵尸回调）
-    m_is_stopping.store(true, std::memory_order_release);
-    
     g_logger->info("[{}] Stopping Sync Task...", m_task.sync_key);
+    
+    // 【修复 Bug B】优雅关闭：先广播 goodbye 消息，让对端能区分"主动退出"和"掉线"
+    // 必须在 TrackerClient::stop() 之前执行，因为 goodbye 需要通过 KCP 发送，
+    // 而 KCP 底层依赖 io_context 线程（P2PManager 的 IO 线程必须还在运行）
+    auto p2p = m_p2p_manager.load();
+    if (p2p) {
+        p2p->shutdown_gracefully();
+    }
     
     // 按照析构函数的相同顺序停止
     auto tracker = m_tracker_client.load();
     if (tracker) {
         tracker->stop();
+    }
+    
+    // 【修复 Bug C】在销毁 StateManager 之前，先断开 P2PManager 及其子组件
+    // （TransferManager、SyncHandler、SyncSession）对 StateManager 的裸指针引用。
+    // 否则 P2PManager 的 worker_pool / io_context 线程中仍在执行的异步任务
+    // （如 broadcast_current_state → scan_directory、TransferManager 的文件传输）
+    // 会通过已悬垂的 StateManager* 裸指针访问已销毁对象，导致 Use-After-Free。
+    // set_state_manager(nullptr) 会级联清空所有子组件的指针，使 null 检查能安全短路。
+    if (p2p) {
+        p2p->set_state_manager(nullptr);
+    }
+    
+    // 【修复 Bug D】在销毁 TrackerClient 之前，先断开 P2PManager 对 TrackerClient 的裸指针引用。
+    // P2PManager 中 PeerController 的 ICE 信令回调（on_signal_needed）会通过
+    // m_tracker_client->send_signaling_message() 发送信令。如果 TrackerClient 先被销毁，
+    // 而 ICE 连接过程中的回调仍在 io_context 线程执行，就会通过悬垂的 TrackerClient* 裸指针
+    // 访问已销毁对象，导致 Use-After-Free。
+    if (p2p) {
+        p2p->set_tracker_client(nullptr);
     }
     
     m_state_manager.reset();
@@ -63,12 +96,13 @@ void SyncNode::stop() {
 }
 
 
-void SyncNode::start() {
+// 【修复】start返回bool表示启动是否成功
+bool SyncNode::start() {
     // 防止重复启动
     bool expected = false;
     if (!m_started.compare_exchange_strong(expected, true)) {
         g_logger->warn("[{}] SyncNode::start() called multiple times, ignoring.", m_task.sync_key);
-        return;
+        return false;
     }
     
     g_logger->info("--- Starting Sync Task [{}] ---", m_task.sync_key);
@@ -79,19 +113,19 @@ void SyncNode::start() {
     if (m_task.sync_key.empty()) {
         g_logger->error("[SyncNode] Invalid config: sync_key is empty.");
         m_started = false;  // 重置状态，允许修正后重新启动
-        return;
+        return false;
     }
 
     if (m_task.sync_folder.empty()) {
         g_logger->error("[SyncNode] Invalid config: sync_folder is empty.");
         m_started = false;
-        return;
+        return false;
     }
 
     if (m_task.role != "source" && m_task.role != "destination") {
         g_logger->error("[SyncNode] Invalid role: '{}' (must be 'source' or 'destination').", m_task.role);
         m_started = false;
-        return;
+        return false;
     }
 
     // 1. 使用 EncodingUtils 转换路径（可能抛出异常，外层应捕获）
@@ -101,7 +135,7 @@ void SyncNode::start() {
     } catch (const std::exception& e) {
         g_logger->error("[SyncNode] Failed to convert path '{}': {}", m_task.sync_folder, e.what());
         m_started = false;
-        return;
+        return false;
     }
 
 
@@ -119,7 +153,7 @@ void SyncNode::start() {
         if (ec) {
             g_logger->error("[SyncNode] 创建同步目录失败: {}", ec.message());
             m_started = false;  // 重置状态
-            return;
+            return false;
         }
         g_logger->info("[SyncNode] 创建同步目录成功");
     } else {
@@ -131,7 +165,7 @@ void SyncNode::start() {
     if (!p2p) {
         g_logger->error("[SyncNode] Failed to create P2PManager.");
         m_started = false;
-        return;
+        return false;
     }
     m_p2p_manager.store(p2p);  // 原子存储
 
@@ -160,6 +194,11 @@ void SyncNode::start() {
     p2p->set_chunk_size(m_global_config.chunk_size);
     p2p->set_kcp_window_size(m_global_config.kcp_window_size);
     p2p->set_kcp_update_interval(m_global_config.kcp_update_interval_ms);
+    
+    // 【修复 Bug A】所有配置参数已就绪，现在初始化子组件
+    // init() 会创建 TransferManager（使用 m_chunk_size）、KcpScheduler（使用 m_kcp_update_interval_ms）等，
+    // 必须在 set_chunk_size / set_kcp_update_interval 之后调用，否则子组件使用默认值
+    p2p->init();
     
     // 记录关键配置参数
     g_logger->info("[Config] Sync Mode: {}", 
@@ -220,7 +259,7 @@ void SyncNode::start() {
         m_p2p_manager.store(nullptr);
         m_tracker_client.store(nullptr);
         m_started = false;
-        return;
+        return false;
     }
 
     // 8. 注入 StateManager
@@ -263,6 +302,8 @@ void SyncNode::start() {
         g_logger->info("[{}] --- Phase 2: P2P (ICE) connection ---", sync_key_copy);
         p2p->connect_to_peers(peer_list);
     });
+
+    return true;
 }
 
 }  // namespace VeritasSync

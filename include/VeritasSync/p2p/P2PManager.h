@@ -71,6 +71,14 @@ public:
     void set_kcp_window_size(uint32_t window_size) { m_kcp_window_size = window_size; }
     void set_kcp_update_interval(uint32_t interval_ms) { m_kcp_update_interval_ms = interval_ms; }
 
+    /**
+     * @brief 初始化子组件（TransferManager、SyncHandler、SyncSession、KcpScheduler 等）
+     * 
+     * 【修复 Bug A】必须在所有配置（set_chunk_size、set_kcp_update_interval 等）
+     * 设置完成之后再调用，否则子组件会使用默认参数值。
+     */
+    void init();
+
     virtual ~P2PManager();
 
     /**
@@ -122,7 +130,6 @@ public:
 
 protected:
     P2PManager();
-    void init();
 
     // --- KCP 集成（已提取到 KcpScheduler）---
 
@@ -133,7 +140,8 @@ protected:
     std::shared_ptr<PeerController> find_peer(const std::string& peer_id) const;
 
     // --- 上层应用逻辑（使用 PeerController）---
-    void send_over_kcp(const std::string& msg);
+    // LOGIC-003: send_over_kcp 返回bool表示是否至少有一个对等点成功接收
+    bool send_over_kcp(const std::string& msg);
     void send_over_kcp_peer(const std::string& msg, PeerController* peer);
     void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
     void handle_kcp_message(const std::string& msg, PeerController* from_peer);

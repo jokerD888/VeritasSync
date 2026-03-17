@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ public:
 
 private:
     Impl* m_impl = nullptr;
+    std::atomic<bool> m_running{true};  // 【修复】原子标志控制循环退出
 };
 
 }  // namespace VeritasSync

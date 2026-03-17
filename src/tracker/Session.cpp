@@ -1,6 +1,10 @@
 #include "VeritasSync/tracker/Session.h"
 #include "VeritasSync/tracker/TrackerServer.h"
+#include "VeritasSync/common/Config.h"
 #include "VeritasSync/common/SignalProto.h"
+
+
+
 
 #include <boost/asio/detail/socket_ops.hpp>
 #include <cstring>
@@ -168,12 +172,14 @@ void Session::handle_message(const json& msg) {
 
 void Session::handle_register(const json& payload) {
     m_sync_key = payload.at("sync_key").get<std::string>();
-    if (m_sync_key.empty()) {
-        g_logger->error("[Session] {} 注册失败：sync_key 为空。", m_connection_info);
+    const std::string sync_key_error = VeritasSync::get_sync_key_validation_error(m_sync_key);
+    if (!sync_key_error.empty()) {
+        g_logger->error("[Session] {} 注册失败：{}。", m_connection_info, sync_key_error);
         return;
     }
 
     if (!payload.contains("device_id") || payload.at("device_id").get<std::string>().empty()) {
+
         g_logger->error("[Session] {} 注册失败：device_id 为空或缺失。", m_connection_info);
         return;
     }

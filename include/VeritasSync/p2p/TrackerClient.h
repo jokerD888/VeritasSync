@@ -58,6 +58,7 @@ private:
     void start_write_next();
     void schedule_reconnect();
     void close_socket();
+    void stop_impl();
 
     // 共享外部 io_context（不再拥有独立线程）
     boost::asio::io_context& m_io_context;
@@ -72,6 +73,8 @@ private:
     std::string m_device_id;  // 设备唯一标识符，用于 Tracker 注册
 
     std::function<void(std::vector<std::string>)> m_on_ready_callback;
+    std::vector<std::function<void(std::vector<std::string>)>> m_pending_ready_callbacks;
+
 
     P2PManager* m_p2p_manager = nullptr;
     boost::asio::streambuf m_read_buffer;
@@ -83,6 +86,8 @@ private:
     std::unordered_map<std::string, MessageHandler> m_handlers;
 
     std::atomic<State> m_state{State::DISCONNECTED};
+    std::atomic<bool> m_stopping{false};
+    std::atomic<bool> m_allow_reconnect{true};
 };
 
 }  // namespace VeritasSync

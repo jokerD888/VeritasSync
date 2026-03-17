@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "VeritasSync/common/Config.h"
@@ -53,7 +54,8 @@ public:
     std::string get_key() const;
     std::string get_root_path() const;
 
-    void start();
+    // 【修复】start返回bool表示启动是否成功
+    bool start();
     void stop();  // 优雅地停止同步任务
 
     bool is_tracker_online() const;
@@ -70,8 +72,11 @@ private:
     std::atomic<std::shared_ptr<P2PManager>> m_p2p_manager;
     std::unique_ptr<StateManager> m_state_manager;
     
-    std::atomic<bool> m_started{false};   // 防止重复启动
-    std::atomic<bool> m_is_stopping{false};  // 标记正在停止（防止僵尸回调）
+    // 【修复问题6】使用 std::call_once 简化双重停止保护
+    // 替代原来的 m_started + m_is_stopping 两个原子变量
+    std::once_flag m_stop_once;           // 确保 stop() 只执行一次
+    std::atomic<bool> m_started{false};   // 防止重复启动（供 is_started() 查询）
+    std::atomic<bool> m_is_stopping{false};  // 标记正在停止（供回调检查）
 };
 
 }  // namespace VeritasSync

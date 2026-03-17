@@ -53,15 +53,18 @@ bool IceTransport::initialize(const IceConfig& config) {
         jconfig.stun_server_port = config.stun_port;
     }
     
-    // 【修复】TURN 配置改为成员变量，避免 static 导致多实例覆盖
-    juice_turn_server_t turn_server = {};
+    // 【关键修复】TURN 配置使用成员变量 m_turn_server，避免局部变量导致悬空指针
+    // 原代码使用局部变量 turn_server，函数返回后jconfig.turn_servers变成悬空指针
     if (!m_turn_host.empty()) {
-        turn_server.host = m_turn_host.c_str();
-        turn_server.port = config.turn_port;
-        turn_server.username = m_turn_username.c_str();
-        turn_server.password = m_turn_password.c_str();
-        jconfig.turn_servers = &turn_server;
+        m_turn_server.host = m_turn_host.c_str();
+        m_turn_server.port = config.turn_port;
+        m_turn_server.username = m_turn_username.c_str();
+        m_turn_server.password = m_turn_password.c_str();
+        jconfig.turn_servers = &m_turn_server;  // 指向成员变量，生命周期与IceTransport相同
         jconfig.turn_servers_count = 1;
+    } else {
+        jconfig.turn_servers = nullptr;
+        jconfig.turn_servers_count = 0;
     }
     
     // 设置回调
@@ -167,7 +170,7 @@ bool IceTransport::is_connected() const {
 // 这样的设计模式也叫 适配器模式 (Adapter Pattern)，将 libjuice 的 C 风格回调适配为 C++ 的 std::function 回调，让上层代码更加现代和安全！
 
 // 对应 IceTransportCallbacks::on_state_changed
-void IceTransport::on_juice_state_changed(juice_agent_t* /*agent*/, juice_state_t state, void* user_ptr) {
+void IceTransport::on_juice_state_changed([[maybe_unused]] juice_agent_t* agent, juice_state_t state, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self) {
         self->handle_state_changed(state);
@@ -197,7 +200,7 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_
 }
 
 // 对应 IceTransportCallbacks::on_data_received
-void IceTransport::on_juice_recv(juice_agent_t* /*agent*/, const char* data, size_t size, void* user_ptr) {
+void IceTransport::on_juice_recv([[maybe_unused]] juice_agent_t* agent, const char* data, size_t size, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (self && self->m_callbacks.on_data_received) {
         self->m_callbacks.on_data_received(data, size);

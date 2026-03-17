@@ -1,5 +1,7 @@
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -27,6 +29,8 @@ std::mutex g_nodes_mutex;
 
 // --- 全局停止标志 (用于优雅关闭) ---
 std::atomic<bool> g_shutdown_requested{false};
+// --- 全局重启标志 (用于清理完成后重启) ---
+std::atomic<bool> g_restart_requested{false};
 
 // --- 信号处理 (跨平台优雅关闭) ---
 void signal_handler(int signum) {
@@ -35,11 +39,27 @@ void signal_handler(int signum) {
     }
 }
 
+bool relaunch_current_process() {
+#if defined(_WIN32)
+    wchar_t exe_path[MAX_PATH] = {0};
+    if (GetModuleFileNameW(NULL, exe_path, MAX_PATH) == 0) {
+        return false;
+    }
+
+    HINSTANCE result = ShellExecuteW(NULL, L"open", exe_path, NULL, NULL, SW_SHOWNORMAL);
+    return reinterpret_cast<intptr_t>(result) > 32;
+#else
+    return std::system("./veritas_sync &") == 0;
+#endif
+}
+
 int main(int argc, char* argv[]) {
 #if defined(_WIN32)
+    HANDLE hMutex = nullptr;
+
     // ===== 单实例检查 =====
     // 使用命名互斥锁防止程序多开
-    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"VeritasSync_SingleInstance_Mutex");
+    hMutex = CreateMutexW(NULL, TRUE, L"VeritasSync_SingleInstance_Mutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         // 已有实例在运行，提示用户并退出
         MessageBoxW(NULL, 
@@ -65,7 +85,8 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    VeritasSync::init_logger();
+    try {
+        VeritasSync::init_logger();
     VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
 
     VeritasSync::Config config;
@@ -101,15 +122,28 @@ int main(int argc, char* argv[]) {
     // 启动 Web UI (端口从配置读取，默认 8800)
     VeritasSync::WebUIServer web_ui(config.webui_port, "config.json");
 
+    // --- B-02: 重启请求回调（由 main 执行优雅重启） ---
+    web_ui.set_on_restart_request([&web_ui]() {
+        VeritasSync::g_logger->info("[Main] 收到 WebUI 重启请求，准备优雅退出...");
+        g_restart_requested = true;
+        g_shutdown_requested = true;
+        web_ui.stop();
+    });
+
     // --- 设置动态添加任务回调 ---
-    web_ui.set_on_task_add([](const VeritasSync::SyncTask& new_task, const VeritasSync::Config& current_cfg) {
+    web_ui.set_on_task_add([](const VeritasSync::SyncTask& new_task, const VeritasSync::Config& current_cfg) -> bool {
         VeritasSync::g_logger->info("[Main] 收到动态添加任务请求: {}", new_task.sync_key);
         std::lock_guard<std::mutex> lock(g_nodes_mutex);
 
         // 使用工厂方法创建 SyncNode（必须是 shared_ptr）
         auto node = VeritasSync::SyncNode::create(new_task, current_cfg);
-        node->start();
+        // 【修复】检查start()返回值
+        if (!node->start()) {
+            VeritasSync::g_logger->error("[Main] 动态添加任务失败: {}", new_task.sync_key);
+            return false;
+        }
         g_active_nodes.push_back(node);
+        return true;
     });
 
     // --- C-5: 设置动态删除任务回调 ---
@@ -124,12 +158,7 @@ int main(int argc, char* argv[]) {
             });
         
         if (it != g_active_nodes.end()) {
-            // 先优雅关闭 P2P 连接（广播 goodbye）
-            auto p2p = (*it)->get_p2p();
-            if (p2p) {
-                p2p->shutdown_gracefully();
-            }
-            // 停止 SyncNode（停止 Tracker、清理资源）
+            // 统一关闭职责：由 SyncNode::stop() 内部执行 graceful shutdown + 资源清理
             (*it)->stop();
             g_active_nodes.erase(it);
             VeritasSync::g_logger->info("[Main] 已停止并移除任务: {}", sync_key);
@@ -144,7 +173,11 @@ int main(int argc, char* argv[]) {
         for (const auto& task : config.tasks) {
             // 使用工厂方法创建 SyncNode（必须是 shared_ptr）
             auto node = VeritasSync::SyncNode::create(task, config);
-            node->start();
+            // 【修复】检查start()返回值，失败时不添加到活跃节点
+            if (!node->start()) {
+                VeritasSync::g_logger->error("[Main] 启动同步任务失败: {}", task.sync_key);
+                continue;
+            }
             g_active_nodes.push_back(node);
         }
     }
@@ -243,20 +276,71 @@ int main(int argc, char* argv[]) {
     });
 
     // --- 使用 std::jthread 启动 WebUI (C++20: 自动 join，支持 stop_token) ---
-    std::jthread ui_thread([&web_ui](std::stop_token stop_token) {
-        // 启动 WebUI 服务
-        web_ui.start();
-        
-        // 注意：WebUI.start() 是阻塞的，当 web_ui.stop() 被调用后会返回
+    std::promise<bool> webui_ready_promise;
+    auto webui_ready_future = webui_ready_promise.get_future();
+    bool webui_started = false;
+
+    std::jthread ui_thread([&web_ui, &webui_ready_promise](std::stop_token stop_token) {
+        try {
+            // 启动 WebUI 服务：通过回调将 bind 成功/失败结果回传给主线程
+            web_ui.start([&webui_ready_promise](bool ok) {
+                try {
+                    webui_ready_promise.set_value(ok);
+                } catch (...) {
+                    // 防御性保护：忽略重复 set_value
+                }
+            });
+        } catch (const std::exception& e) {
+            VeritasSync::g_logger->error("[Main] WebUI 线程异常: {}", e.what());
+            try {
+                webui_ready_promise.set_value(false);
+            } catch (...) {
+            }
+        } catch (...) {
+            VeritasSync::g_logger->error("[Main] WebUI 线程未知异常");
+            try {
+                webui_ready_promise.set_value(false);
+            } catch (...) {
+            }
+        }
+
+        // 注意：WebUI.start() 在监听成功后是阻塞的，当 web_ui.stop() 被调用后会返回
         // stop_token 可用于更细粒度的取消检查（如果将来 WebUI 内部支持）
     });
+
+    // 等待 WebUI 启动握手结果，避免监听失败静默
+    if (webui_ready_future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        VeritasSync::g_logger->error("[Main] WebUI 启动超时：无法确认监听状态");
+        g_shutdown_requested = true;
+        web_ui.stop();
+        ui_thread.request_stop();
+    } else {
+        webui_started = webui_ready_future.get();
+        if (!webui_started) {
+            VeritasSync::g_logger->error("[Main] WebUI 启动失败（端口占用或监听失败）");
+            g_shutdown_requested = true;
+            web_ui.stop();
+            ui_thread.request_stop();
+        }
+    }
 
 #if defined(_WIN32)
     // --- 托盘图标逻辑 ---
     VeritasSync::TrayIcon tray;
+    const bool tray_ready = tray.init("VeritasSync - P2P 同步节点");
 
-    if (!tray.init("VeritasSync - P2P 同步节点")) {
-        VeritasSync::g_logger->error("无法创建系统托盘图标");
+    if (!tray_ready) {
+        VeritasSync::g_logger->error("无法创建系统托盘图标，降级为控制台等待模式");
+    } else {
+        // 托盘就绪后覆盖重启回调：确保重启请求可唤醒 tray 消息循环退出
+        web_ui.set_on_restart_request([&web_ui, &tray, &ui_thread]() {
+            VeritasSync::g_logger->info("[Main] 收到 WebUI 重启请求，准备优雅退出...");
+            g_restart_requested = true;
+            g_shutdown_requested = true;
+            web_ui.stop();
+            ui_thread.request_stop();
+            tray.quit();
+        });
     }
 
     tray.add_menu_item("🌐 打开控制台", [&web_ui]() { VeritasSync::WebUIServer::open_url(web_ui.get_auth_url()); });
@@ -292,15 +376,30 @@ int main(int argc, char* argv[]) {
         }
     });
 
-    VeritasSync::g_logger->info("系统托盘已启动。程序正在后台运行。");
-    tray.run_loop();
+    if (tray_ready) {
+        if (!g_shutdown_requested) {
+            VeritasSync::g_logger->info("系统托盘已启动。程序正在后台运行。");
+            tray.run_loop();
+        } else {
+            VeritasSync::g_logger->info("检测到提前退出/重启请求，跳过托盘消息循环。");
+        }
+    } else {
+        VeritasSync::g_logger->info("托盘不可用，使用控制台等待循环（可通过 WebUI/信号触发退出）");
+        while (!g_shutdown_requested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
 
 #else
-    VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:{} | 按 Ctrl+C 退出 ---", config.webui_port);
-    
+    if (webui_started) {
+        VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:{} | 按 Ctrl+C 退出 ---", config.webui_port);
+    } else {
+        VeritasSync::g_logger->warn("WebUI 未成功启动，程序将进入退出流程。");
+    }
+
     // 非 Windows 平台：等待关闭信号 (SIGINT/SIGTERM 已注册)
     while (!g_shutdown_requested) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 #endif
 
@@ -310,30 +409,76 @@ int main(int argc, char* argv[]) {
     // 停止 WebUI
     web_ui.stop();
     
-    // 请求 UI 线程停止
-    ui_thread.request_stop();
+    // std::jthread 析构时会自动 request_stop 和 join，无需手动调用
     
-    // std::jthread 析构时会自动 join，无需手动调用
-    // 但如果需要提前等待，可以调用 ui_thread.join()
-    
-    // 【断点续传】优雅关闭：广播 goodbye 给所有对端
+    // 统一关闭路径：由 SyncNode::stop() 内部执行 graceful shutdown
     {
         std::lock_guard<std::mutex> lock(g_nodes_mutex);
         for (const auto& node : g_active_nodes) {
-            auto p2p = node->get_p2p();
-            if (p2p) {
-                p2p->shutdown_gracefully();
+            if (node) {
+                node->stop();
             }
         }
-    }
-    
-    // 清理同步节点
-    {
-        std::lock_guard<std::mutex> lock(g_nodes_mutex);
         g_active_nodes.clear();
+    }
+
+#if defined(_WIN32)
+    // 若不是重启，正常退出前也释放单实例句柄
+    if (!g_restart_requested.load() && hMutex) {
+        CloseHandle(hMutex);
+        hMutex = nullptr;
+    }
+#endif
+
+    if (g_restart_requested.load()) {
+        VeritasSync::g_logger->info("检测到重启请求，正在拉起新实例...");
+
+#if defined(_WIN32)
+        // 先释放互斥锁，避免新实例被单实例检查拦截
+        if (hMutex) {
+            CloseHandle(hMutex);
+            hMutex = nullptr;
+        }
+#endif
+
+        if (!relaunch_current_process()) {
+            VeritasSync::g_logger->error("重启失败：无法拉起新进程");
+            VeritasSync::g_logger->info("--- Shutting down. ---");
+            spdlog::shutdown();
+            return 1;
+        }
     }
 
     VeritasSync::g_logger->info("--- Shutting down. ---");
     spdlog::shutdown();
     return 0;
+    } catch (const std::exception& e) {
+#if defined(_WIN32)
+        if (hMutex) {
+            CloseHandle(hMutex);
+            hMutex = nullptr;
+        }
+#endif
+        if (VeritasSync::g_logger) {
+            VeritasSync::g_logger->critical("[Main] 未捕获异常: {}", e.what());
+        } else {
+            std::cerr << "[Main] 未捕获异常: " << e.what() << std::endl;
+        }
+        spdlog::shutdown();
+        return 2;
+    } catch (...) {
+#if defined(_WIN32)
+        if (hMutex) {
+            CloseHandle(hMutex);
+            hMutex = nullptr;
+        }
+#endif
+        if (VeritasSync::g_logger) {
+            VeritasSync::g_logger->critical("[Main] 未捕获未知异常");
+        } else {
+            std::cerr << "[Main] 未捕获未知异常" << std::endl;
+        }
+        spdlog::shutdown();
+        return 3;
+    }
 }

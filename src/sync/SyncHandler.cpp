@@ -36,6 +36,32 @@ bool SyncHandler::can_receive() const {
     return m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional;
 }
 
+// 【修复问题7】辅助函数实现：安全地从 JSON 解析字段
+template<typename T>
+std::optional<T> SyncHandler::get_json_field(const nlohmann::json& payload, 
+                                             const std::string& field,
+                                             const char* context) {
+    try {
+        return payload.at(field).get<T>();
+    } catch (const std::exception& e) {
+        g_logger->error("[KCP] 解析 {} 失败 (字段 '{}'): {}", context, field, e.what());
+        return std::nullopt;
+    }
+}
+
+// 【修复问题7】辅助函数实现：验证路径安全并记录错误
+bool SyncHandler::validate_path_safe(const std::filesystem::path& root, 
+                                     const std::string& rel_path, 
+                                     const char* context,
+                                     const char* operation) {
+    if (!PathUtils::is_path_safe(root, rel_path)) {
+        g_logger->error("[Sync] 路径安全检查失败，拒绝{}: {} (上下文: {})", 
+                        operation, rel_path, context);
+        return false;
+    }
+    return true;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 提取的私有方法：冲突检测 + 文件请求构造
 // ═══════════════════════════════════════════════════════════════
@@ -336,6 +362,9 @@ void SyncHandler::handle_file_update(const nlohmann::json& payload, PeerControll
 
     // Offload 耗时操作到 Worker 线程
     boost::asio::post(m_worker_pool, [this, remote_info, peer_id]() {
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
         // --- 1. 拦截回声 (Echo Check) ---
         if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
             return;
@@ -373,17 +402,17 @@ void SyncHandler::handle_file_delete(const nlohmann::json& payload, PeerControll
     if (!m_state_manager) return;
     
     boost::asio::post(m_worker_pool, [this, payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (const std::exception& e) {
-            g_logger->error("[KCP] (Destination) 解析 file_delete 失败: {}", e.what());
-            return;
-        }
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
+        // 【修复问题7】使用辅助函数解析 JSON 字段
+        auto relative_path_opt = get_json_field<std::string>(payload, "path", "file_delete");
+        if (!relative_path_opt) return;
+        std::string relative_path_str = *relative_path_opt;
 
-        // 【安全】路径遍历攻击防护
-        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
-            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝删除文件: {}", relative_path_str);
+        // 【修复问题7】使用辅助函数进行路径安全检查
+        if (!validate_path_safe(m_state_manager->get_root_path(), relative_path_str, 
+                                "file_delete", "删除文件")) {
             return;
         }
 
@@ -420,17 +449,17 @@ void SyncHandler::handle_dir_create(const nlohmann::json& payload, PeerControlle
     if (!m_state_manager) return;
     
     boost::asio::post(m_worker_pool, [this, payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (const std::exception& e) {
-            g_logger->error("[KCP] (Destination) 解析 dir_create 失败: {}", e.what());
-            return;
-        }
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
+        // 【修复问题7】使用辅助函数解析 JSON 字段
+        auto relative_path_opt = get_json_field<std::string>(payload, "path", "dir_create");
+        if (!relative_path_opt) return;
+        std::string relative_path_str = *relative_path_opt;
 
-        // 【安全】路径遍历攻击防护
-        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
-            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝创建目录: {}", relative_path_str);
+        // 【修复问题7】使用辅助函数进行路径安全检查
+        if (!validate_path_safe(m_state_manager->get_root_path(), relative_path_str, 
+                                "dir_create", "创建目录")) {
             return;
         }
 
@@ -448,10 +477,6 @@ void SyncHandler::handle_dir_create(const nlohmann::json& payload, PeerControlle
     });
 }
 
-void SyncHandler::handle_file_request(const nlohmann::json& /*payload*/, PeerController* /*from_peer*/) {
-    // 文件请求由 TransferManager 处理，这里只是占位
-}
-
 void SyncHandler::handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer) {
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
     
@@ -463,20 +488,17 @@ void SyncHandler::handle_dir_delete(const nlohmann::json& payload, PeerControlle
     if (!m_state_manager) return;
     
     boost::asio::post(m_worker_pool, [this, payload]() {
-        std::string relative_path_str;
-        try {
-            relative_path_str = payload.at("path").get<std::string>();
-        } catch (const std::exception& e) {
-            g_logger->error("[KCP] 解析增量目录删除消息失败: {}", e.what());
-            return;
-        } catch (...) {
-            g_logger->error("[KCP] 解析增量目录删除消息时发生未知异常");
-            return;
-        }
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
+        // 【修复问题7】使用辅助函数解析 JSON 字段
+        auto relative_path_opt = get_json_field<std::string>(payload, "path", "dir_delete");
+        if (!relative_path_opt) return;
+        std::string relative_path_str = *relative_path_opt;
 
-        // 【安全】路径遍历攻击防护
-        if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
-            g_logger->error("[Sync] ⚠️ 路径安全检查失败，拒绝删除目录: {}", relative_path_str);
+        // 【修复问题7】使用辅助函数进行路径安全检查
+        if (!validate_path_safe(m_state_manager->get_root_path(), relative_path_str, 
+                                "dir_delete", "删除目录")) {
             return;
         }
 
@@ -541,6 +563,9 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
     
     boost::asio::post(m_worker_pool, [this, files = std::move(files), peer_id]() {
         try {
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
         std::vector<FileInfo> files_to_request;
         
         for (const auto& remote_info : files) {
@@ -591,6 +616,7 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     if (m_role == SyncRole::Source && m_mode != SyncMode::BiDirectional) return;
     if (!m_state_manager) return;
     
+    // 【修复问题7】使用辅助函数解析 JSON 字段
     std::vector<std::string> paths;
     try {
         if (!payload.contains("paths")) {
@@ -612,10 +638,13 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     }
     
     boost::asio::post(m_worker_pool, [this, paths]() {
+        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+        if (!m_state_manager) return;
+        
         for (const auto& relative_path_str : paths) {
-            // 【安全】路径遍历攻击防护
-            if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), relative_path_str)) {
-                g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过批量删除: {}", relative_path_str);
+            // 【修复问题7】使用辅助函数进行路径安全检查
+            if (!validate_path_safe(m_state_manager->get_root_path(), relative_path_str, 
+                                    "file_delete_batch", "批量删除")) {
                 continue;
             }
 
@@ -665,11 +694,14 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
     
     boost::asio::post(m_worker_pool, [this, creates, deletes]() {
         try {
+            // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
+            if (!m_state_manager) return;
+            
             // 先处理创建
             for (const auto& dir_path_str : creates) {
-                // 【安全】路径遍历攻击防护
-                if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), dir_path_str)) {
-                    g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过创建目录: {}", dir_path_str);
+                // 【修复问题7】使用辅助函数进行路径安全检查
+                if (!validate_path_safe(m_state_manager->get_root_path(), dir_path_str, 
+                                        "dir_batch", "批量创建目录")) {
                     continue;
                 }
 
@@ -689,9 +721,9 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
                       [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
             
             for (const auto& dir_path_str : sorted_deletes) {
-                // 【安全】路径遍历攻击防护
-                if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), dir_path_str)) {
-                    g_logger->error("[Sync] ⚠️ 路径安全检查失败，跳过删除目录: {}", dir_path_str);
+                // 【修复问题7】使用辅助函数进行路径安全检查
+                if (!validate_path_safe(m_state_manager->get_root_path(), dir_path_str, 
+                                        "dir_batch", "批量删除目录")) {
                     continue;
                 }
 

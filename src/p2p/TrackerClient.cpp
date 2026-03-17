@@ -66,20 +66,28 @@ TrackerClient::TrackerClient(boost::asio::io_context& io_context, std::string ho
  */
 void TrackerClient::schedule_reconnect() {
     m_state = State::DISCONNECTED;
+
     // 立即关闭，确保 socket 状态重置
     if (m_socket.is_open()) {
         boost::system::error_code ignored_ec;
         m_socket.close(ignored_ec);
     }
-    
+
     // 清理写队列，防止重连后发送旧包
     m_write_queue.clear();
+
+    // stop() 后禁止重连，避免 operation_aborted/eof 路径触发“被动复活”
+    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
+        g_logger->info("[TrackerClient] 客户端处于停止态，跳过自动重连。");
+        return;
+    }
 
     g_logger->warn("[TrackerClient] 连接断开，{}秒后尝试重连...", RECONNECT_INTERVAL.count());
 
     m_retry_timer.expires_after(RECONNECT_INTERVAL);
     m_retry_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
-        if (!ec) {
+        if (!ec && !self->m_stopping.load(std::memory_order_acquire) &&
+            self->m_allow_reconnect.load(std::memory_order_acquire)) {
             self->do_connect();
         }
     });
@@ -89,7 +97,8 @@ void TrackerClient::schedule_reconnect() {
  * @brief 析构函数：确保在对象销毁前停止所有异步操作和后台线程
  */
 TrackerClient::~TrackerClient() {
-    stop();
+    // 析构阶段可能已不再受 shared_ptr 管理，直接同步清理。
+    stop_impl();
 }
 
 /**
@@ -97,17 +106,37 @@ TrackerClient::~TrackerClient() {
  * 不再需要停止 io_context 或等待线程退出（共享外部 io_context）
  */
 void TrackerClient::stop() {
+    // 先设置门禁，阻断后续任何自动重连
+    m_stopping.store(true, std::memory_order_release);
+    m_allow_reconnect.store(false, std::memory_order_release);
+
+    // 正常生命周期下将 stop 串行化到 io_context 线程执行
+    if (auto self = weak_from_this().lock()) {
+        boost::asio::dispatch(m_io_context, [self]() { self->stop_impl(); });
+    } else {
+        // 兜底：对象已进入析构流程时，直接同步清理
+        stop_impl();
+    }
+}
+
+void TrackerClient::stop_impl() {
     m_state = State::DISCONNECTED;
-    
+
+    // 清理会话回调，避免旧会话回调泄漏到下一轮 connect
+    m_on_ready_callback = nullptr;
+    m_pending_ready_callbacks.clear();
+
     // 取消定时器
     m_retry_timer.cancel();
-    
+
     // 关闭 Socket，这会中断所有挂起的读写操作
     boost::system::error_code ec;
     if (m_socket.is_open()) {
         m_socket.shutdown(tcp::socket::shutdown_both, ec);
         m_socket.close(ec);
     }
+
+    m_write_queue.clear();
 }
 
 /**
@@ -126,26 +155,51 @@ void TrackerClient::set_device_id(const std::string& device_id) { m_device_id = 
  * @param on_ready 注册成功后的回调，参数为当前已在线的对等点列表
  */
 void TrackerClient::connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready) {
-    if (m_state != State::DISCONNECTED) {
-        g_logger->warn("[TrackerClient] 已经处于连接中或已连接状态。");
-        return;
-    }
+    // 将“状态检查+状态迁移+回调写入”统一到 io_context 线程，避免跨线程竞态
+    boost::asio::post(m_io_context,
+                      [self = shared_from_this(), sync_key, on_ready = std::move(on_ready)]() mutable {
+                          if (!self->m_p2p_manager) {
+                              g_logger->error("[TrackerClient] P2PManager 未设置。无法连接。");
+                              return;
+                          }
 
-    if (!m_p2p_manager) {
-        g_logger->error("[TrackerClient] P2PManager 未设置。无法连接。");
-        return;
-    }
-    m_sync_key = sync_key;
-    m_on_ready_callback = std::move(on_ready);
+                          if (self->m_state != State::DISCONNECTED) {
+                              // 在连接过程中允许同 sync_key 的回调合并，避免静默丢回调
+                              if (on_ready &&
+                                  (self->m_state == State::CONNECTING || self->m_state == State::REGISTERING)) {
+                                  if (self->m_sync_key == sync_key) {
+                                      self->m_pending_ready_callbacks.push_back(std::move(on_ready));
+                                      g_logger->info("[TrackerClient] 连接进行中，已合并一个 on_ready 回调。");
+                                  } else {
+                                      g_logger->warn("[TrackerClient] 连接进行中且 sync_key 不一致，忽略本次 connect。active={}, incoming={}",
+                                                     self->m_sync_key, sync_key);
+                                  }
+                              } else {
+                                  g_logger->warn("[TrackerClient] 已经处于连接中或已连接状态。");
+                              }
+                              return;
+                          }
 
-    // 将 do_connect 任务 post 到共享的 io_context
-    boost::asio::post(m_io_context, [self = shared_from_this()]() { self->do_connect(); });
+                          // 新一轮手动 connect：解除 stop 状态并重置旧会话回调
+                          self->m_stopping.store(false, std::memory_order_release);
+                          self->m_allow_reconnect.store(true, std::memory_order_release);
+                          self->m_pending_ready_callbacks.clear();
+                          self->m_sync_key = sync_key;
+                          self->m_on_ready_callback = std::move(on_ready);
+                          self->do_connect();
+                      });
 }
+
 
 /**
  * @brief 执行异步连接：首先进行域名解析，然后发起 TCP 连接
  */
 void TrackerClient::do_connect() {
+    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
+        m_state = State::DISCONNECTED;
+        return;
+    }
+
     m_state = State::CONNECTING;
     // 使用异步解析，回调签名更新为 (error_code, results_type)
     m_resolver.async_resolve(
@@ -176,6 +230,11 @@ void TrackerClient::do_connect() {
  * @brief 向 Tracker 发送注册消息，携带同步密钥和设备 ID 以加入相应的同步网络
  */
 void TrackerClient::do_register() {
+    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    m_state = State::REGISTERING;
     nlohmann::json payload;
     payload["sync_key"] = m_sync_key;
     
@@ -218,9 +277,13 @@ void TrackerClient::do_read_header() {
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(4),
         [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
-                if (ec != boost::asio::error::eof && ec != boost::asio::error::operation_aborted) {
+                if (ec == boost::asio::error::operation_aborted) {
+                    // stop() 主动取消时不应触发重连
+                    return;
+                }
+                if (ec != boost::asio::error::eof) {
                     g_logger->error("[TrackerClient] 读取头部失败: {}", sys_err_to_utf8(ec));
-                } else if (ec == boost::asio::error::eof) {
+                } else {
                     g_logger->warn("[TrackerClient] Tracker 已断开连接。");
                 }
                 self->schedule_reconnect();
@@ -247,9 +310,11 @@ void TrackerClient::do_read_body(unsigned int msg_len) {
     boost::asio::async_read(m_socket, m_read_buffer, boost::asio::transfer_exactly(msg_len),
         [self = shared_from_this()](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
-                if (ec != boost::asio::error::operation_aborted) {
-                    g_logger->error("[TrackerClient] 读取消息体失败: {}", sys_err_to_utf8(ec));
+                if (ec == boost::asio::error::operation_aborted) {
+                    // stop() 主动取消时不应触发重连
+                    return;
                 }
+                g_logger->error("[TrackerClient] 读取消息体失败: {}", sys_err_to_utf8(ec));
                 self->schedule_reconnect();
                 return;
             }
@@ -294,14 +359,28 @@ void TrackerClient::register_handlers() {
         std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
         g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());
 
-        // 无论是首次连接还是重连，都要尝试连接到对等点
+        bool has_ready_callbacks = false;
+
+        // 首次连接回调
         if (m_on_ready_callback) {
-            // 首次连接：使用回调
             auto cb = std::move(m_on_ready_callback);
             m_on_ready_callback = nullptr;
-            cb(std::move(peers));
-        } else if (m_p2p_manager && !peers.empty()) {
-            // 重连后：直接调用，使用 force=true 强制重建连接
+            has_ready_callbacks = true;
+            cb(peers);
+        }
+
+        // 连接过程中合并的重复 connect 回调
+        if (!m_pending_ready_callbacks.empty()) {
+            auto pending = std::move(m_pending_ready_callbacks);
+            m_pending_ready_callbacks.clear();
+            has_ready_callbacks = true;
+            for (auto& cb : pending) {
+                if (cb) cb(peers);
+            }
+        }
+
+        // 无回调时按重连语义处理
+        if (!has_ready_callbacks && m_p2p_manager && !peers.empty()) {
             g_logger->info("[TrackerClient] Tracker 重连成功，强制重新连接到 {} 个对等点", peers.size());
             m_p2p_manager->connect_to_peers(peers, true);  // force=true
         }

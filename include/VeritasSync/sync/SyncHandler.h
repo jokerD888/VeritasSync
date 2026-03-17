@@ -6,6 +6,7 @@
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -74,7 +75,6 @@ public:
     void handle_share_state(const nlohmann::json& payload, PeerController* from_peer);
     void handle_file_update(const nlohmann::json& payload, PeerController* from_peer);
     void handle_file_delete(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_request(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_create(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer);
 
@@ -89,6 +89,18 @@ private:
     
     // 检查是否可以接收同步消息
     bool can_receive() const;
+
+    // 【修复问题7】提取的辅助函数：安全地从 JSON 解析字段
+    template<typename T>
+    std::optional<T> get_json_field(const nlohmann::json& payload, 
+                                    const std::string& field,
+                                    const char* context);
+
+    // 【修复问题7】提取的辅助函数：验证路径安全并记录错误
+    bool validate_path_safe(const std::filesystem::path& root, 
+                            const std::string& rel_path, 
+                            const char* context,
+                            const char* operation);
 
     /**
      * @brief 三方合并冲突检测

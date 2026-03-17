@@ -373,6 +373,28 @@ TEST_F(ConfigValidationTest, Task_EmptySyncKey) {
     EXPECT_TRUE(found);
 }
 
+TEST_F(ConfigValidationTest, Task_InvalidSyncKeyCharacters) {
+    auto cfg = make_valid_config();
+    cfg.tasks[0].sync_key = "../evil/key";
+    auto errors = validate_config(cfg);
+    EXPECT_FALSE(errors.empty());
+
+    bool found = false;
+    for (const auto& e : errors) {
+        if (e.find("sync_key") != std::string::npos) { found = true; break; }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(ConfigSyncKeyValidationTest, ValidAndInvalidSyncKey) {
+    EXPECT_TRUE(is_valid_sync_key("sync-ABC_123"));
+    EXPECT_FALSE(is_valid_sync_key(""));
+    EXPECT_FALSE(is_valid_sync_key("../escape"));
+    EXPECT_FALSE(is_valid_sync_key("bad/key"));
+    EXPECT_FALSE(is_valid_sync_key("bad\\key"));
+    EXPECT_FALSE(is_valid_sync_key("bad.key"));
+}
+
 TEST_F(ConfigValidationTest, Task_InvalidRole) {
     auto cfg = make_valid_config();
     cfg.tasks[0].role = "observer";  // 无效

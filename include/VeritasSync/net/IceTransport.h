@@ -206,6 +206,10 @@ private:
     std::string m_turn_username;
     std::string m_turn_password;
     
+    // 【关键修复】TURN服务器配置必须使用成员变量，不能是局部变量
+    // 因为jconfig.turn_servers会保存指向它的指针，局部变量会导致悬空指针
+    juice_turn_server_t m_turn_server{};
+    
     std::atomic<IceState> m_state{IceState::New};
     std::atomic<IceConnectionType> m_connection_type{IceConnectionType::None};
     

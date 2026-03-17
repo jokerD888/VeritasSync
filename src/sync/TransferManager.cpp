@@ -17,6 +17,21 @@
 
 namespace VeritasSync {
 
+// 简单的 RAII 作用域退出辅助类
+class ScopeExit {
+public:
+    explicit ScopeExit(std::function<void()> func) : m_func(std::move(func)) {}
+    ~ScopeExit() { if (m_func) m_func(); }
+    
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    ScopeExit(ScopeExit&&) = default;
+    ScopeExit& operator=(ScopeExit&&) = default;
+    
+private:
+    std::function<void()> m_func;
+};
+
 // E-1: 魔数统一为命名常量
 static constexpr int  FILE_OPEN_MAX_RETRIES       = 5;      // 文件打开最大重试次数
 static constexpr int  FILE_OPEN_RETRY_DELAY_MS    = 200;    // 文件打开失败重试延迟（毫秒）
@@ -59,7 +74,94 @@ struct UploadContext {
 
 // --- 实现 ---
 
+static constexpr uint32_t MAX_ALLOWED_TOTAL_CHUNKS = 8 * 1024 * 1024;
+static constexpr size_t MAX_ALLOWED_RELATIVE_PATH_LEN = 4096;
+
+std::optional<TransferManager::UploadRequest> TransferManager::parse_and_validate_upload_request(
+    const nlohmann::json& request_payload,
+    StateManager* state_manager,
+    std::string& error_reason) {
+
+    if (!state_manager) {
+        error_reason = "state_manager is null";
+        return std::nullopt;
+    }
+
+    try {
+        if (!request_payload.is_object()) {
+            error_reason = "payload is not json object";
+            return std::nullopt;
+        }
+
+        if (!request_payload.contains("path") || !request_payload["path"].is_string()) {
+            error_reason = "missing or invalid path";
+            return std::nullopt;
+        }
+
+        UploadRequest req;
+        req.path = request_payload.at("path").get<std::string>();
+        req.start_chunk = request_payload.value("start_chunk", 0u);
+        req.expected_hash = request_payload.value("expected_hash", "");
+        req.expected_size = request_payload.value("expected_size", 0ull);
+
+        if (req.path.empty()) {
+            error_reason = "empty path";
+            return std::nullopt;
+        }
+
+        if (req.path.size() > MAX_ALLOWED_RELATIVE_PATH_LEN) {
+            error_reason = "path too long";
+            return std::nullopt;
+        }
+
+        if (!PathUtils::is_path_safe(state_manager->get_root_path(), req.path)) {
+            error_reason = "path traversal detected";
+            return std::nullopt;
+        }
+
+        return req;
+    } catch (const std::exception& e) {
+        error_reason = std::string("json parse failed: ") + e.what();
+        return std::nullopt;
+    }
+}
+
+bool TransferManager::validate_chunk_header(const ChunkHeader& hdr, std::string& error_reason) {
+    if (!hdr.valid) {
+        error_reason = "invalid chunk header";
+        return false;
+    }
+
+    if (hdr.file_path.empty()) {
+        error_reason = "empty file path";
+        return false;
+    }
+
+    if (hdr.file_path.size() > MAX_ALLOWED_RELATIVE_PATH_LEN) {
+        error_reason = "file path too long";
+        return false;
+    }
+
+    if (hdr.total_chunks == 0) {
+        error_reason = "total_chunks is zero";
+        return false;
+    }
+
+    if (hdr.total_chunks > MAX_ALLOWED_TOTAL_CHUNKS) {
+        error_reason = "total_chunks exceeds limit";
+        return false;
+    }
+
+    if (hdr.chunk_index >= hdr.total_chunks) {
+        error_reason = "chunk_index out of range";
+        return false;
+    }
+
+    return true;
+}
+
 TransferManager::SessionStats TransferManager::get_session_stats() const {
+
     return {m_session_total.load(), m_session_done.load()};
 }
 TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
@@ -71,33 +173,36 @@ TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_c
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
 
-    std::string requested_path_str = request_payload.at("path").get<std::string>();
-    
-    // 【断点续传】解析可选参数
-    uint32_t start_chunk = request_payload.value("start_chunk", 0u);
-    std::string expected_hash = request_payload.value("expected_hash", "");
-    uint64_t expected_size = request_payload.value("expected_size", 0ull);
-    
-    if (start_chunk > 0) {
-        g_logger->info("[Transfer] 收到续传请求: {} -> {} (start_chunk={})", 
-                      requested_path_str, peer_id, start_chunk);
+    std::string validation_error;
+    auto request = parse_and_validate_upload_request(request_payload, m_state_manager, validation_error);
+    if (!request) {
+        g_logger->warn("[Transfer] 拒绝无效上传请求: peer={}, reason={}", peer_id, validation_error);
+        return;
+    }
+
+    if (request->start_chunk > 0) {
+        g_logger->info("[Transfer] 收到续传请求: {} -> {} (start_chunk={})",
+                      request->path, peer_id, request->start_chunk);
     } else {
-        g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", requested_path_str, peer_id);
+        g_logger->info("[Transfer] 开始处理文件请求: {} -> {}", request->path, peer_id);
     }
 
     // 1. UI 占位
     {
         std::lock_guard<std::mutex> lock(m_transfer_mutex);
-        m_sending_files[requested_path_str] = {0, 0};
+        m_sending_files[request->path] = {0, 0};
         m_session_total++;
     }
-
-    if (!m_state_manager) return;
 
     // 创建上下文，持有 io_context 用于定时器
     auto ctx = std::make_shared<UploadContext>(m_io_context, CHUNK_DATA_SIZE);
     ctx->peer_id = peer_id;
-    ctx->path = requested_path_str;
+    ctx->path = request->path;
+
+    const uint32_t start_chunk = request->start_chunk;
+    const std::string expected_hash = request->expected_hash;
+    const uint64_t expected_size = request->expected_size;
+
 
     // 2. 启动异步任务链
     boost::asio::post(m_worker_pool, [self = shared_from_this(), ctx, start_chunk, expected_hash, expected_size]() {
@@ -294,7 +399,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
             // --- 循环结束：清理与收尾 ---
             if (ctx->current_chunk >= ctx->total_chunks) {
                 ctx->file.close(); // 传输完成，关闭句柄
-                if (!ctx->file_hash.empty()) {
+                // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+                if (!ctx->file_hash.empty() && self->m_state_manager) {
                     self->m_state_manager->record_file_sent(ctx->peer_id, ctx->path, ctx->file_hash);
                 }
                 {
@@ -326,8 +432,12 @@ TransferManager::ChunkHeader TransferManager::parse_chunk_payload(const std::str
     data_ptr += path_len;
     data_len -= path_len;
 
+    // 至少要包含 chunk_index(4) + total_chunks(4)
+    if (data_len < sizeof(uint32_t) * 2) return hdr;
+
     hdr.chunk_index = read_uint32(data_ptr, data_len);
     hdr.total_chunks = read_uint32(data_ptr, data_len);
+
 
     // Snappy 解压 — CPU 密集操作
     if (data_len > 0) {
@@ -347,6 +457,12 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
     const std::string& peer_id) {
 
     ChunkLookupResult result;
+
+    // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+    if (!m_state_manager) {
+        g_logger->warn("[Transfer] StateManager 已释放，跳过接收: {}", file_path_str);
+        return result;
+    }
 
     // 【安全】路径遍历攻击防护：验证网络传入的路径不会逃逸出同步根目录
     if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), file_path_str)) {
@@ -409,7 +525,19 @@ void TransferManager::finalize_received_file(
     std::shared_ptr<ReceivingFile>& recv_ptr,
     const std::string& peer_id) {
 
+    ScopeExit finalize_guard([this, file_path_str]() {
+        m_session_done++;
+        std::lock_guard<std::mutex> map_lock(m_transfer_mutex);
+        m_receiving_files.erase(file_path_str);
+    });
+
     recv_ptr->file_stream.close();
+
+    // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+    if (!m_state_manager) {
+        g_logger->warn("[Transfer] StateManager 已释放，跳过文件完成处理: {}", file_path_str);
+        return;
+    }
 
     std::filesystem::path relative_path = Utf8ToPath(file_path_str);
     std::filesystem::path final_path = m_state_manager->get_root_path() / relative_path;
@@ -420,7 +548,7 @@ void TransferManager::finalize_received_file(
 
     if (!ec) {
         g_logger->info("[Transfer] ✅ 下载完成: {}", file_path_str);
-        if (!peer_id.empty()) {
+        if (!peer_id.empty() && m_state_manager) {
             std::string new_hash = Hashing::CalculateSHA256(final_path);
             m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
             m_state_manager->mark_file_received(file_path_str, new_hash);
@@ -428,12 +556,8 @@ void TransferManager::finalize_received_file(
     } else {
         g_logger->error("[Transfer] 重命名失败: {} -> {} | {}", recv_ptr->temp_path, PathToUtf8(final_path), ec.message());
     }
-    m_session_done++;
-
-    // 短暂全局锁，从 map 中移除已完成的条目
-    std::lock_guard<std::mutex> map_lock(m_transfer_mutex);
-    m_receiving_files.erase(file_path_str);
 }
+
 
 // ═══════════════════════════════════════════════════════════════
 
@@ -443,14 +567,25 @@ void TransferManager::handle_chunk(const std::string& payload, const std::string
         try {
             // 阶段 0: 解析头部 + Snappy 解压（无锁）
             auto hdr = parse_chunk_payload(payload);
-            if (!hdr.valid) return;
+            std::string chunk_error;
+            if (!validate_chunk_header(hdr, chunk_error)) {
+                g_logger->warn("[Transfer] 丢弃无效chunk: peer={}, path='{}', reason={}",
+                              peer_id, hdr.file_path, chunk_error);
+                return;
+            }
 
             // 阶段 A: 短暂全局锁，查找/创建 ReceivingFile
             auto lookup = self->lookup_or_create_receiving(hdr.file_path, hdr.total_chunks, peer_id);
             recv_ptr = lookup.recv_ptr;
+            if (!recv_ptr) {
+                g_logger->warn("[Transfer] 接收上下文创建失败，跳过chunk: peer={}, path={}",
+                              peer_id, hdr.file_path);
+                return;
+            }
 
             // 阶段 B: per-file 锁，执行所有 I/O 操作
             std::lock_guard<std::mutex> file_lock(recv_ptr->file_mutex);
+
 
             auto now = std::chrono::steady_clock::now();
 

@@ -8,7 +8,9 @@
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <cctype>
 #include <sstream>
+
 
 namespace VeritasSync {
 
@@ -153,6 +155,43 @@ inline void from_json(const nlohmann::json& j, Config& config) {
 
     j.at("tasks").get_to(config.tasks);
 }
+
+/// 端口验证辅助函数（unsigned short 版本，只需检查 > 0）
+inline bool is_valid_port(unsigned short port) { return port > 0; }
+
+/// 端口验证辅助函数（int 版本，检查 1-65535 范围）
+inline bool is_valid_port(int port) { return port > 0 && port <= 65535; }
+
+/// sync_key 校验失败原因（通过时返回空字符串）
+inline std::string get_sync_key_validation_error(const std::string& sync_key) {
+    if (sync_key.empty()) {
+        return "sync_key 不能为空";
+    }
+    if (sync_key.length() > 64) {
+        return "sync_key 长度不能超过 64";
+    }
+    if (sync_key.find("..") != std::string::npos) {
+        return "sync_key 不能包含连续的点号 '..'";
+    }
+    if (sync_key.find('/') != std::string::npos || sync_key.find('\\') != std::string::npos) {
+        return "sync_key 不能包含路径分隔符 '/' 或 '\\'";
+    }
+
+    for (unsigned char ch : sync_key) {
+        const bool is_ok = std::isalnum(ch) || ch == '_' || ch == '-';
+        if (!is_ok) {
+            return "sync_key 仅允许字母、数字、下划线和中划线";
+        }
+    }
+
+    return "";
+}
+
+/// sync_key 验证：仅允许字母/数字/下划线/中划线，且长度 1-64
+inline bool is_valid_sync_key(const std::string& sync_key) {
+    return get_sync_key_validation_error(sync_key).empty();
+}
+
 
 /// 配置验证：检查所有字段的有效性，返回错误信息列表（空 = 全部通过）
 std::vector<std::string> validate_config(const Config& config);

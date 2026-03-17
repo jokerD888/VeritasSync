@@ -179,6 +179,21 @@ private:
     };
     static ChunkHeader parse_chunk_payload(const std::string& payload);
 
+    struct UploadRequest {
+        std::string path;
+        uint32_t start_chunk = 0;
+        std::string expected_hash;
+        uint64_t expected_size = 0;
+    };
+
+    static std::optional<UploadRequest> parse_and_validate_upload_request(
+        const nlohmann::json& request_payload,
+        StateManager* state_manager,
+        std::string& error_reason);
+
+    static bool validate_chunk_header(const ChunkHeader& hdr, std::string& error_reason);
+
+
     /// handle_chunk 查找/创建 ReceivingFile 条目（短暂全局锁内）
     struct ChunkLookupResult {
         std::shared_ptr<ReceivingFile> recv_ptr;

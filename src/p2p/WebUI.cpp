@@ -30,7 +30,6 @@ namespace VeritasSync {
 // E-1: 魔数统一为命名常量
 static constexpr size_t LOG_TAIL_SIZE_STATUS = 16384;   // GET /api/log 尾部读取字节数
 static constexpr size_t LOG_TAIL_SIZE_TASK   = 32768;   // GET /api/tasks/:id/log 尾部读取字节数
-static constexpr int    RESTART_DELAY_MS     = 1000;    // 重启前等待延迟（毫秒）
 static constexpr size_t AUTH_TOKEN_BYTES     = 32;      // 认证令牌字节数
 
 // ═══════════════════════════════════════════════════════════════
@@ -63,9 +62,25 @@ WebUIServer::WebUIServer(int port, const std::string& config_path)
 // 公有方法
 // ═══════════════════════════════════════════════════════════════
 
-void WebUIServer::start() {
+void WebUIServer::start(const std::function<void(bool)>& on_ready) {
+    if (g_logger) g_logger->info("[WebUI] 正在尝试监听 127.0.0.1:{} ...", m_port);
+
+    const bool bind_ok = m_svr.bind_to_port("127.0.0.1", m_port);
+    if (on_ready) {
+        on_ready(bind_ok);
+    }
+
+    if (!bind_ok) {
+        if (g_logger) g_logger->error("[WebUI] 监听失败：无法绑定 127.0.0.1:{}（端口可能被占用）", m_port);
+        return;
+    }
+
     if (g_logger) g_logger->info("[WebUI] 服务启动于 http://127.0.0.1:{}", m_port);
-    m_svr.listen("127.0.0.1", m_port);
+
+    const bool listen_ok = m_svr.listen_after_bind();
+    if (!listen_ok && g_logger) {
+        g_logger->warn("[WebUI] 监听循环异常退出");
+    }
 }
 
 void WebUIServer::stop() { m_svr.stop(); }
@@ -219,17 +234,8 @@ void WebUIServer::setup_routes() {
 
 void WebUIServer::setup_page_routes() {
     m_svr.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
-        if (req.has_param("token") && req.get_param_value("token") == m_auth_token) {
-            res.set_content(get_index_html(), "text/html; charset=utf-8");
-        } else {
-            res.status = 401;
-            res.set_content(
-                R"(<!DOCTYPE html><html><head><meta charset="UTF-8"><title>VeritasSync</title></head>)"
-                R"(<body style="background:#0b1121;color:#94a3b8;display:flex;justify-content:center;align-items:center;height:100vh;font-family:system-ui">)"
-                R"(<div style="text-align:center"><h2 style="color:#f1f5f9;margin-bottom:12px">🔒 需要授权</h2>)"
-                R"(<p>请通过系统托盘的 "打开控制台" 菜单访问 WebUI</p></div></body></html>)",
-                "text/html; charset=utf-8");
-        }
+        if (!check_auth(req, res)) return;
+        res.set_content(get_index_html(), "text/html; charset=utf-8");
     });
 }
 
@@ -282,8 +288,8 @@ void WebUIServer::setup_config_routes() {
             std::string new_turn_host = j.value("turn_host", m_config.turn_host);
             int new_turn_port = j.value("turn_port", (int)m_config.turn_port);
 
-            if (new_tracker_port < 1 || new_tracker_port > 65535 || new_stun_port < 1 || new_stun_port > 65535 ||
-                new_turn_port < 1 || new_turn_port > 65535) {
+            if (!is_valid_port(new_tracker_port) || !is_valid_port(new_stun_port) ||
+                !is_valid_port(new_turn_port)) {
                 if (g_logger) g_logger->warn("[WebUI] 配置保存失败: 端口号必须在 1-65535 之间");
                 res.status = 400;
                 res.set_content("{\"error\":\"端口号无效，请输入 1-65535 之间的整数\"}",
@@ -319,8 +325,22 @@ void WebUIServer::setup_config_routes() {
     // POST /api/restart
     m_svr.Post("/api/restart", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
+
+        OnRestartRequestCallback restart_cb;
+        {
+            std::lock_guard<std::mutex> lock(m_callback_mutex);
+            restart_cb = m_on_restart_request;
+        }
+
+        if (!restart_cb) {
+            if (g_logger) g_logger->warn("[WebUI] 重启请求失败: 未设置重启回调");
+            res.status = 503;
+            res.set_content("{\"success\":false,\"error\":\"restart callback not configured\"}", "application/json");
+            return;
+        }
+
         res.set_content("{\"success\":true}", "application/json");
-        std::thread([]() { restart_application(); }).detach();
+        std::thread([restart_cb]() { restart_cb(); }).detach();
     });
 }
 
@@ -334,6 +354,14 @@ void WebUIServer::setup_task_routes() {
             auto j = nlohmann::json::parse(req.body);
             SyncTask task;
             task.sync_key = j.at("sync_key").get<std::string>();
+            const std::string sync_key_error = get_sync_key_validation_error(task.sync_key);
+            if (!sync_key_error.empty()) {
+                res.status = 400;
+                res.set_content(nlohmann::json{{"success", false}, {"error", sync_key_error}}.dump(),
+                                "application/json");
+                return;
+            }
+
             task.role = j.at("role").get<std::string>();
             task.sync_folder = j.at("sync_folder").get<std::string>();
 
@@ -343,16 +371,34 @@ void WebUIServer::setup_task_routes() {
                 task.mode = SyncMode::OneWay;
             }
 
+            // 1. 先保存配置，确保持久化成功
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
                 m_config.tasks.push_back(task);
                 if (!save_config_internal()) {
+                    m_config.tasks.pop_back();  // 回滚：移除已添加的任务
                     res.status = 500;
+                    res.set_content("{\"success\":false,\"error\":\"无法保存配置\"}", "application/json");
                     return;
                 }
+            }
 
-                if (m_on_task_add) {
-                    m_on_task_add(task, m_config);
+            // 2. 配置保存成功后再启动任务
+            if (m_on_task_add) {
+                if (!m_on_task_add(task, m_config)) {
+                    // 启动失败，需要回滚配置
+                    {
+                        std::lock_guard<std::mutex> lock(m_config_mutex);
+                        auto it = std::find_if(m_config.tasks.begin(), m_config.tasks.end(),
+                            [&task](const SyncTask& t) { return t.sync_key == task.sync_key; });
+                        if (it != m_config.tasks.end()) {
+                            m_config.tasks.erase(it);
+                            save_config_internal();  // 保存回滚后的配置
+                        }
+                    }
+                    res.status = 500;
+                    res.set_content("{\"success\":false,\"error\":\"任务启动失败\"}", "application/json");
+                    return;
                 }
             }
 
@@ -368,12 +414,12 @@ void WebUIServer::setup_task_routes() {
     m_svr.Delete("/api/tasks/:id", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             std::string removed_sync_key;
             bool save_ok = false;
             
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     removed_sync_key = m_config.tasks[idx].sync_key;
                     m_config.tasks.erase(m_config.tasks.begin() + idx);
@@ -386,6 +432,7 @@ void WebUIServer::setup_task_routes() {
             
             if (!save_ok) {
                 res.status = 500;
+                res.set_content("{\"success\":false,\"error\":\"无法保存配置\"}", "application/json");
                 return;
             }
             
@@ -395,8 +442,15 @@ void WebUIServer::setup_task_routes() {
             }
             
             res.set_content("{\"success\":true}", "application/json");
+        } catch (const std::invalid_argument&) {
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"无效的任务ID格式\"}", "application/json");
+        } catch (const std::out_of_range&) {
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"任务ID超出范围\"}", "application/json");
         } catch (...) {
             res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"请求处理失败\"}", "application/json");
         }
     });
 }
@@ -408,10 +462,10 @@ void WebUIServer::setup_task_detail_routes() {
     m_svr.Get("/api/tasks/:id/log", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             std::string log_content;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     std::string raw = tail_log("veritas_sync.log", LOG_TAIL_SIZE_TASK);
                     std::ostringstream oss;
@@ -425,8 +479,15 @@ void WebUIServer::setup_task_detail_routes() {
                 }
             }
             res.set_content(log_content, "text/plain; charset=utf-8");
+        } catch (const std::invalid_argument&) {
+            res.status = 400;
+            res.set_content("无效的任务ID格式", "text/plain; charset=utf-8");
+        } catch (const std::out_of_range&) {
+            res.status = 400;
+            res.set_content("任务ID超出范围", "text/plain; charset=utf-8");
         } catch (...) {
             res.status = 400;
+            res.set_content("请求处理失败", "text/plain; charset=utf-8");
         }
     });
 
@@ -434,10 +495,10 @@ void WebUIServer::setup_task_detail_routes() {
     m_svr.Post("/api/tasks/:id/open", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             std::string p;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) p = m_config.tasks[idx].sync_folder;
             }
             if (!p.empty()) {
@@ -446,8 +507,15 @@ void WebUIServer::setup_task_detail_routes() {
             } else {
                 res.status = 404;
             }
+        } catch (const std::invalid_argument&) {
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"无效的任务ID格式\"}", "application/json");
+        } catch (const std::out_of_range&) {
+            res.status = 400;
+            res.set_content("{\"success\":false,\"error\":\"任务ID超出范围\"}", "application/json");
         } catch (...) {
             res.status = 500;
+            res.set_content("{\"success\":false,\"error\":\"服务器内部错误\"}", "application/json");
         }
     });
 
@@ -474,10 +542,10 @@ void WebUIServer::setup_ignore_routes() {
     m_svr.Get("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             std::string content;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     std::filesystem::path ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
                     if (std::filesystem::exists(ignore_path)) {
@@ -507,13 +575,13 @@ void WebUIServer::setup_ignore_routes() {
     m_svr.Post("/api/tasks/:id/ignore", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             nlohmann::json body = nlohmann::json::parse(req.body);
             std::string content = body.value("content", "");
             
             std::filesystem::path ignore_path;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
                 }
@@ -553,13 +621,19 @@ void WebUIServer::setup_nl_filter_routes() {
     m_svr.Post("/api/tasks/:id/ignore/generate", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             nlohmann::json body = nlohmann::json::parse(req.body);
             std::string description = body.value("description", "");
 
+            // 检查描述长度，防止超长输入攻击
+            const size_t MAX_DESCRIPTION_LENGTH = 4096;
             if (description.empty()) {
                 res.status = 400;
                 res.set_content("{\"success\":false,\"error\":\"请输入描述\"}", "application/json");
+                return;
+            }
+            if (description.length() > MAX_DESCRIPTION_LENGTH) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"描述过长，最大支持4096字符\"}", "application/json");
                 return;
             }
 
@@ -567,6 +641,7 @@ void WebUIServer::setup_nl_filter_routes() {
             std::string existing_rules;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     std::filesystem::path ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
                     if (std::filesystem::exists(ignore_path)) {
@@ -620,13 +695,19 @@ void WebUIServer::setup_nl_filter_routes() {
     m_svr.Post("/api/tasks/:id/ignore/append", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         try {
-            size_t idx = std::stoul(req.path_params.at("id"));
             nlohmann::json body = nlohmann::json::parse(req.body);
             std::string new_rules = body.value("rules", "");
 
+            // 检查规则长度，防止超长输入攻击
+            const size_t MAX_RULES_LENGTH = 10000;
             if (new_rules.empty()) {
                 res.status = 400;
                 res.set_content("{\"success\":false,\"error\":\"规则不能为空\"}", "application/json");
+                return;
+            }
+            if (new_rules.length() > MAX_RULES_LENGTH) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"规则内容过长，最大支持10000字符\"}", "application/json");
                 return;
             }
 
@@ -634,6 +715,7 @@ void WebUIServer::setup_nl_filter_routes() {
             std::string existing_content;
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                size_t idx = std::stoul(req.path_params.at("id"));
                 if (idx < m_config.tasks.size()) {
                     ignore_path = Utf8ToPath(m_config.tasks[idx].sync_folder) / ".veritasignore";
                     // 读取现有内容
@@ -762,19 +844,6 @@ std::string WebUIServer::tail_log(const std::string& file, std::size_t max_bytes
     return content;
 }
 
-void WebUIServer::restart_application() {
-    if (g_logger) g_logger->info("[WebUI] 正在重启...");
-    std::this_thread::sleep_for(std::chrono::milliseconds(RESTART_DELAY_MS));
-#ifdef _WIN32
-    char szPath[MAX_PATH];
-    if (GetModuleFileNameA(NULL, szPath, MAX_PATH)) {
-        ShellExecuteA(NULL, "open", szPath, NULL, NULL, SW_SHOWNORMAL);
-    }
-    std::exit(0);
-#else
-    system("./veritas_sync &");
-    std::exit(0);
-#endif
-}
+
 
 }  // namespace VeritasSync

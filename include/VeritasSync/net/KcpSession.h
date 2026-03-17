@@ -10,8 +10,49 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace VeritasSync {
+
+// 前向声明
+class KcpSession;
+
+/**
+ * @brief KCP 回调上下文结构体
+ * 用于在 KCP 回调中安全地访问 KcpSession
+ * 使用 weak_ptr 避免循环引用，同时允许检测对象是否已销毁
+ */
+struct KcpContext {
+    std::weak_ptr<KcpSession> session;
+    ikcpcb* kcp = nullptr;  // 反向引用，用于注销
+};
+
+/**
+ * @brief KCP 上下文管理器（全局单例）
+ * 管理所有 KCP 上下文的生命周期，确保回调执行期间上下文有效
+ */
+class KcpContextManager {
+public:
+    static KcpContextManager& instance();
+    
+    // 注册上下文，返回原始指针给 KCP 库使用
+    KcpContext* register_context(ikcpcb* kcp, std::shared_ptr<KcpSession> session);
+    
+    // 注销上下文（在 KCP 释放时调用）
+    void unregister_context(ikcpcb* kcp);
+    
+    // 获取上下文
+    std::shared_ptr<KcpContext> get_context(ikcpcb* kcp);
+
+private:
+    KcpContextManager() = default;
+    ~KcpContextManager() = default;
+    KcpContextManager(const KcpContextManager&) = delete;
+    KcpContextManager& operator=(const KcpContextManager&) = delete;
+    
+    std::mutex m_mutex;
+    std::unordered_map<ikcpcb*, std::shared_ptr<KcpContext>> m_contexts;
+};
 
 /**
  * @brief KCP 会话配置
@@ -203,21 +244,31 @@ public:
     /**
      * @brief 获取底层 KCP 指针 (仅供兼容旧代码，后续应移除)
      */
-    ikcpcb* get_raw_kcp() const { return m_kcp; }
+    ikcpcb* get_raw_kcp() const { return m_kcp.get(); }
 
 private:
     KcpSession(uint32_t conv, KcpSessionCallbacks callbacks);
-    
     bool initialize(const KcpConfig& config);
     
-    // KCP 输出回调
     static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
     
+    // 【修复】自定义删除器，延迟 KCP 资源释放
+    struct KcpDeleter {
+        void operator()(ikcpcb* kcp) const {
+            if (kcp) {
+                // 先注销上下文，再释放 KCP
+                KcpContextManager::instance().unregister_context(kcp);
+                ikcp_release(kcp);
+            }
+        }
+    };
+    
     uint32_t m_conv;
-    ikcpcb* m_kcp = nullptr;
+    std::unique_ptr<ikcpcb, KcpDeleter> m_kcp;  // 使用自定义删除器
     KcpSessionCallbacks m_callbacks;
     
     mutable std::mutex m_mutex;
+    std::atomic<bool> m_destroyed{false};
 };
 
 } // namespace VeritasSync

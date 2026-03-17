@@ -19,14 +19,20 @@ public:
     WebUIServer(int port, const std::string& config_path);
 
     using StatusProvider = std::function<nlohmann::json()>;
-    using OnTaskAddCallback = std::function<void(const SyncTask&, const Config&)>;
+    using OnTaskAddCallback = std::function<bool(const SyncTask&, const Config&)>;
     /// C-5: 删除任务时的回调，参数为被删除任务的 sync_key
     using OnTaskRemoveCallback = std::function<void(const std::string& sync_key)>;
+    /// B-02: WebUI 请求主线程执行优雅重启
+    using OnRestartRequestCallback = std::function<void()>;
     void set_status_provider(StatusProvider provider) { m_status_provider = provider; }
     void set_on_task_add(OnTaskAddCallback cb) { m_on_task_add = cb; }
     void set_on_task_remove(OnTaskRemoveCallback cb) { m_on_task_remove = cb; }
+    void set_on_restart_request(OnRestartRequestCallback cb) {
+        std::lock_guard<std::mutex> lock(m_callback_mutex);
+        m_on_restart_request = cb;
+    }
 
-    void start();
+    void start(const std::function<void(bool)>& on_ready = nullptr);
     void stop();
 
     unsigned short get_port() const { return static_cast<unsigned short>(m_port); }
@@ -51,6 +57,8 @@ private:
     StatusProvider m_status_provider;
     OnTaskAddCallback m_on_task_add;
     OnTaskRemoveCallback m_on_task_remove;
+    OnRestartRequestCallback m_on_restart_request;
+    std::mutex m_callback_mutex;
     std::string m_auth_token;
     NLFilterGenerator m_nl_filter;
 
@@ -71,7 +79,6 @@ private:
     static std::filesystem::path get_exe_dir();
     static std::string get_index_html();
     static std::string tail_log(const std::string& file, std::size_t max_bytes);
-    static void restart_application();
 };
 
 }  // namespace VeritasSync
