@@ -188,27 +188,19 @@ int KcpSession::get_wait_send_count() const {
     return ikcp_waitsnd(m_kcp.get());
 }
 
-// 【修复】改进的回调函数，使用全局上下文管理器
-int KcpSession::kcp_output_callback(const char* buf, int len, 
+// 【修复】改进的回调函数，通过 KcpContext 的 weak_ptr 保证生命周期安全
+int KcpSession::kcp_output_callback(const char* buf, int len,
                                     [[maybe_unused]] ikcpcb* kcp, void* user) {
     auto* ctx = static_cast<KcpContext*>(user);
     if (!ctx) return -1;
-    
-    // 【关键修复】通过全局管理器获取上下文的 shared_ptr
-    // 这确保上下文在回调执行期间不会被释放
-    auto ctx_ptr = KcpContextManager::instance().get_context(kcp);
-    if (!ctx_ptr) {
-        // 上下文已被注销，KCP 正在释放中
-        return -1;
-    }
-    
-    // 尝试提升为 shared_ptr，如果对象已销毁则返回空
-    auto session = ctx_ptr->session.lock();
+
+    // 直接使用 ctx->session.lock() 提升为 shared_ptr，零额外锁开销。
+    // weak_ptr::lock() 本身已是线程安全的原子操作，无需再经过全局管理器查找。
+    auto session = ctx->session.lock();
     if (!session) {
         return -1;  // 对象已销毁，安全返回
     }
-    
-    // 现在可以安全访问 session 成员
+
     if (session->m_callbacks.on_output) {
         return session->m_callbacks.on_output(buf, len);
     }

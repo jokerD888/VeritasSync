@@ -152,28 +152,26 @@ static bool broadcast_path_event(SyncRole role, SyncMode mode,
     nlohmann::json msg;
     msg[Protocol::MSG_TYPE] = msg_type;
     msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
-    return send_fn(msg.dump());
+    bool ok = send_fn(msg.dump());
+    if (!ok) {
+        g_logger->warn("[P2P] 广播{}失败（无可用对等点）: {}", log_label, relative_path);
+    }
+    return ok;
 }
 
 void P2PManager::broadcast_file_delete(const std::string& relative_path) {
-    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); })) {
-        g_logger->warn("[P2P] 广播文件删除失败（无可用对等点）: {}", relative_path);
-    }
+    broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); });
 }
 
 void P2PManager::broadcast_dir_create(const std::string& relative_path) {
-    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); })) {
-        g_logger->warn("[P2P] 广播目录创建失败（无可用对等点）: {}", relative_path);
-    }
+    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); });
 }
 
 void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
-    if (!broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); })) {
-        g_logger->warn("[P2P] 广播目录删除失败（无可用对等点）: {}", relative_path);
-    }
+    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
+                         [this](const std::string& s){ return send_over_kcp(s); });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -269,15 +267,15 @@ void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& cre
 // 静态工厂与构造/析构
 // ═══════════════════════════════════════════════════════════════
 
-std::shared_ptr<P2PManager> P2PManager::create() {
+std::shared_ptr<P2PManager> P2PManager::create(const P2PManagerConfig& config) {
     struct P2PManagerMaker : public P2PManager {
         P2PManagerMaker() : P2PManager() {}
     };
     auto manager = std::make_shared<P2PManagerMaker>();
-    // 【修复 Bug A】不再在 create() 中调用 init()
-    // init() 会创建 TransferManager（使用 m_chunk_size）和 KcpScheduler（使用 m_kcp_update_interval_ms），
-    // 这些参数在 create() 时还是默认值，必须等外部调用 set_chunk_size/set_kcp_update_interval 配置完成后，
-    // 再由外部显式调用 init() 来创建子组件，否则用户的自定义配置永远不生效。
+    manager->m_chunk_size = config.chunk_size;
+    manager->m_kcp_window_size = config.kcp_window_size;
+    manager->m_kcp_update_interval_ms = config.kcp_update_interval_ms;
+    manager->init();
     return manager;
 }
 
@@ -825,8 +823,8 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
         if (m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional) {
             std::string sender_id = from_peer ? from_peer->get_peer_id() : "";
-            // 二进制文件块，交给 TransferManager 处理
-            m_transfer_manager->handle_chunk(payload, sender_id);
+            // 二进制文件块，交给 TransferManager 处理（move 避免 ~16KB 拷贝）
+            m_transfer_manager->handle_chunk(std::move(payload), sender_id);
         }
     } else {
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);

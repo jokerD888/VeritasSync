@@ -152,6 +152,11 @@ void Database::prepare_statements() {
     sqlite3_stmt* stmt_get_all = nullptr;
     sqlite3_prepare_v2(m_db, sql_get_all, -1, &stmt_get_all, nullptr);
     m_stmt_get_all_paths.reset(stmt_get_all);
+
+    const char* sql_get_all_files = "SELECT path, hash, mtime FROM files;";
+    sqlite3_stmt* stmt_get_all_files = nullptr;
+    sqlite3_prepare_v2(m_db, sql_get_all_files, -1, &stmt_get_all_files, nullptr);
+    m_stmt_get_all_files.reset(stmt_get_all_files);
 }
 std::optional<SyncHistory> Database::get_sync_history(const std::string& peer_id, const std::string& path) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -263,6 +268,26 @@ std::vector<std::string> Database::get_all_file_paths() const {
         if (val) paths.emplace_back(val);
     }
     return paths;
+}
+
+std::vector<FileMetadata> Database::get_all_files() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<FileMetadata> files;
+    if (!m_db || !m_stmt_get_all_files) return files;
+
+    sqlite3_reset(m_stmt_get_all_files.get());
+    while (sqlite3_step(m_stmt_get_all_files.get()) == SQLITE_ROW) {
+        const char* path_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_get_all_files.get(), 0));
+        const char* hash_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_get_all_files.get(), 1));
+        if (path_val && hash_val) {
+            FileMetadata meta;
+            meta.path = path_val;
+            meta.hash = hash_val;
+            meta.mtime = sqlite3_column_int64(m_stmt_get_all_files.get(), 2);
+            files.push_back(std::move(meta));
+        }
+    }
+    return files;
 }
 
 void Database::begin_transaction() {

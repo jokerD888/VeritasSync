@@ -22,12 +22,19 @@ class ScopeExit {
 public:
     explicit ScopeExit(std::function<void()> func) : m_func(std::move(func)) {}
     ~ScopeExit() { if (m_func) m_func(); }
-    
+
     ScopeExit(const ScopeExit&) = delete;
     ScopeExit& operator=(const ScopeExit&) = delete;
-    ScopeExit(ScopeExit&&) = default;
-    ScopeExit& operator=(ScopeExit&&) = default;
-    
+    ScopeExit(ScopeExit&& other) noexcept : m_func(std::move(other.m_func)) { other.m_func = nullptr; }
+    ScopeExit& operator=(ScopeExit&& other) noexcept {
+        if (this != &other) {
+            if (m_func) m_func();  // 执行旧的清理操作
+            m_func = std::move(other.m_func);
+            other.m_func = nullptr;
+        }
+        return *this;
+    }
+
 private:
     std::function<void()> m_func;
 };
@@ -561,8 +568,9 @@ void TransferManager::finalize_received_file(
 
 // ═══════════════════════════════════════════════════════════════
 
-void TransferManager::handle_chunk(const std::string& payload, const std::string& peer_id) {
-    boost::asio::post(m_worker_pool, [self = shared_from_this(), payload, peer_id]() {
+void TransferManager::handle_chunk(std::string payload, const std::string& peer_id) {
+    // 【优化】payload 按值传入，直接 move 进 lambda，避免热路径上 ~16KB 的额外拷贝
+    boost::asio::post(m_worker_pool, [self = shared_from_this(), payload = std::move(payload), peer_id]() {
         std::shared_ptr<ReceivingFile> recv_ptr;  // 提到 try 外部，供 catch 块清理用
         try {
             // 阶段 0: 解析头部 + Snappy 解压（无锁）

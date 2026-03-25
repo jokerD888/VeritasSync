@@ -65,7 +65,13 @@ TrackerClient::TrackerClient(boost::asio::io_context& io_context, std::string ho
  * @brief 计划重连逻辑：在连接断开时清理资源并调度重连定时器
  */
 void TrackerClient::schedule_reconnect() {
-    m_state = State::DISCONNECTED;
+    // stop() 后禁止重连，避免 operation_aborted/eof 路径触发"被动复活"
+    if (is_stopping()) {
+        g_logger->info("[TrackerClient] 客户端处于停止态，跳过自动重连。");
+        return;
+    }
+
+    m_state.store(State::DISCONNECTED, std::memory_order_release);
 
     // 立即关闭，确保 socket 状态重置
     if (m_socket.is_open()) {
@@ -76,18 +82,11 @@ void TrackerClient::schedule_reconnect() {
     // 清理写队列，防止重连后发送旧包
     m_write_queue.clear();
 
-    // stop() 后禁止重连，避免 operation_aborted/eof 路径触发“被动复活”
-    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
-        g_logger->info("[TrackerClient] 客户端处于停止态，跳过自动重连。");
-        return;
-    }
-
     g_logger->warn("[TrackerClient] 连接断开，{}秒后尝试重连...", RECONNECT_INTERVAL.count());
 
     m_retry_timer.expires_after(RECONNECT_INTERVAL);
     m_retry_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
-        if (!ec && !self->m_stopping.load(std::memory_order_acquire) &&
-            self->m_allow_reconnect.load(std::memory_order_acquire)) {
+        if (!ec && !self->is_stopping()) {
             self->do_connect();
         }
     });
@@ -106,9 +105,8 @@ TrackerClient::~TrackerClient() {
  * 不再需要停止 io_context 或等待线程退出（共享外部 io_context）
  */
 void TrackerClient::stop() {
-    // 先设置门禁，阻断后续任何自动重连
-    m_stopping.store(true, std::memory_order_release);
-    m_allow_reconnect.store(false, std::memory_order_release);
+    // 单一原子写，替代原来的两个 atomic<bool> 标志
+    m_state.store(State::STOPPING, std::memory_order_release);
 
     // 正常生命周期下将 stop 串行化到 io_context 线程执行
     if (auto self = weak_from_this().lock()) {
@@ -120,7 +118,7 @@ void TrackerClient::stop() {
 }
 
 void TrackerClient::stop_impl() {
-    m_state = State::DISCONNECTED;
+    // stop_impl 在 STOPPING 状态后执行清理，不覆盖状态
 
     // 清理会话回调，避免旧会话回调泄漏到下一轮 connect
     m_on_ready_callback = nullptr;
@@ -155,7 +153,7 @@ void TrackerClient::set_device_id(const std::string& device_id) { m_device_id = 
  * @param on_ready 注册成功后的回调，参数为当前已在线的对等点列表
  */
 void TrackerClient::connect(const std::string& sync_key, std::function<void(std::vector<std::string>)> on_ready) {
-    // 将“状态检查+状态迁移+回调写入”统一到 io_context 线程，避免跨线程竞态
+    // 将"状态检查+状态迁移+回调写入"统一到 io_context 线程，避免跨线程竞态
     boost::asio::post(m_io_context,
                       [self = shared_from_this(), sync_key, on_ready = std::move(on_ready)]() mutable {
                           if (!self->m_p2p_manager) {
@@ -163,10 +161,12 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
                               return;
                           }
 
-                          if (self->m_state != State::DISCONNECTED) {
+                          if (self->m_state.load(std::memory_order_acquire) != State::DISCONNECTED &&
+                              !self->is_stopping()) {
                               // 在连接过程中允许同 sync_key 的回调合并，避免静默丢回调
+                              auto cur = self->m_state.load(std::memory_order_acquire);
                               if (on_ready &&
-                                  (self->m_state == State::CONNECTING || self->m_state == State::REGISTERING)) {
+                                  (cur == State::CONNECTING || cur == State::REGISTERING)) {
                                   if (self->m_sync_key == sync_key) {
                                       self->m_pending_ready_callbacks.push_back(std::move(on_ready));
                                       g_logger->info("[TrackerClient] 连接进行中，已合并一个 on_ready 回调。");
@@ -180,9 +180,8 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
                               return;
                           }
 
-                          // 新一轮手动 connect：解除 stop 状态并重置旧会话回调
-                          self->m_stopping.store(false, std::memory_order_release);
-                          self->m_allow_reconnect.store(true, std::memory_order_release);
+                          // 新一轮手动 connect：重置为 DISCONNECTED（解除 STOPPING 状态）
+                          self->m_state.store(State::DISCONNECTED, std::memory_order_release);
                           self->m_pending_ready_callbacks.clear();
                           self->m_sync_key = sync_key;
                           self->m_on_ready_callback = std::move(on_ready);
@@ -195,12 +194,12 @@ void TrackerClient::connect(const std::string& sync_key, std::function<void(std:
  * @brief 执行异步连接：首先进行域名解析，然后发起 TCP 连接
  */
 void TrackerClient::do_connect() {
-    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
-        m_state = State::DISCONNECTED;
+    if (is_stopping()) {
+        m_state.store(State::DISCONNECTED, std::memory_order_release);
         return;
     }
 
-    m_state = State::CONNECTING;
+    m_state.store(State::CONNECTING, std::memory_order_release);
     // 使用异步解析，回调签名更新为 (error_code, results_type)
     m_resolver.async_resolve(
         m_host, std::to_string(m_port),
@@ -230,11 +229,11 @@ void TrackerClient::do_connect() {
  * @brief 向 Tracker 发送注册消息，携带同步密钥和设备 ID 以加入相应的同步网络
  */
 void TrackerClient::do_register() {
-    if (m_stopping.load(std::memory_order_acquire) || !m_allow_reconnect.load(std::memory_order_acquire)) {
+    if (is_stopping()) {
         return;
     }
 
-    m_state = State::REGISTERING;
+    m_state.store(State::REGISTERING, std::memory_order_release);
     nlohmann::json payload;
     payload["sync_key"] = m_sync_key;
     
@@ -354,7 +353,7 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
  */
 void TrackerClient::register_handlers() {
     m_handlers[SignalProto::TYPE_REG_ACK] = [this](const nlohmann::json& payload) {
-        m_state = State::CONNECTED;
+        m_state.store(State::CONNECTED, std::memory_order_release);
         m_self_id = payload.at("self_id").get<std::string>();
         std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
         g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());

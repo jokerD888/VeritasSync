@@ -110,8 +110,9 @@ bool SyncNode::start() {
     g_logger->info("[Config] Sync Folder: {}", m_task.sync_folder);
 
     // ===== 配置验证 =====
-    if (m_task.sync_key.empty()) {
-        g_logger->error("[SyncNode] Invalid config: sync_key is empty.");
+    if (!is_valid_sync_key(m_task.sync_key)) {
+        std::string reason = get_sync_key_validation_error(m_task.sync_key);
+        g_logger->error("[SyncNode] Invalid config: sync_key 验证失败: {}", reason);
         m_started = false;  // 重置状态，允许修正后重新启动
         return false;
     }
@@ -160,8 +161,12 @@ bool SyncNode::start() {
         g_logger->info("[SyncNode] 使用现有同步目录");
     }
 
-    // 3. 创建 P2PManager
-    auto p2p = P2PManager::create();
+    // 3. 创建 P2PManager（性能参数通过 config 一次性注入，内部自动初始化子组件）
+    P2PManagerConfig perf_config;
+    perf_config.chunk_size = m_global_config.chunk_size;
+    perf_config.kcp_window_size = m_global_config.kcp_window_size;
+    perf_config.kcp_update_interval_ms = m_global_config.kcp_update_interval_ms;
+    auto p2p = P2PManager::create(perf_config);
     if (!p2p) {
         g_logger->error("[SyncNode] Failed to create P2PManager.");
         m_started = false;
@@ -189,17 +194,7 @@ bool SyncNode::start() {
     // 暴露在 Tracker 明文通信和用于 AES 密钥派生
     p2p->set_encryption_key("encrypt:" + m_task.sync_key);
     p2p->set_mode(m_task.mode);
-    
-    // 【修复 #7】将性能参数传递到实际组件
-    p2p->set_chunk_size(m_global_config.chunk_size);
-    p2p->set_kcp_window_size(m_global_config.kcp_window_size);
-    p2p->set_kcp_update_interval(m_global_config.kcp_update_interval_ms);
-    
-    // 【修复 Bug A】所有配置参数已就绪，现在初始化子组件
-    // init() 会创建 TransferManager（使用 m_chunk_size）、KcpScheduler（使用 m_kcp_update_interval_ms）等，
-    // 必须在 set_chunk_size / set_kcp_update_interval 之后调用，否则子组件使用默认值
-    p2p->init();
-    
+
     // 记录关键配置参数
     g_logger->info("[Config] Sync Mode: {}", 
                    m_task.mode == SyncMode::OneWay ? "OneWay" : "BiDirectional");

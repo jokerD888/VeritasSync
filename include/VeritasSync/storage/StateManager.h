@@ -13,9 +13,9 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <atomic>
-#include <shared_mutex>
 
 #include "VeritasSync/storage/Database.h"
+#include "VeritasSync/storage/CachedFileStore.h"
 #include "VeritasSync/storage/FileFilter.h"
 #include "VeritasSync/sync/Protocol.h"
 
@@ -115,23 +115,8 @@ namespace VeritasSync {
     // 【优化 #10】使用 unordered_map 替代 map，查找从 O(log n) 提升到 O(1)
     std::unordered_map<std::string, FileInfo> m_file_map;
         std::unique_ptr<Database> m_db;
+        std::unique_ptr<CachedFileStore> m_file_store;  // Write-through 缓存层
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
-
-        // 【修复 #1】数据库元数据内存缓存，启动时全量预加载
-    std::unordered_map<std::string, FileMetadata> m_metadata_cache;
-        mutable std::shared_mutex m_metadata_cache_mutex;
-        
-        // 从数据库加载所有元数据到内存缓存
-        void load_metadata_cache();
-        
-        // 从内存缓存获取文件元数据（O(1)）
-        std::optional<FileMetadata> get_cached_file(const std::string& path) const;
-        
-        // 更新内存缓存
-        void update_cached_file(const std::string& path, const FileMetadata& meta);
-        
-        // 从内存缓存移除
-        void remove_cached_file(const std::string& path);
 
         std::set<std::string> m_dir_map;
         mutable std::mutex m_dir_map_mutex;

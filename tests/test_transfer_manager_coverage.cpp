@@ -149,10 +149,10 @@ TEST_F(TransferManagerCoverageTest, QueueUpload_EmptyPeerId_NoOp) {
     EXPECT_NO_THROW(tm->queue_upload("", payload));
 }
 
-TEST_F(TransferManagerCoverageTest, QueueUpload_MissingPath_Throws) {
+TEST_F(TransferManagerCoverageTest, QueueUpload_MissingPath_NoThrow) {
     nlohmann::json payload = {{"wrong_field", "value"}};
-    // payload 缺少 path 字段应该抛异常（json::at 会抛 out_of_range）
-    EXPECT_ANY_THROW(tm->queue_upload("peer_1", payload));
+    // payload 缺少 path 字段：parse_and_validate_upload_request 返回 nullopt，graceful return（不抛异常）
+    EXPECT_NO_THROW(tm->queue_upload("peer_1", payload));
 }
 
 // ============================================================================

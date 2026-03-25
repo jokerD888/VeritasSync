@@ -13,6 +13,7 @@
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/storage/CachedFileStore.h"
 
 namespace VeritasSync {
 
@@ -126,8 +127,9 @@ namespace VeritasSync {
                 g_logger->error("[StateManager] 数据库初始化失败，将不使用数据库缓存");
                 m_db.reset();  // 释放无效的数据库对象
             } else {
-                // 【修复 #1】启动时全量预加载数据库元数据到内存缓存
-                load_metadata_cache();
+                m_file_store = std::make_unique<CachedFileStore>(*m_db);
+                m_file_store->load_cache();
+                g_logger->info("[{}] [StateManager] 元数据缓存加载完成, cached {} files", m_sync_key, m_file_store->cache_size());
             }
         } catch (const std::exception& e) {
             g_logger->error("[StateManager] 数据库初始化失败: {}", e.what());
@@ -147,48 +149,6 @@ namespace VeritasSync {
         } else {
             g_logger->info("[StateManager] 以 'Destination' 模式启动，文件监控已禁用（重试计时器仍可用）。");
         }
-    }
-
-    // 【修复 #1】启动时全量预加载数据库元数据到内存缓存
-    void StateManager::load_metadata_cache() {
-        if (!m_db) return;
-        
-        auto all_paths = m_db->get_all_file_paths();
-        g_logger->info("[{}] [StateManager] 正在预加载 {} 个文件的元数据到内存...", m_sync_key, all_paths.size());
-        
-        std::unique_lock lock(m_metadata_cache_mutex);
-        for (const auto& path : all_paths) {
-            auto meta = m_db->get_file(path);
-            if (meta) {
-                m_metadata_cache[path] = *meta;
-            }
-        }
-        
-        size_t memory_usage = m_metadata_cache.size() * (sizeof(FileMetadata) + 100); // 粗略估算
-        g_logger->info("[{}] [StateManager] 元数据缓存加载完成，约占用 {} MB 内存", 
-                       m_sync_key, memory_usage / 1024 / 1024);
-    }
-    
-    // 【修复 #1】从内存缓存获取文件元数据（O(1)）
-    std::optional<FileMetadata> StateManager::get_cached_file(const std::string& path) const {
-        std::shared_lock lock(m_metadata_cache_mutex);
-        auto it = m_metadata_cache.find(path);
-        if (it != m_metadata_cache.end()) {
-            return it->second;
-        }
-        return std::nullopt;
-    }
-    
-    // 【修复 #1】更新内存缓存
-    void StateManager::update_cached_file(const std::string& path, const FileMetadata& meta) {
-        std::unique_lock lock(m_metadata_cache_mutex);
-        m_metadata_cache[path] = meta;
-    }
-    
-    // 【修复 #1】从内存缓存移除
-    void StateManager::remove_cached_file(const std::string& path) {
-        std::unique_lock lock(m_metadata_cache_mutex);
-        m_metadata_cache.erase(path);
     }
 
     StateManager::~StateManager() {
@@ -374,7 +334,10 @@ namespace VeritasSync {
                         // 直接复用缓存的 hash，跳过昂贵的 SHA256 计算。
                         // 【修复 #1】使用内存缓存代替直接查询数据库
                         bool need_hash = true;
-                        auto cached = get_cached_file(rel_path_str);
+                        std::optional<FileMetadata> cached;
+                        if (m_file_store) {
+                            cached = m_file_store->get(rel_path_str);
+                        }
                         if (cached && static_cast<uint64_t>(cached->mtime) == info.modified_time) {
                             info.hash = cached->hash;
                             need_hash = false;
@@ -468,33 +431,28 @@ namespace VeritasSync {
         // Phase 3（无锁）：数据库持久化 + 触发回调
         // ═══════════════════════════════════════════════════════════
 
-        if (m_db) {
-            Database::TransactionGuard trans_guard(*m_db);
+        if (m_file_store) {
+            auto trans_guard = m_file_store->begin_transaction();
             bool db_ok = true;
 
             // 写入文件更新（包括回声文件，也需要持久化到数据库）
             for (const auto& result : file_update_results) {
-                if (!m_db->update_file(result.info.path, result.info.hash, result.info.modified_time)) {
+                if (!m_file_store->update(result.info.path, result.info.hash, result.info.modified_time)) {
                     g_logger->error("[{}] [StateManager] 持久化文件更新失败: {}", m_sync_key, result.info.path);
                     db_ok = false;
                     break;
                 }
-                // 【修复 #1】同步更新内存缓存
-                FileMetadata meta{result.info.path, result.info.hash, result.info.modified_time};
-                update_cached_file(result.info.path, meta);
             }
 
             // 删除已移除的文件
             if (db_ok) {
                 for (const auto& result : delete_check_results) {
                     if (result.type == DeleteCheckResult::FileDelete) {
-                        if (!m_db->remove_file(result.rel_path)) {
+                        if (!m_file_store->remove(result.rel_path)) {
                             g_logger->error("[{}] [StateManager] 持久化文件删除失败: {}", m_sync_key, result.rel_path);
                             db_ok = false;
                             break;
                         }
-                        // 【修复 #1】同步移除内存缓存
-                        remove_cached_file(result.rel_path);
                     }
                 }
             }
@@ -558,12 +516,12 @@ namespace VeritasSync {
         m_file_map.erase(relative_path);
 
         // 同时也从数据库移除，保持一致性
-        if (m_db) {
-            m_db->remove_file(relative_path);
+        if (m_file_store) {
+            auto txn = m_file_store->begin_transaction();
+            m_file_store->remove(relative_path);
             m_db->remove_sync_history(relative_path);  // 移除"僵尸"同步历史！
+            txn.commit();
         }
-        // 【修复 #1】同步移除内存缓存
-        remove_cached_file(relative_path);
     }
 
     void StateManager::scan_directory() {
@@ -663,11 +621,14 @@ namespace VeritasSync {
                     int64_t mtime = sctp.time_since_epoch().count();
                     
                     // 检查数据库缓存
-                    // 【修复 #1】使用内存缓存代替直接查询数据库
+                    // 使用 CachedFileStore 代替直接查询数据库
                     bool need_calc = true;
                     bool is_dirty = true;
                     std::string cached_hash;
-                    auto cached_meta = get_cached_file(rel_path_str);
+                    std::optional<FileMetadata> cached_meta;
+                    if (m_file_store) {
+                        cached_meta = m_file_store->get(rel_path_str);
+                    }
                     if (cached_meta && cached_meta->mtime == mtime) {
                         cached_hash = cached_meta->hash;
                         need_calc = false;
@@ -796,23 +757,20 @@ namespace VeritasSync {
         // --- 锁已释放 ---
         
         // Phase 3b（无锁）：数据库批量写入
-        if (m_db && !db_dirty_entries.empty()) {
+        if (m_file_store && !db_dirty_entries.empty()) {
             constexpr size_t DB_BATCH_WRITE_SIZE = 500;
-            
+
             for (size_t i = 0; i < db_dirty_entries.size(); i += DB_BATCH_WRITE_SIZE) {
                 size_t end = std::min(i + DB_BATCH_WRITE_SIZE, db_dirty_entries.size());
-                Database::TransactionGuard window_guard(*m_db);
+                auto window_guard = m_file_store->begin_transaction();
                 bool window_ok = true;
                 for (size_t j = i; j < end; ++j) {
                     const auto& f = db_dirty_entries[j];
-                    if (!m_db->update_file(f.path, f.hash, f.modified_time)) {
+                    if (!m_file_store->update(f.path, f.hash, f.modified_time)) {
                         g_logger->error("[StateManager] scan_directory 批量写入失败: {}", f.path);
                         window_ok = false;
                         break;
                     }
-                    // 【修复 #1】同步更新内存缓存
-                    FileMetadata meta{f.path, f.hash, f.modified_time};
-                    update_cached_file(f.path, meta);
                 }
                 if (window_ok) {
                     window_guard.commit();
@@ -821,10 +779,10 @@ namespace VeritasSync {
         }
         
         // Phase 4: 清理数据库中的僵尸记录 (文件在磁盘已删但库里还有)
-        if (m_db) {
-            auto all_db_paths = m_db->get_all_file_paths();
+        if (m_file_store) {
+            auto all_db_paths = m_file_store->get_all_paths();
             std::vector<std::string> paths_to_remove;
-            
+
             {
                 std::lock_guard<std::mutex> lock(m_file_map_mutex);
                 for (const auto& db_path : all_db_paths) {
@@ -833,19 +791,17 @@ namespace VeritasSync {
                     }
                 }
             }
-            
+
             if (!paths_to_remove.empty()) {
                 g_logger->info("[StateManager] 正在清理 {} 个数据库僵尸记录...", paths_to_remove.size());
-                Database::TransactionGuard cleanup_guard(*m_db);
+                auto cleanup_guard = m_file_store->begin_transaction();
                 bool cleanup_ok = true;
                 for (const auto& p : paths_to_remove) {
-                    if (!m_db->remove_file(p)) {
+                    if (!m_file_store->remove(p)) {
                         g_logger->error("[StateManager] 清理僵尸记录失败: {}", p);
                         cleanup_ok = false;
                         break;
                     }
-                    // 【修复 #1】同步移除内存缓存
-                    remove_cached_file(p);
                 }
                 if (cleanup_ok) {
                     cleanup_guard.commit();

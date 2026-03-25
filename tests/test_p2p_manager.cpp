@@ -32,7 +32,6 @@ class P2PManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
         m_manager = P2PManager::create();
-        m_manager->init();  // 【修复 Bug A】create() 不再自动调用 init()
     }
     
     void TearDown() override {
@@ -53,8 +52,6 @@ TEST_F(P2PManagerTest, CreateManager) {
 TEST_F(P2PManagerTest, MultipleCreate) {
     auto manager1 = P2PManager::create();
     auto manager2 = P2PManager::create();
-    manager1->init();
-    manager2->init();
     
     ASSERT_NE(manager1, nullptr);
     ASSERT_NE(manager2, nullptr);
@@ -339,7 +336,6 @@ TEST_F(P2PManagerTest, LargePeerIdList) {
 TEST_F(P2PManagerTest, RapidCreateAndDestroy) {
     for (int i = 0; i < 10; ++i) {
         auto manager = P2PManager::create();
-        manager->init();
         ASSERT_NE(manager, nullptr);
     }
 }
@@ -347,7 +343,6 @@ TEST_F(P2PManagerTest, RapidCreateAndDestroy) {
 TEST_F(P2PManagerTest, CreateUseAndDestroy) {
     for (int i = 0; i < 5; ++i) {
         auto manager = P2PManager::create();
-        manager->init();
         ASSERT_NE(manager, nullptr);
         
         manager->set_role(SyncRole::Source);
@@ -452,7 +447,6 @@ TEST_F(P2PManagerTest, DestructionWithPendingOperations) {
     
     // 创建新实例验证资源已正确释放
     m_manager = P2PManager::create();
-    m_manager->init();
     ASSERT_NE(m_manager, nullptr);
 }
 
@@ -506,7 +500,6 @@ TEST(P2PManagerConcurrencyTest, ConcurrentCreateDestroy) {
             for (int j = 0; j < 3; ++j) {
                 auto manager = P2PManager::create();
                 if (manager) {
-                    manager->init();
                     success_count++;
                     manager->set_role(SyncRole::Source);
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));

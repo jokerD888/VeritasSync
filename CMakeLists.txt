@@ -67,6 +67,7 @@ add_executable(veritas_sync WIN32
     src/storage/FileFilter.cpp
     src/storage/NLFilterGenerator.cpp
     src/storage/Database.cpp
+    src/storage/CachedFileStore.cpp
     src/sync/SyncManager.cpp
     src/sync/SyncHandler.cpp
     src/sync/SyncSession.cpp
@@ -264,6 +265,7 @@ add_executable(unit_tests
     src/common/Config.cpp
     src/common/Logger.cpp
     src/storage/Database.cpp
+    src/storage/CachedFileStore.cpp
     src/storage/FileFilter.cpp
     src/storage/NLFilterGenerator.cpp
     src/net/KcpSession.cpp

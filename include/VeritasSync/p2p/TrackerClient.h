@@ -20,7 +20,7 @@ using boost::asio::ip::tcp;
 
 class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
    public:
-    enum class State { DISCONNECTED, CONNECTING, REGISTERING, CONNECTED };
+    enum class State : uint8_t { DISCONNECTED, CONNECTING, REGISTERING, CONNECTED, STOPPING };
 
     static constexpr size_t MAX_PACKET_SIZE = 1024 * 1024;  // 1MB
     static constexpr std::chrono::seconds RECONNECT_INTERVAL{5};
@@ -43,7 +43,8 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     void send_signaling_message(const std::string& to_peer_id, const std::string& type, const std::string& sdp);
     std::string get_self_id() const { return m_self_id; }
 
-    bool is_connected() const { return m_state == State::CONNECTED; }
+    bool is_connected() const { return m_state.load(std::memory_order_acquire) == State::CONNECTED; }
+    bool is_stopping() const noexcept { return m_state.load(std::memory_order_acquire) == State::STOPPING; }
 
 private:
     void do_connect();
@@ -86,8 +87,6 @@ private:
     std::unordered_map<std::string, MessageHandler> m_handlers;
 
     std::atomic<State> m_state{State::DISCONNECTED};
-    std::atomic<bool> m_stopping{false};
-    std::atomic<bool> m_allow_reconnect{true};
 };
 
 }  // namespace VeritasSync

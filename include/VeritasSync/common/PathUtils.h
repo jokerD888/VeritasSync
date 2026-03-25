@@ -59,8 +59,6 @@ public:
      */
     struct CaseInsensitiveEqual {
         bool operator()(const std::string& a, const std::string& b) const {
-            #ifdef _WIN32
-            // Windows: 不区分大小写
             if (a.length() != b.length()) {
                 return false;
             }
@@ -69,18 +67,6 @@ public:
                                  return std::tolower(static_cast<unsigned char>(ca)) ==
                                         std::tolower(static_cast<unsigned char>(cb));
                              });
-            #else
-            // Linux/macOS: 区分大小写（但为了一致性，也可以不区分）
-            // 这里选择在所有平台统一不区分
-            if (a.length() != b.length()) {
-                return false;
-            }
-            return std::equal(a.begin(), a.end(), b.begin(),
-                             [](char ca, char cb) {
-                                 return std::tolower(static_cast<unsigned char>(ca)) ==
-                                        std::tolower(static_cast<unsigned char>(cb));
-                             });
-            #endif
         }
     };
 
@@ -114,6 +100,17 @@ public:
      * @return true 路径安全，false 存在遍历风险
      */
     static bool is_path_safe(const std::filesystem::path& root, const std::string& relative_path) {
+        std::error_code ec;
+        auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+        if (ec) return false;
+        return is_path_safe_with_canonical_root(canonical_root, relative_path);
+    }
+
+    /**
+     * @brief 批量路径安全检查优化版：root 已 canonicalize，避免重复 I/O
+     */
+    static bool is_path_safe_with_canonical_root(const std::filesystem::path& canonical_root,
+                                                  const std::string& relative_path) {
         // 空路径不安全
         if (relative_path.empty()) return false;
 
@@ -122,22 +119,19 @@ public:
         for (const auto& component : rel) {
             if (component == "..") return false;
         }
-        
+
         // 检查是否是绝对路径（绝对路径会覆盖 root）
         if (rel.is_absolute()) return false;
-        
+
         // 最终确认：拼接后归一化，确保在 root 下
         std::error_code ec;
-        auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+        auto full = std::filesystem::weakly_canonical(canonical_root / rel, ec);
         if (ec) return false;
-        
-        auto full = std::filesystem::weakly_canonical(root / rel, ec);
-        if (ec) return false;
-        
+
         // 检查 full 路径是否以 root 为前缀
         auto root_str = canonical_root.string();
         auto full_str = full.string();
-        
+
         #ifdef _WIN32
         // Windows 路径不区分大小写
         std::transform(root_str.begin(), root_str.end(), root_str.begin(),
@@ -145,7 +139,7 @@ public:
         std::transform(full_str.begin(), full_str.end(), full_str.begin(),
                        [](unsigned char c) { return std::tolower(c); });
         #endif
-        
+
         // full_str 必须以 root_str 为前缀，且紧接着是分隔符或结尾
         if (full_str.length() < root_str.length()) return false;
         if (full_str.compare(0, root_str.length(), root_str) != 0) return false;
@@ -153,7 +147,7 @@ public:
             char next_char = full_str[root_str.length()];
             if (next_char != '/' && next_char != '\\') return false;
         }
-        
+
         return true;
     }
 

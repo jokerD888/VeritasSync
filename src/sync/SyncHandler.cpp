@@ -640,11 +640,18 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     boost::asio::post(m_worker_pool, [this, paths]() {
         // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
         if (!m_state_manager) return;
-        
+
+        // 【优化】批量路径检查：root 只 canonicalize 一次，避免 N 次重复 I/O
+        std::error_code canon_ec;
+        auto canonical_root = std::filesystem::weakly_canonical(m_state_manager->get_root_path(), canon_ec);
+        if (canon_ec) {
+            g_logger->error("[Sync] 无法规范化根路径: {}", canon_ec.message());
+            return;
+        }
+
         for (const auto& relative_path_str : paths) {
-            // 【修复问题7】使用辅助函数进行路径安全检查
-            if (!validate_path_safe(m_state_manager->get_root_path(), relative_path_str, 
-                                    "file_delete_batch", "批量删除")) {
+            if (!PathUtils::is_path_safe_with_canonical_root(canonical_root, relative_path_str)) {
+                g_logger->error("[Sync] 路径安全检查失败，拒绝批量删除: {} (上下文: file_delete_batch)", relative_path_str);
                 continue;
             }
 
@@ -696,12 +703,19 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
         try {
             // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
             if (!m_state_manager) return;
-            
+
+            // 【优化】批量路径检查：root 只 canonicalize 一次
+            std::error_code canon_ec;
+            auto canonical_root = std::filesystem::weakly_canonical(m_state_manager->get_root_path(), canon_ec);
+            if (canon_ec) {
+                g_logger->error("[Sync] 无法规范化根路径: {}", canon_ec.message());
+                return;
+            }
+
             // 先处理创建
             for (const auto& dir_path_str : creates) {
-                // 【修复问题7】使用辅助函数进行路径安全检查
-                if (!validate_path_safe(m_state_manager->get_root_path(), dir_path_str, 
-                                        "dir_batch", "批量创建目录")) {
+                if (!PathUtils::is_path_safe_with_canonical_root(canonical_root, dir_path_str)) {
+                    g_logger->error("[Sync] 路径安全检查失败，拒绝批量创建目录: {} (上下文: dir_batch)", dir_path_str);
                     continue;
                 }
 
@@ -721,9 +735,8 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
                       [](const std::string& a, const std::string& b) { return a.length() > b.length(); });
             
             for (const auto& dir_path_str : sorted_deletes) {
-                // 【修复问题7】使用辅助函数进行路径安全检查
-                if (!validate_path_safe(m_state_manager->get_root_path(), dir_path_str, 
-                                        "dir_batch", "批量删除目录")) {
+                if (!PathUtils::is_path_safe_with_canonical_root(canonical_root, dir_path_str)) {
+                    g_logger->error("[Sync] 路径安全检查失败，拒绝批量删除目录: {} (上下文: dir_batch)", dir_path_str);
                     continue;
                 }
 

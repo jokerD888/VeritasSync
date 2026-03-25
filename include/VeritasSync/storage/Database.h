@@ -43,6 +43,8 @@ public:
     bool update_file(const std::string& rel_path, const std::string& hash, int64_t mtime);
     bool remove_file(const std::string& rel_path);
     std::vector<std::string> get_all_file_paths() const;
+    // 批量获取所有文件元数据（单次 SQL 查询，避免 N+1）
+    std::vector<FileMetadata> get_all_files() const;
 
     // 开启事务的安全 Guard
     class TransactionGuard {
@@ -80,6 +82,7 @@ private:
     ScopedStmt m_stmt_hist_get;
     ScopedStmt m_stmt_hist_delete;
     ScopedStmt m_stmt_get_all_paths;
+    ScopedStmt m_stmt_get_all_files;
     
     mutable std::recursive_mutex m_mutex; 
 };

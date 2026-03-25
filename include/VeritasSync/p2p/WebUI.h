@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <nlohmann/json.hpp>
 
@@ -76,6 +77,15 @@ private:
     void setup_nl_filter_routes();      // POST /api/tasks/:id/ignore/generate
 
     bool save_config_internal();
+
+    // 辅助：安全解析路由参数中的任务索引（失败时设置 400 错误响应）
+    static std::optional<size_t> parse_task_index(
+        const httplib::Request& req, httplib::Response& res);
+
+    // 辅助：路由包装器（统一 auth + 异常处理）
+    using RouteHandler = std::function<void(const httplib::Request&, httplib::Response&)>;
+    RouteHandler guarded_route(RouteHandler handler);
+
     static std::filesystem::path get_exe_dir();
     static std::string get_index_html();
     static std::string tail_log(const std::string& file, std::size_t max_bytes);

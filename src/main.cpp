@@ -85,6 +85,22 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+    // 异常清理辅助：释放 Windows 单实例互斥锁 + 记录日志 + 关闭 spdlog
+    auto fatal_cleanup = [&](const char* msg) {
+#if defined(_WIN32)
+        if (hMutex) {
+            CloseHandle(hMutex);
+            hMutex = nullptr;
+        }
+#endif
+        if (VeritasSync::g_logger) {
+            VeritasSync::g_logger->critical("{}", msg);
+        } else {
+            std::cerr << msg << std::endl;
+        }
+        spdlog::shutdown();
+    };
+
     try {
         VeritasSync::init_logger();
     VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
@@ -281,27 +297,20 @@ int main(int argc, char* argv[]) {
     bool webui_started = false;
 
     std::jthread ui_thread([&web_ui, &webui_ready_promise](std::stop_token stop_token) {
+        // 辅助：安全地设置 promise 值（忽略重复 set_value 异常）
+        auto safe_set = [&webui_ready_promise](bool val) {
+            try { webui_ready_promise.set_value(val); } catch (...) {}
+        };
+
         try {
             // 启动 WebUI 服务：通过回调将 bind 成功/失败结果回传给主线程
-            web_ui.start([&webui_ready_promise](bool ok) {
-                try {
-                    webui_ready_promise.set_value(ok);
-                } catch (...) {
-                    // 防御性保护：忽略重复 set_value
-                }
-            });
+            web_ui.start([&safe_set](bool ok) { safe_set(ok); });
         } catch (const std::exception& e) {
             VeritasSync::g_logger->error("[Main] WebUI 线程异常: {}", e.what());
-            try {
-                webui_ready_promise.set_value(false);
-            } catch (...) {
-            }
+            safe_set(false);
         } catch (...) {
             VeritasSync::g_logger->error("[Main] WebUI 线程未知异常");
-            try {
-                webui_ready_promise.set_value(false);
-            } catch (...) {
-            }
+            safe_set(false);
         }
 
         // 注意：WebUI.start() 在监听成功后是阻塞的，当 web_ui.stop() 被调用后会返回
@@ -453,32 +462,10 @@ int main(int argc, char* argv[]) {
     spdlog::shutdown();
     return 0;
     } catch (const std::exception& e) {
-#if defined(_WIN32)
-        if (hMutex) {
-            CloseHandle(hMutex);
-            hMutex = nullptr;
-        }
-#endif
-        if (VeritasSync::g_logger) {
-            VeritasSync::g_logger->critical("[Main] 未捕获异常: {}", e.what());
-        } else {
-            std::cerr << "[Main] 未捕获异常: " << e.what() << std::endl;
-        }
-        spdlog::shutdown();
+        fatal_cleanup((std::string("[Main] 未捕获异常: ") + e.what()).c_str());
         return 2;
     } catch (...) {
-#if defined(_WIN32)
-        if (hMutex) {
-            CloseHandle(hMutex);
-            hMutex = nullptr;
-        }
-#endif
-        if (VeritasSync::g_logger) {
-            VeritasSync::g_logger->critical("[Main] 未捕获未知异常");
-        } else {
-            std::cerr << "[Main] 未捕获未知异常" << std::endl;
-        }
-        spdlog::shutdown();
+        fatal_cleanup("[Main] 未捕获未知异常");
         return 3;
     }
 }

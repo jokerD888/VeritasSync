@@ -77,7 +77,8 @@ std::vector<std::string> validate_config(const Config& config) {
 
 std::string generate_uuid_v4() {
     try {
-        boost::uuids::random_generator gen;
+        // thread_local: 避免每次调用都重新构造 + 种子化 PRNG
+        thread_local boost::uuids::random_generator gen;
         boost::uuids::uuid uuid = gen();
         std::ostringstream ss;
         ss << uuid;
@@ -133,20 +134,9 @@ Config load_config_or_create_default(const std::string& config_path) {
             need_save = true;
         }
     } else {
-        // 首次启动，创建默认配置
+        // 首次启动：Config{} 已包含所有默认值，只需动态生成 device_id
+        config = Config{};
         config.device_id = generate_uuid_v4();
-        
-        // TURN 默认留空，防止连接无效地址导致延迟
-        config.turn_host = "";
-        config.turn_port = 3478;
-        config.turn_username = "";
-        config.turn_password = "";
-
-        // STUN 默认使用 Google 的，比较稳定
-        config.stun_host = "stun.l.google.com";
-        config.stun_port = 19302;
-
-        config.tasks = {};
         need_save = true;
     }
     

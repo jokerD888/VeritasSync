@@ -51,10 +51,17 @@ class SyncSession;
 struct IceConfig;
 enum class PeerState;
 
+/// P2P 性能参数配置（传入 P2PManager::create()）
+struct P2PManagerConfig {
+    size_t   chunk_size              = 16384;   // 文件分块大小
+    uint32_t kcp_window_size         = 256;     // KCP 窗口大小
+    uint32_t kcp_update_interval_ms  = 20;      // KCP 更新间隔（毫秒）
+};
+
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
 public:
     virtual boost::asio::io_context& get_io_context();
-    static std::shared_ptr<P2PManager> create();
+    static std::shared_ptr<P2PManager> create(const P2PManagerConfig& config = {});
 
     void set_encryption_key(const std::string& key_string);
 
@@ -65,19 +72,6 @@ public:
     void set_mode(SyncMode mode);
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
-    
-    // 【修复 #7】性能参数配置
-    void set_chunk_size(size_t chunk_size) { m_chunk_size = chunk_size; }
-    void set_kcp_window_size(uint32_t window_size) { m_kcp_window_size = window_size; }
-    void set_kcp_update_interval(uint32_t interval_ms) { m_kcp_update_interval_ms = interval_ms; }
-
-    /**
-     * @brief 初始化子组件（TransferManager、SyncHandler、SyncSession、KcpScheduler 等）
-     * 
-     * 【修复 Bug A】必须在所有配置（set_chunk_size、set_kcp_update_interval 等）
-     * 设置完成之后再调用，否则子组件会使用默认参数值。
-     */
-    void init();
 
     virtual ~P2PManager();
 
@@ -130,6 +124,7 @@ public:
 
 protected:
     P2PManager();
+    void init();  // 由 create() 内部调用，配置参数已就绪
 
     // --- KCP 集成（已提取到 KcpScheduler）---
 
