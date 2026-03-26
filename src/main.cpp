@@ -256,6 +256,8 @@ int main(int argc, char* argv[]) {
             // 2. 获取传输数据
             auto p2p = node->get_p2p();
             node_json["transfers"] = nlohmann::json::array();
+            int node_connected_peers = 0;
+            bool has_active_transfers = false;
 
             if (p2p) {
                 // A. 累加统计数据
@@ -265,6 +267,7 @@ int main(int argc, char* argv[]) {
 
                 // B. 获取活跃列表 (大文件)
                 auto active_list = p2p->get_active_transfers();
+                has_active_transfers = !active_list.empty();
                 for (const auto& item : active_list) {
                     nlohmann::json t;
                     t["path"] = item.path;
@@ -276,8 +279,8 @@ int main(int argc, char* argv[]) {
                     t["stalled"] = item.is_stalled;
                     node_json["transfers"].push_back(t);
                 }
-                
-                // C. 获取对等点状态 (新增)
+
+                // C. 获取对等点状态
                 auto peers_info = p2p->get_peers_info();
                 for (const auto& peer : peers_info) {
                     nlohmann::json peer_json;
@@ -285,15 +288,30 @@ int main(int argc, char* argv[]) {
                     peer_json["state"] = peer.state;
                     peer_json["connection_type"] = peer.connection_type;
                     peer_json["connected_since"] = peer.connected_since;
-                    peer_json["sync_key"] = node->get_key();  // 关联到哪个同步任务
+                    peer_json["sync_key"] = node->get_key();
                     all_peers.push_back(peer_json);
-                    
-                    // 统计
-                    if (peer.state == "connected") connected_count++;
+
+                    if (peer.state == "connected") { connected_count++; node_connected_peers++; }
                     else if (peer.state == "connecting") connecting_count++;
                     else if (peer.state == "failed") failed_count++;
                 }
             }
+
+            // D. 推导任务运行状态
+            std::string status = "stopped";
+            if (node->is_started()) {
+                if (has_active_transfers) {
+                    status = "syncing";
+                } else if (node->is_tracker_online() && node_connected_peers > 0) {
+                    status = "idle";
+                } else if (node->is_tracker_online()) {
+                    status = "waiting";
+                } else {
+                    status = "offline";
+                }
+            }
+            node_json["status"] = status;
+
             root["nodes"].push_back(node_json);
         }
 

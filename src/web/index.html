@@ -465,6 +465,26 @@
         }
         .nl-error.visible { display: block; }
 
+        /* --- Task Status Indicator --- */
+        .task-status {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.5px; padding: 3px 10px; border-radius: 99px;
+        }
+        .task-status .status-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+        }
+        .status-syncing { color: #60a5fa; background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); }
+        .status-syncing .status-dot { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; animation: pulse 2s infinite; }
+        .status-idle { color: #34d399; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); }
+        .status-idle .status-dot { background: #10b981; box-shadow: 0 0 6px #10b981; }
+        .status-waiting { color: #fbbf24; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.3); }
+        .status-waiting .status-dot { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; animation: pulse 2s infinite; }
+        .status-offline { color: #f87171; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); }
+        .status-offline .status-dot { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+        .status-stopped { color: #94a3b8; background: rgba(148,163,184,0.1); border: 1px solid rgba(148,163,184,0.2); }
+        .status-stopped .status-dot { background: #64748b; }
+
         /* --- Utility classes (extracted from inline styles) --- */
         .text-sub { color: var(--text-sub); }
         .text-muted { color: var(--text-muted); }
@@ -841,6 +861,8 @@
         let rawLog = "";
         // 【性能优化】轮询变更检测：只在数据真正变化时更新 DOM
         let _lastStatusJson = "";
+        // 【Feature 16】按 sync_key 存储每个任务的运行状态
+        let _nodeStatusMap = {};
         const id = x => document.getElementById(x);
 
         // 【安全修复】HTML/属性转义，防止 XSS 注入
@@ -929,13 +951,16 @@
                     }
                             
                     return `
-                <div class="task-card ${borderClass}">
+                <div class="task-card ${borderClass}" data-sync-key="${escapeAttr(t.sync_key)}">
                     <div class="task-header">
                         <div class="folder-title" title="${escapeAttr(t.sync_folder)}">
                             <span>📁</span>
                             ${escapeHtml(t.sync_folder.split(/[/\\]/).pop() || 'Root')}
                         </div>
-                        <span class="badge ${badgeClass}">${badgeText}</span>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span class="task-status-badge"></span>
+                            <span class="badge ${badgeClass}">${badgeText}</span>
+                        </div>
                     </div>
                     
                     <div class="task-body">
@@ -1297,6 +1322,23 @@
             e.innerHTML = html;
             if (id('autoScroll').checked) e.scrollTop = e.scrollHeight;
         }
+        // 【Feature 16】更新任务卡片上的状态徽章
+        const _statusLabels = {
+            syncing: '同步中', idle: '就绪', waiting: '等待连接', offline: '离线', stopped: '已停止'
+        };
+        function updateTaskStatusBadges() {
+            document.querySelectorAll('.task-card[data-sync-key]').forEach(card => {
+                const key = card.dataset.syncKey;
+                const status = _nodeStatusMap[key] || 'stopped';
+                const label = _statusLabels[status] || status;
+                const badge = card.querySelector('.task-status-badge');
+                if (badge) {
+                    badge.className = `task-status status-${status}`;
+                    badge.innerHTML = `<span class="status-dot"></span>${escapeHtml(label)}`;
+                }
+            });
+        }
+
         function formatBytes(bytes, decimals = 2) {
             if (!+bytes) return '0 B';
             const k = 1024;
@@ -1326,6 +1368,14 @@
                 // 兼容性处理：防止刚启动时为空
                 const global = data.global || { tracker_online: false, session_done: 0, session_total: 0 };
                 const nodes = data.nodes || [];
+
+                // 【Feature 16】更新任务状态映射 + 刷新卡片上的状态徽章
+                const newStatusMap = {};
+                for (const n of nodes) {
+                    if (n.key) newStatusMap[n.key] = n.status || 'stopped';
+                }
+                _nodeStatusMap = newStatusMap;
+                updateTaskStatusBadges();
 
                 // --- 1. 更新 Tracker 状态 UI ---
                 const statusTextDiv = document.querySelector('.status-widget .led').parentNode;
