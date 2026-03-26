@@ -15,6 +15,10 @@ namespace VeritasSync {
 inline constexpr int GCM_IV_LEN  = 12;  // AES-GCM IV 长度（字节）
 inline constexpr int GCM_TAG_LEN = 16;  // AES-GCM Tag 长度（字节）
 
+// TODO(security): AES-256-GCM 保证了单条消息的完整性和机密性，但不防重放攻击。
+// 当前依赖 KCP 层的去重机制（ikcp_input 丢弃已确认的重复包）作为缓解措施。
+// 后续安全加固应引入：(1) 单调递增的序列号作为 AAD，(2) 滑动窗口过滤旧序列号。
+
 class CryptoLayer {
 public:
     CryptoLayer();

@@ -163,11 +163,18 @@ void WebUIServer::open_folder_in_os(const std::string& p) {
 #ifdef _WIN32
     ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-    std::string cmd = "open \"" + path_obj.string() + "\"";
-    system(cmd.c_str());
+    // 【安全修复 C1】用 fork()+execlp() 替代 system()，避免 shell 命令注入
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("open", "open", path_obj.string().c_str(), nullptr);
+        _exit(1);
+    }
 #else
-    std::string cmd = "xdg-open \"" + path_obj.string() + "\"";
-    system(cmd.c_str());
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("xdg-open", "xdg-open", path_obj.string().c_str(), nullptr);
+        _exit(1);
+    }
 #endif
 }
 
@@ -176,11 +183,17 @@ void WebUIServer::open_url(const std::string& url) {
     std::wstring wUrl = Utf8ToWide(url);
     ShellExecuteW(NULL, L"open", wUrl.c_str(), NULL, NULL, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-    std::string cmd = "open \"" + url + "\"";
-    system(cmd.c_str());
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("open", "open", url.c_str(), nullptr);
+        _exit(1);
+    }
 #else
-    std::string cmd = "xdg-open \"" + url + "\"";
-    system(cmd.c_str());
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
+        _exit(1);
+    }
 #endif
 }
 
@@ -404,6 +417,24 @@ void WebUIServer::setup_task_routes() {
             task.role = j.at("role").get<std::string>();
             task.sync_folder = j.at("sync_folder").get<std::string>();
 
+            // 【安全修复 M1】验证 sync_folder：必须是绝对路径，规范化后不含 ..
+            {
+                std::filesystem::path folder_path = Utf8ToPath(task.sync_folder);
+                if (!folder_path.is_absolute()) {
+                    res.status = 400;
+                    res.set_content(R"({"success":false,"error":"sync_folder 必须是绝对路径"})", "application/json");
+                    return;
+                }
+                std::error_code ec;
+                auto canonical = std::filesystem::weakly_canonical(folder_path, ec);
+                if (ec) {
+                    res.status = 400;
+                    res.set_content(R"({"success":false,"error":"sync_folder 路径无效"})", "application/json");
+                    return;
+                }
+                task.sync_folder = PathToUtf8(canonical);  // 存规范化后的路径
+            }
+
             if (j.contains("mode")) {
                 task.mode = j.at("mode").get<SyncMode>();
             } else {
@@ -411,6 +442,7 @@ void WebUIServer::setup_task_routes() {
             }
 
             // 1. 先保存配置，确保持久化成功
+            Config config_snapshot;  // 【安全修复 C6】在锁内拷贝 config，避免无锁传引用
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
                 m_config.tasks.push_back(task);
@@ -420,11 +452,12 @@ void WebUIServer::setup_task_routes() {
                     res.set_content("{\"success\":false,\"error\":\"无法保存配置\"}", "application/json");
                     return;
                 }
+                config_snapshot = m_config;
             }
 
-            // 2. 配置保存成功后再启动任务
+            // 2. 配置保存成功后再启动任务（传拷贝，不持锁）
             if (m_on_task_add) {
-                if (!m_on_task_add(task, m_config)) {
+                if (!m_on_task_add(task, config_snapshot)) {
                     // 启动失败，需要回滚配置
                     {
                         std::lock_guard<std::mutex> lock(m_config_mutex);

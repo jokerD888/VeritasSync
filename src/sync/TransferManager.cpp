@@ -605,6 +605,12 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
                     recv_ptr->received_chunks = 0;
                     // 【修复】重置 bitmap
                     std::fill(recv_ptr->received_bitmap.begin(), recv_ptr->received_bitmap.end(), false);
+                    // 【安全修复 C3】关闭并删除旧临时文件，防止新旧数据混合
+                    if (recv_ptr->file_stream.is_open()) {
+                        recv_ptr->file_stream.close();
+                    }
+                    std::error_code zombie_ec;
+                    std::filesystem::remove(Utf8ToPath(recv_ptr->temp_path), zombie_ec);
                 } else {
                     g_logger->info("[Transfer] 检测到僵尸任务恢复 (断网重连): {}", hdr.file_path);
                 }
@@ -906,13 +912,22 @@ std::optional<TransferManager::ResumeInfo> TransferManager::check_resume_eligibi
     }
     
     // 可以续传
-    g_logger->info("[Transfer] ✅ 可以续传: {} ({}/{} chunks, {:.1f}%)", 
-                  path, rf.received_chunks, rf.total_chunks,
-                  rf.total_chunks > 0 ? (100.0 * rf.received_chunks / rf.total_chunks) : 0.0);
-    
+    // 【安全修复 C2】计算从 0 开始连续已收到的 chunk 数（而非总计数），
+    // 避免乱序到达时 start_chunk 跳过空洞导致文件损坏
+    uint32_t contiguous = 0;
+    for (size_t i = 0; i < rf.received_bitmap.size(); ++i) {
+        if (!rf.received_bitmap[i]) break;
+        contiguous++;
+    }
+
+    g_logger->info("[Transfer] ✅ 可以续传: {} ({}/{} chunks contiguous, {}/{} total, {:.1f}%)",
+                  path, contiguous, rf.total_chunks,
+                  rf.received_chunks, rf.total_chunks,
+                  rf.total_chunks > 0 ? (100.0 * contiguous / rf.total_chunks) : 0.0);
+
     return ResumeInfo{
         path,
-        rf.received_chunks,
+        contiguous,
         rf.total_chunks,
         rf.expected_hash,
         rf.expected_size,
