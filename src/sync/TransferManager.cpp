@@ -680,6 +680,8 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
                 if (cleanup_ec) {
                     g_logger->warn("[Transfer] 清理临时文件失败: {} | {}", recv_ptr->temp_path, cleanup_ec.message());
                 }
+                // 【安全修复 H9】写失败也要递增 session_done，保持计数器一致
+                self->m_session_done++;
                 std::lock_guard<std::mutex> map_lock(self->m_transfer_mutex);
                 self->m_receiving_files.erase(hdr.file_path);
                 return;

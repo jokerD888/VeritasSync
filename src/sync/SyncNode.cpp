@@ -67,6 +67,9 @@ void SyncNode::stop() {
     auto tracker = m_tracker_client.load();
     if (tracker) {
         tracker->stop();
+        // 【安全修复 H2】断开 TrackerClient → P2PManager 的反向引用，
+        // 防止 handler 回调通过已失效的 m_p2p_manager 裸指针访问 P2PManager
+        tracker->set_p2p_manager(nullptr);
     }
     
     // 【修复 Bug C】在销毁 StateManager 之前，先断开 P2PManager 及其子组件

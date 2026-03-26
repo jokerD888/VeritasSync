@@ -102,7 +102,11 @@ void CryptoLayer::set_key(const std::string& key_string) {
         return;
     }
 
-    m_key.assign(reinterpret_cast<const char*>(derived_key), AES256_KEY_SIZE);
+    {
+        // 【安全修复 H8】写锁保护 m_key 更新
+        std::unique_lock lock(m_key_mutex);
+        m_key.assign(reinterpret_cast<const char*>(derived_key), AES256_KEY_SIZE);
+    }
     OPENSSL_cleanse(derived_key, sizeof(derived_key));  // S-4: 清零临时密钥
 
     // 注意：由于使用了 thread_local，这里的密钥更改是全局生效的，
@@ -110,7 +114,14 @@ void CryptoLayer::set_key(const std::string& key_string) {
     g_logger->info("[Crypto] 加密密钥已更新 (HKDF-SHA256 derived).");
 }
 
+bool CryptoLayer::has_key() const {
+    std::shared_lock lock(m_key_mutex);
+    return !m_key.empty();
+}
+
 std::string CryptoLayer::encrypt(const std::string& plaintext) const {
+    // 【安全修复 H8】读锁保护 m_key
+    std::shared_lock lock(m_key_mutex);
     if (m_key.empty()) {
         g_logger->error("[Crypto] 加密失败：密钥未设置。");
         return "";
@@ -170,6 +181,8 @@ std::string CryptoLayer::encrypt(const std::string& plaintext) const {
 }
 
 std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
+    // 【安全修复 H8】读锁保护 m_key
+    std::shared_lock lock(m_key_mutex);
     if (m_key.empty() || ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) return "";
 
     // 1. 拆解数据包 (IV | Ciphertext | Tag)

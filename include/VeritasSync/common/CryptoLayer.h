@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -43,10 +44,12 @@ public:
     // 输入: IV + Ciphertext + Tag
     std::string decrypt(const std::string& ciphertext) const;
 
-    bool has_key() const { return !m_key.empty(); }
+    bool has_key() const;
 
 private:
     std::string m_key;
+    // 【安全修复 H8】保护 m_key 并发读写（set_key 写 + encrypt/decrypt 读）
+    mutable std::shared_mutex m_key_mutex;
     
     // 性能优化：使用线程局部缓存 (Thread Local Storage)
     // 理由：EVP_CIPHER_CTX 的创建和销毁非常耗时。

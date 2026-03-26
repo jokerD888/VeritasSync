@@ -152,10 +152,15 @@ namespace VeritasSync {
     }
 
     StateManager::~StateManager() {
+        // 【安全修复 H7】先销毁 file_watcher（停止 efsw 线程），
+        // 确保 UpdateListener 回调不再触发，然后再销毁 listener 和其他成员。
+        // efsw::FileWatcher 析构会等待内部线程退出。
         if (m_file_watcher) {
             g_logger->info("[StateManager] 正在停止文件监控...");
+            m_file_watcher.reset();  // 显式先销毁，等待 efsw 线程退出
         }
-        
+        m_listener.reset();  // efsw 线程已停，安全销毁 listener
+
         // --- 关键：安全关闭异步任务 ---
         if (m_retry_timer) {
             m_retry_timer->cancel();

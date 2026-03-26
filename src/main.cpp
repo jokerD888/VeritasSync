@@ -41,15 +41,40 @@ void signal_handler(int signum) {
 
 bool relaunch_current_process() {
 #if defined(_WIN32)
+    // 【安全修复 C5】用 CreateProcessW 替代 ShellExecuteW
+    // CreateProcess 是同步创建进程，返回时新进程已经存在，可以安全释放 mutex
     wchar_t exe_path[MAX_PATH] = {0};
     if (GetModuleFileNameW(NULL, exe_path, MAX_PATH) == 0) {
         return false;
     }
 
-    HINSTANCE result = ShellExecuteW(NULL, L"open", exe_path, NULL, NULL, SW_SHOWNORMAL);
-    return reinterpret_cast<intptr_t>(result) > 32;
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessW(exe_path, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    if (ok) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return true;
+    }
+    return false;
 #else
-    return std::system("./veritas_sync &") == 0;
+    // 【安全修复 H10】用 /proc/self/exe 获取真实路径，用 fork+execv 替代 system()
+    char exe_path[4096] = {0};
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0) {
+        return false;
+    }
+    exe_path[len] = '\0';
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        // 子进程
+        char* args[] = {exe_path, nullptr};
+        execv(exe_path, args);
+        _exit(1);  // execv 失败
+    }
+    return pid > 0;
 #endif
 }
 
@@ -443,7 +468,8 @@ int main(int argc, char* argv[]) {
         VeritasSync::g_logger->info("检测到重启请求，正在拉起新实例...");
 
 #if defined(_WIN32)
-        // 先释放互斥锁，避免新实例被单实例检查拦截
+        // 【安全修复 C5】先释放 mutex，再用 CreateProcessW 同步创建新进程
+        // CreateProcessW（相比原来的 ShellExecuteW）是同步的——返回时新进程已存在
         if (hMutex) {
             CloseHandle(hMutex);
             hMutex = nullptr;

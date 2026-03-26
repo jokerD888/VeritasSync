@@ -154,7 +154,8 @@ private:
         uint64_t expected_size = 0;    // 预期文件大小
         
         // C-2: 标记是否正在被 handle_chunk 使用（防止 cancel/cleanup 并发删除）
-        bool busy = false;
+        // 【安全修复 H5】改为 atomic，消除 worker 线程与 io_context 线程的数据竞争
+        std::atomic<bool> busy{false};
     };
     struct SendingFile {
         uint32_t total_chunks = 0;
