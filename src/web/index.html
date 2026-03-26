@@ -1330,12 +1330,12 @@
             document.querySelectorAll('.task-card[data-sync-key]').forEach(card => {
                 const key = card.dataset.syncKey;
                 const status = _nodeStatusMap[key] || 'stopped';
-                const label = _statusLabels[status] || status;
                 const badge = card.querySelector('.task-status-badge');
-                if (badge) {
-                    badge.className = `task-status status-${status}`;
-                    badge.innerHTML = `<span class="status-dot"></span>${escapeHtml(label)}`;
-                }
+                if (!badge || badge.dataset.status === status) return; // 跳过未变化的
+                badge.dataset.status = status;
+                const label = _statusLabels[status] || status;
+                badge.className = `task-status status-${status}`;
+                badge.innerHTML = `<span class="status-dot"></span>${escapeHtml(label)}`;
             });
         }
 
@@ -1461,8 +1461,8 @@
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:0.85rem">
                                 
                                 <!-- 1. 文件名：flex:1 自动占据剩余空间，超出部分省略号 -->
-                                <span style="font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; margin-right:10px;" title="${d.path}">
-                                    ${d.path.split(/[/\\]/).pop()}
+                                <span style="font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; margin-right:10px;" title="${escapeAttr(d.path)}">
+                                    ${escapeHtml(d.path.split(/[/\\]/).pop())}
                                 </span>
 
                                 <!-- 2. 状态文字：强制不换行，不许压缩 -->
@@ -1537,7 +1537,7 @@
                         <div style="background:rgba(0,0,0,0.2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px;">
                             <div style="display:flex; align-items:center; gap:10px;">
                                 <span style="width:10px; height:10px; border-radius:50%; background:${ledColor}; box-shadow:${ledGlow}; display:inline-block;"></span>
-                                <span style="font-weight:600; color:#fff; font-size:0.9rem; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${p.peer_id}">${p.peer_id}</span>
+                                <span style="font-weight:600; color:#fff; font-size:0.9rem; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeAttr(p.peer_id)}">${escapeHtml(p.peer_id)}</span>
                             </div>
                             <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:0.75rem; color:var(--text-sub);">
                                 <span>${stateText}${connTypeText ? ' · ' + connTypeText : ''}</span>

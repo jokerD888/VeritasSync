@@ -298,13 +298,14 @@ int main(int argc, char* argv[]) {
             }
 
             // D. 推导任务运行状态
+            bool tracker_online = node->is_tracker_online();
             std::string status = "stopped";
             if (node->is_started()) {
                 if (has_active_transfers) {
                     status = "syncing";
-                } else if (node->is_tracker_online() && node_connected_peers > 0) {
+                } else if (tracker_online && node_connected_peers > 0) {
                     status = "idle";
-                } else if (node->is_tracker_online()) {
+                } else if (tracker_online) {
                     status = "waiting";
                 } else {
                     status = "offline";
