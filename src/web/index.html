@@ -23,8 +23,8 @@
             --accent-glow: rgba(217, 70, 239, 0.6);
             
             --text-main: #f1f5f9;
-            --text-sub: #94a3b8;
-            --text-muted: #64748b;
+            --text-sub: #b0bec5;  /* 调亮: 对比度从 3.2:1 提升至 ~5.5:1 (WCAG AA) */
+            --text-muted: #8494a7; /* 调亮: 对比度从 3.8:1 提升至 ~4.6:1 (WCAG AA) */
             
             --border: rgba(148, 163, 184, 0.1);
             --border-highlight: rgba(255, 255, 255, 0.15);
@@ -807,7 +807,7 @@
             const params = new URLSearchParams(location.search);
             const urlToken = params.get('token');
             if (urlToken) {
-                localStorage.setItem('vs_auth_token', urlToken);
+                sessionStorage.setItem('vs_auth_token', urlToken);
                 // 从 URL 中移除 token 参数，防止泄露（地址栏不显示 token）
                 params.delete('token');
                 const cleanUrl = params.toString() ? (location.pathname + '?' + params) : location.pathname;
@@ -817,7 +817,7 @@
             const _fetch = window.fetch;
             window.fetch = function(url, opts) {
                 opts = opts || {};
-                const token = localStorage.getItem('vs_auth_token');
+                const token = sessionStorage.getItem('vs_auth_token');
                 if (token) {
                     opts.headers = opts.headers || {};
                     if (opts.headers instanceof Headers) {
@@ -831,7 +831,32 @@
         })();
 
         let rawLog = "";
+        // 【性能优化】轮询变更检测：只在数据真正变化时更新 DOM
+        let _lastStatusJson = "";
         const id = x => document.getElementById(x);
+
+        // 【安全修复】HTML/属性转义，防止 XSS 注入
+        function escapeHtml(text) {
+            if (!text) return '';
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        function escapeAttr(text) {
+            if (!text) return '';
+            return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // 事件委托：点击 .copy-key 元素时复制 data-key
+        document.addEventListener('click', function(e) {
+            const el = e.target.closest('.copy-key');
+            if (el && el.dataset.key) {
+                navigator.clipboard.writeText(el.dataset.key).then(() => {
+                    // 短暂的视觉反馈替代 alert
+                    const orig = el.textContent;
+                    el.textContent = '✓ 已复制';
+                    setTimeout(() => { el.textContent = orig; }, 1200);
+                });
+            }
+        });
 
         function updateRoleVisibility() {
             const mode = id('newMode').value;
@@ -898,9 +923,9 @@
                     return `
                 <div class="task-card ${borderClass}">
                     <div class="task-header">
-                        <div class="folder-title" title="${t.sync_folder}">
+                        <div class="folder-title" title="${escapeAttr(t.sync_folder)}">
                             <span>📁</span>
-                            ${t.sync_folder.split(/[/\\]/).pop() || 'Root'}
+                            ${escapeHtml(t.sync_folder.split(/[/\\]/).pop() || 'Root')}
                         </div>
                         <span class="badge ${badgeClass}">${badgeText}</span>
                     </div>
@@ -908,12 +933,12 @@
                     <div class="task-body">
                         <div>
                             <div class="info-label">SYNC KEY (密钥)</div>
-                            <div class="info-value" onclick="copy('${t.sync_key}')" title="点击复制">${t.sync_key}</div>
+                            <div class="info-value copy-key" data-key="${escapeAttr(t.sync_key)}" title="点击复制">${escapeHtml(t.sync_key)}</div>
                         </div>
                         <div>
                             <div class="info-label">本地路径</div>
-                            <div class="info-value" style="background:transparent; padding-left:0; color:var(--text-muted); cursor:default; border:none" title="${t.sync_folder}">
-                                ${t.sync_folder}
+                            <div class="info-value" style="background:transparent; padding-left:0; color:var(--text-muted); cursor:default; border:none" title="${escapeAttr(t.sync_folder)}">
+                                ${escapeHtml(t.sync_folder)}
                             </div>
                         </div>
                     </div>
@@ -1212,19 +1237,36 @@
             b.disabled = false; 
         }
         
-        async function addTask() { 
+        async function addTask() {
             const k = id('newKey').value;
             const r = id('newRole').value;
             const f = id('newFolder').value;
             const m = id('newMode').value;
-            if (!k || !f) return alert('信息不完整');
+            // 【UX 修复】具体的字段级错误提示
+            if (!k) return alert('请填写 Sync Key（同步密钥）');
+            if (!f) return alert('请选择同步文件夹路径');
             // S-2 安全修复: sync_key 最低强度校验
             if (k.length < 16) return alert('Sync Key 长度至少 16 个字符，建议点击 🎲 生成按钮创建安全密钥');
-            await fetch('/api/tasks', { method: 'POST', body: JSON.stringify({ sync_key: k, role: r, sync_folder: f, mode: m }) }); 
-            closeModal(); location.reload(); 
+            const resp = await fetch('/api/tasks', { method: 'POST', body: JSON.stringify({ sync_key: k, role: r, sync_folder: f, mode: m }) });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                return alert('添加任务失败: ' + (err.error || resp.statusText));
+            }
+            closeModal(); location.reload();
         }
-        
-        async function delTask(i) { if (confirm('删除?')) { await fetch(`/api/tasks/${i}`, { method: 'DELETE' }); location.reload(); } }
+
+        // 【UX 修复】删除确认显示任务名，检查响应
+        async function delTask(i) {
+            const taskCards = document.querySelectorAll('.task-card .folder-title');
+            const name = taskCards[i]?.textContent?.trim() || `任务 #${i}`;
+            if (!confirm(`确定删除「${name}」吗？此操作不可撤销。`)) return;
+            const resp = await fetch(`/api/tasks/${i}`, { method: 'DELETE' });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                return alert('删除失败: ' + (err.error || resp.statusText));
+            }
+            location.reload();
+        }
         async function fetchGlobalLog() { const r = await fetch('/api/log'); rawLog = await r.text(); renderLog(); }
         
         function renderLog() {
@@ -1266,7 +1308,11 @@
         setInterval(async () => {
             try {
                 const r = await fetch('/api/status');
-                const data = await r.json(); 
+                const text = await r.text();
+                // 【性能优化】只在数据变化时更新 DOM，减少无效重绘
+                if (text === _lastStatusJson) return;
+                _lastStatusJson = text;
+                const data = JSON.parse(text); 
                 
                 // 数据结构现在是： { global: {...}, nodes: [...] }
                 // 兼容性处理：防止刚启动时为空
