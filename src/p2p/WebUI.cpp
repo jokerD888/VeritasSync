@@ -55,6 +55,13 @@ WebUIServer::WebUIServer(int port, const std::string& config_path)
         m_nl_filter.set_llm_config(llm_cfg);
     }
 
+    // 【安全加固】设置默认响应头
+    m_svr.set_default_headers({
+        {"X-Content-Type-Options", "nosniff"},
+        {"X-Frame-Options", "DENY"},
+        {"Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:;"}
+    });
+
     setup_routes();
 }
 

@@ -464,6 +464,14 @@
             border-radius: 8px; color: #fca5a5; font-size: 0.85rem;
         }
         .nl-error.visible { display: block; }
+
+        /* --- Utility classes (extracted from inline styles) --- */
+        .text-sub { color: var(--text-sub); }
+        .text-muted { color: var(--text-muted); }
+        .text-sm-sub { font-size: 0.85rem; color: var(--text-sub); }
+        .empty-state { text-align: center; padding: 1.5rem; color: var(--text-muted); font-size: 0.85rem; }
+        .modal-title { font-size: 1.3rem; font-weight: 700; color: #fff; margin-bottom: 0.5rem; }
+        .section-title { font-size: 2rem; font-weight: 700; color: #fff; margin-bottom: 5px; }
     </style>
 </head>
 <body>
@@ -471,7 +479,7 @@
     <div class="overlay" id="restart-overlay">
         <div class="spinner"></div>
         <h2 style="margin-bottom: 0.5rem;">正在重启服务...</h2>
-        <p style="color: var(--text-sub);">正在重新加载核心配置，请稍候</p>
+        <p class="text-sub">正在重新加载核心配置，请稍候</p>
     </div>
 
     <!-- 顶部导航 -->
@@ -496,7 +504,7 @@
             <div class="nav-item" onclick="switchTab('settings', this)">全局配置</div>
             <div class="nav-item" onclick="switchTab('logs', this)">系统日志</div>
         </div>
-        <div style="font-size: 0.8rem; color: var(--text-muted);">
+        <div class="text-muted" style="font-size: 0.8rem;">
             Core <span style="font-family: var(--font-mono);">v1.0</span>
         </div>
     </nav>
@@ -512,8 +520,8 @@
                 <div class="left-panel">
                     <div style="display: flex; justify-content: space-between; align-items: flex-end;">
                         <div>
-                            <h1 style="font-size: 2rem; font-weight: 700; color: #fff; margin-bottom: 5px;">我的同步目录</h1>
-                            <p style="color: var(--text-sub);">管理所有的同步节点与文件夹路径</p>
+                            <h1 class="section-title">我的同步目录</h1>
+                            <p class="text-sub">管理所有的同步节点与文件夹路径</p>
                         </div>
                         <button class="btn btn-primary" onclick="openModal()">
                             <span style="font-size:1.4em; margin-right:4px; line-height:1">+</span> 新建任务
@@ -558,12 +566,12 @@
                             <h3 style="font-size:1rem; color:#fff; display:flex; align-items:center; gap:8px; margin:0">
                                 <span>🔗</span> P2P 对等点
                             </h3>
-                            <div style="font-size:0.75rem; color:var(--text-sub);" id="peers-summary">
+                            <div class="text-sub" style="font-size:0.75rem;" id="peers-summary">
                                 在线: 0
                             </div>
                         </div>
                         <div id="peers-container" style="overflow-y:auto; flex:1;">
-                            <div style="text-align:center; padding:1.5rem; color:var(--text-muted); font-size:0.85rem;">
+                            <div class="empty-state">
                                 等待对等点连接...
                             </div>
                         </div>
@@ -575,7 +583,7 @@
                             <span>📡</span> 实时数据流
                         </h3>
                         <div id="transfer-container">
-                            <div style="text-align:center; padding:3rem 1rem; color:var(--text-muted);">
+                            <div class="text-muted" style="text-align:center; padding:3rem 1rem;">
                                 系统待机中...<br>暂无文件传输
                             </div>
                         </div>
@@ -589,7 +597,7 @@
         <div id="view-settings" class="view-section section-hidden">
             <div style="max-width: 800px; margin: 0 auto;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 2rem;">
-                    <h1 style="font-size: 2rem; font-weight: 700;">系统全局配置</h1>
+                    <h1 class="section-title">系统全局配置</h1>
                     <div style="display:flex; gap:12px;">
                         <button class="btn btn-danger-ghost" onclick="restartApp()" id="btnRestart">重启服务</button>
                         <button class="btn btn-primary" onclick="saveSettings()" id="btnSave">保存更改</button>
@@ -647,7 +655,7 @@
                             <input type="checkbox" id="cfgEnableMultiWan" style="width:18px;height:18px;accent-color:var(--primary);">
                             启用多 STUN 并发探测 (显著提升多宽带/NAT3 环境下的连通率)
                         </label>
-                        <div style="font-size:0.85rem;color:var(--text-sub);margin-left:30px;margin-top:8px;">
+                        <div class="text-sm-sub" style="margin-left:30px;margin-top:8px;">
                             * 开启后将自动从下方列表获取 STUN 服务器, 探测所有可能的公网 IP 并注入 SDP。
                         </div>
                     </div>
@@ -667,11 +675,11 @@
                     <div class="dot" style="background:#ef4444"></div>
                     <div class="dot" style="background:#f59e0b"></div>
                     <div class="dot" style="background:#10b981"></div>
-                    <span style="margin-left:12px; color:var(--text-sub); font-size:0.85rem">system_output.log</span>
+                    <span class="text-sm-sub" style="margin-left:12px">system_output.log</span>
                     <div style="flex:1"></div>
                     
                     <input type="text" id="logFilter" class="form-input" style="width:240px; padding:6px 12px; height:auto; border:none; background:#0b0f19" placeholder="grep / filter logs..." onkeyup="renderLog()">
-                    <label style="font-size:0.85rem; color:var(--text-sub); display:flex; align-items:center; gap:8px; cursor:pointer; margin-left:15px">
+                    <label class="text-sm-sub" style="display:flex; align-items:center; gap:8px; cursor:pointer; margin-left:15px">
                         <input type="checkbox" id="autoScroll" checked> Auto-Scroll
                     </label>
                     <button class="btn btn-ghost" onclick="fetchGlobalLog()" style="padding:4px 12px; font-size:0.8rem; margin-left:15px">刷新</button>
@@ -687,8 +695,8 @@
     <!-- 弹窗：新建任务 (核心修复位置) -->
     <div class="modal" id="add-modal">
         <div class="modal-box">
-            <h2 style="margin-bottom: 0.5rem; font-size: 1.8rem; color:#fff">新建同步任务</h2>
-            <p style="color:var(--text-sub); margin-bottom: 2rem;">配置新的文件夹路径与同步密钥</p>
+            <h2 class="modal-title" style="font-size: 1.8rem;">新建同步任务</h2>
+            <p class="text-sub" style="margin-bottom: 2rem;">配置新的文件夹路径与同步密钥</p>
             
             <div class="form-group">
                 <label>Sync Key (同步密钥)</label>
@@ -736,8 +744,8 @@
         <div class="modal-box" style="width:700px; max-width:95%">
             <div style="display:flex; justify-content:space-between; margin-bottom:1.5rem; align-items:center">
                 <div>
-                    <h3 style="margin:0; color:#fff; font-size:1.4rem">📋 忽略规则编辑器</h3>
-                    <p style="color:var(--text-sub); font-size:0.85rem; margin-top:6px" id="ignore-folder-name">加载中...</p>
+                    <h3 class="modal-title" style="font-size:1.4rem; margin:0;">📋 忽略规则编辑器</h3>
+                    <p class="text-sm-sub" style="margin-top:6px" id="ignore-folder-name">加载中...</p>
                 </div>
                 <button class="btn btn-ghost" style="padding:6px 12px; font-size:1.2rem" onclick="closeIgnoreModal()">✕</button>
             </div>
@@ -759,7 +767,7 @@
                     <div class="nl-loading-dot"></div>
                     <div class="nl-loading-dot"></div>
                     <div class="nl-loading-dot"></div>
-                    <span style="color:var(--text-sub); font-size:0.85rem">正在生成规则...</span>
+                    <span class="text-sm-sub">正在生成规则...</span>
                 </div>
 
                 <!-- 错误提示 -->
@@ -782,8 +790,8 @@
             </div>
             
             <div style="background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:10px; padding:15px; margin-bottom:1.5rem">
-                <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:10px">📄 .veritasignore 语法说明:</div>
-                <div style="font-size:0.8rem; color:var(--text-sub); line-height:1.8; font-family:var(--font-mono)">
+                <div class="text-muted" style="font-size:0.8rem; margin-bottom:10px">📄 .veritasignore 语法说明:</div>
+                <div class="text-sub" style="font-size:0.8rem; line-height:1.8; font-family:var(--font-mono)">
                     <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px">*.log</code> 忽略所有 .log 文件<br>
                     <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px">node_modules/</code> 忽略整个目录<br>
                     <code style="background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px"># 注释</code> 以 # 开头的行为注释
@@ -1368,7 +1376,7 @@
 
                 const container = document.getElementById('transfer-container');
                 if (allTransfers.length === 0) {
-                    container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:0.9rem">暂无活跃的大文件传输<br><span style="font-size:0.8rem;opacity:0.6">(小文件同步已计入上方统计)</span></div>';
+                    container.innerHTML = '<div class="empty-state" style="padding:2rem">暂无活跃的大文件传输<br><span style="font-size:0.8rem;opacity:0.6">(小文件同步已计入上方统计)</span></div>';
                 } else {
                     container.innerHTML = allTransfers.map(d => {
                         const isUp = (d.type === 'upload');
@@ -1439,7 +1447,7 @@
                 
                 const peersContainer = id('peers-container');
                 if (peers.length === 0) {
-                    peersContainer.innerHTML = '<div style="text-align:center; padding:1.5rem; color:var(--text-muted); font-size:0.85rem;">等待对等点连接...</div>';
+                    peersContainer.innerHTML = '<div class="empty-state">等待对等点连接...</div>';
                 } else {
                     peersContainer.innerHTML = peers.map(p => {
                         // 状态对应的 LED 颜色和文字
