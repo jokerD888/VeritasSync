@@ -635,6 +635,8 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
     
     if (from_peer) {
         from_peer->add_received_file_count(paths.size());
+        // 【健壮性修复 M9】与其他 handler 一致，刷新 peer timeout 防止假超时
+        refresh_peer_timeout(from_peer);
     }
     
     boost::asio::post(m_worker_pool, [this, paths]() {
@@ -697,6 +699,7 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
     
     if (from_peer) {
         from_peer->add_received_dir_count(creates.size() + deletes.size());
+        refresh_peer_timeout(from_peer);
     }
     
     boost::asio::post(m_worker_pool, [this, creates, deletes]() {

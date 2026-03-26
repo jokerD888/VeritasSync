@@ -65,7 +65,16 @@ WebUIServer::WebUIServer(int port, const std::string& config_path)
 std::optional<size_t> WebUIServer::parse_task_index(
     const httplib::Request& req, httplib::Response& res) {
     try {
-        return static_cast<size_t>(std::stoul(req.path_params.at("id")));
+        const std::string& id_str = req.path_params.at("id");
+        size_t pos = 0;
+        unsigned long val = std::stoul(id_str, &pos);
+        // 【健壮性修复 M3】确保整个字符串都被解析，防止 "0abc" 静默解析为 0
+        if (pos != id_str.length()) {
+            res.status = 400;
+            res.set_content(R"({"success":false,"error":"无效的任务ID格式"})", "application/json");
+            return std::nullopt;
+        }
+        return static_cast<size_t>(val);
     } catch (const std::invalid_argument&) {
         res.status = 400;
         res.set_content(R"({"success":false,"error":"无效的任务ID格式"})", "application/json");
@@ -321,7 +330,15 @@ void WebUIServer::setup_config_routes() {
     m_svr.Get("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
         std::lock_guard<std::mutex> lock(m_config_mutex);
-        res.set_content(nlohmann::json(m_config).dump(2), "application/json; charset=utf-8");
+        auto j = nlohmann::json(m_config);
+        // 【安全修复 M6】脱敏敏感字段，防止 API 泄露密码/密钥
+        if (j.contains("turn_password") && !j["turn_password"].get<std::string>().empty()) {
+            j["turn_password"] = "***";
+        }
+        if (j.contains("llm_api_key") && !j["llm_api_key"].get<std::string>().empty()) {
+            j["llm_api_key"] = "***";
+        }
+        res.set_content(j.dump(2), "application/json; charset=utf-8");
     });
 
     // POST /api/config
@@ -445,6 +462,15 @@ void WebUIServer::setup_task_routes() {
             Config config_snapshot;  // 【安全修复 C6】在锁内拷贝 config，避免无锁传引用
             {
                 std::lock_guard<std::mutex> lock(m_config_mutex);
+                // 【健壮性修复 M4】检查 sync_key 是否重复
+                for (const auto& existing : m_config.tasks) {
+                    if (existing.sync_key == task.sync_key) {
+                        res.status = 409;
+                        res.set_content(R"({"success":false,"error":"sync_key 已存在，不能添加重复的任务"})",
+                                        "application/json");
+                        return;
+                    }
+                }
                 m_config.tasks.push_back(task);
                 if (!save_config_internal()) {
                     m_config.tasks.pop_back();  // 回滚：移除已添加的任务
@@ -499,8 +525,14 @@ void WebUIServer::setup_task_routes() {
                 return;
             }
             removed_sync_key = m_config.tasks[idx].sync_key;
+            // 【健壮性修复 M5】先备份再删除，保存失败时可回滚
+            SyncTask removed_task = m_config.tasks[idx];
             m_config.tasks.erase(m_config.tasks.begin() + idx);
             save_ok = save_config_internal();
+            if (!save_ok) {
+                // 回滚：恢复被删除的任务
+                m_config.tasks.insert(m_config.tasks.begin() + idx, std::move(removed_task));
+            }
         }
 
         if (!save_ok) {

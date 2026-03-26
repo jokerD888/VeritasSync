@@ -216,7 +216,11 @@ private:
     // C-2: 使用 shared_ptr 因为 ReceivingFile 含 std::mutex 不可移动
     std::unordered_map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
     std::mutex m_transfer_mutex;  // 全局锁：保护 map 结构（insert/erase/遍历）
+    // 【健壮性修复 H6】以 "peer_id\0path" 为 key，防止多 peer 同时请求同一文件时进度覆盖
     std::unordered_map<std::string, SendingFile> m_sending_files;  // 追踪上传
+    static std::string make_sending_key(const std::string& peer_id, const std::string& path) {
+        return peer_id + '\0' + path;
+    }
 
     std::atomic<uint64_t> m_session_total{0};
     std::atomic<uint64_t> m_session_done{0};

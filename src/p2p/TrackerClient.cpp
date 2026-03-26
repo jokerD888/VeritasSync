@@ -254,6 +254,13 @@ void TrackerClient::do_register() {
  */
 void TrackerClient::send_signaling_message(const std::string& to_peer_id, const std::string& type,
                                            const std::string& sdp) {
+    // 【健壮性修复 M14】断连或停止时不发送信令，避免消息堆积
+    auto state = m_state.load(std::memory_order_acquire);
+    if (state != State::CONNECTED && state != State::REGISTERING) {
+        if (g_logger) g_logger->debug("[TrackerClient] 跳过信令发送（未连接）: {} -> {}", type, to_peer_id);
+        return;
+    }
+
     nlohmann::json payload;
     payload["from"] = m_self_id;
     payload["to"] = to_peer_id;

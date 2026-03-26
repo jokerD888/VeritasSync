@@ -57,8 +57,9 @@ struct UploadContext {
     std::string path;
     std::ifstream file;
     std::string file_hash;
-    int total_chunks = 0;
-    int current_chunk = 0;
+    // 【健壮性修复 M12】使用 uint32_t 避免超大文件溢出，与 ChunkHeader 一致
+    uint32_t total_chunks = 0;
+    uint32_t current_chunk = 0;
     int open_retry_count = 0; // 新增：用于异步重试计数
 
     // 资源复用
@@ -197,7 +198,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     // 1. UI 占位
     {
         std::lock_guard<std::mutex> lock(m_transfer_mutex);
-        m_sending_files[request->path] = {0, 0};
+        m_sending_files[make_sending_key(peer_id, request->path)] = {0, 0};
         m_session_total++;
     }
 
@@ -235,7 +236,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
             g_logger->error("[Transfer] 文件物理不存在: {} (OS Error: {})", PathToUtf8(full_path), fs_ec.message());
             {
                 std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                self->m_sending_files.erase(ctx->path);
+                self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
             }
             self->m_session_done++;
             return;
@@ -264,7 +265,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         }
         
         // 设置起始块
-        ctx->current_chunk = static_cast<int>(actual_start_chunk);
+        ctx->current_chunk = static_cast<uint32_t>(actual_start_chunk);
 
         // --- 直接进入循环，由循环内部负责按需打开和关闭句柄 ---
 
@@ -301,7 +302,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         g_logger->error("[Transfer] ❌ 无法打开文件(重试{}次后放弃): {} | {}", FILE_OPEN_MAX_RETRIES, ctx->path, sys_err);
                         {
                             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                            self->m_sending_files.erase(ctx->path);
+                            self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                         }
                         self->m_session_done++;
                         return;
@@ -315,11 +316,11 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 if (ctx->total_chunks == 0) {
                     ctx->file.seekg(0, std::ios::end);
                     std::streamsize size = ctx->file.tellg();
-                    ctx->total_chunks = (size > 0) ? static_cast<int>((size + ctx->chunk_data_size - 1) / ctx->chunk_data_size) : 1;
+                    ctx->total_chunks = (size > 0) ? static_cast<uint32_t>((size + ctx->chunk_data_size - 1) / ctx->chunk_data_size) : 1;
                     
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                    if (self->m_sending_files.count(ctx->path)) {
-                        self->m_sending_files[ctx->path].total_chunks = static_cast<uint32_t>(ctx->total_chunks);
+                    if (self->m_sending_files.count(make_sending_key(ctx->peer_id, ctx->path))) {
+                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].total_chunks = static_cast<uint32_t>(ctx->total_chunks);
                     }
                 }
                 
@@ -364,7 +365,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     ctx->file.close();
                     {
                         std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                        self->m_sending_files.erase(ctx->path);
+                        self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                     }
                     self->m_session_done++;
                     return;  // 提前退出，避免 CPU 浪费
@@ -374,10 +375,10 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 ctx->current_chunk++;
                 {
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                    if (self->m_sending_files.count(ctx->path)) {
-                        self->m_sending_files[ctx->path].sent_chunks = ctx->current_chunk;
+                    if (self->m_sending_files.count(make_sending_key(ctx->peer_id, ctx->path))) {
+                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].sent_chunks = ctx->current_chunk;
                         // 更新活跃时间 (喂狗)
-                        self->m_sending_files[ctx->path].last_active = std::chrono::steady_clock::now();
+                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].last_active = std::chrono::steady_clock::now();
                     }
                 }
 
@@ -412,7 +413,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 }
                 {
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                    self->m_sending_files.erase(ctx->path);
+                    self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                 }
                 self->m_session_done++;
                 g_logger->info("[Transfer] 文件发送完成: {} (共 {} 块)", ctx->path, ctx->total_chunks);
