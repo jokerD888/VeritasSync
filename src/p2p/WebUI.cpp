@@ -10,6 +10,12 @@
 #pragma comment(lib, "user32.lib")
 #endif
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#include <sys/wait.h>
+#include <cerrno>
+#endif
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -167,6 +173,23 @@ bool WebUIServer::save_config() {
 // 静态工具方法
 // ═══════════════════════════════════════════════════════════════
 
+#if !defined(_WIN32)
+// 【修复 R3】安全的 fork+exec 封装：检查错误、回收子进程
+static void safe_fork_exec(const char* prog, const char* arg) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (g_logger) g_logger->error("[WebUI] fork 失败: {}", strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        execlp(prog, prog, arg, nullptr);
+        _exit(1);
+    }
+    // 父进程：非阻塞回收，短命子进程（open/xdg-open）很快退出
+    waitpid(pid, nullptr, WNOHANG);
+}
+#endif
+
 void WebUIServer::open_folder_in_os(const std::string& p) {
     std::filesystem::path path_obj = Utf8ToPath(p);
     try {
@@ -179,18 +202,9 @@ void WebUIServer::open_folder_in_os(const std::string& p) {
 #ifdef _WIN32
     ShellExecuteW(NULL, L"open", path_obj.c_str(), NULL, NULL, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-    // 【安全修复 C1】用 fork()+execlp() 替代 system()，避免 shell 命令注入
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("open", "open", path_obj.string().c_str(), nullptr);
-        _exit(1);
-    }
+    safe_fork_exec("open", path_obj.string().c_str());
 #else
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("xdg-open", "xdg-open", path_obj.string().c_str(), nullptr);
-        _exit(1);
-    }
+    safe_fork_exec("xdg-open", path_obj.string().c_str());
 #endif
 }
 
@@ -199,17 +213,9 @@ void WebUIServer::open_url(const std::string& url) {
     std::wstring wUrl = Utf8ToWide(url);
     ShellExecuteW(NULL, L"open", wUrl.c_str(), NULL, NULL, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("open", "open", url.c_str(), nullptr);
-        _exit(1);
-    }
+    safe_fork_exec("open", url.c_str());
 #else
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-        _exit(1);
-    }
+    safe_fork_exec("xdg-open", url.c_str());
 #endif
 }
 
@@ -382,8 +388,13 @@ void WebUIServer::setup_config_routes() {
 
             if (j.contains("turn_username"))
                 m_config.turn_username = j.value("turn_username", m_config.turn_username);
-            if (j.contains("turn_password"))
-                m_config.turn_password = j.value("turn_password", m_config.turn_password);
+            if (j.contains("turn_password")) {
+                // 【修复 R1】跳过脱敏占位符 "***"，避免覆盖真实密码
+                std::string pw = j.value("turn_password", std::string{});
+                if (pw != "***") {
+                    m_config.turn_password = pw;
+                }
+            }
 
             if (save_config_internal()) {
                 res.set_content("{\"success\":true}", "application/json");

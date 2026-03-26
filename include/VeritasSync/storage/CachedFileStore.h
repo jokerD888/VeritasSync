@@ -73,6 +73,8 @@ private:
     void apply_pending();
     void discard_pending();
 
+    // 事务状态（非线程安全：所有事务操作必须在同一线程中执行，
+    // 当前由 StateManager 的 io_context/worker 线程保证）
     struct PendingOp {
         enum Type { Update, Remove };
         Type type;

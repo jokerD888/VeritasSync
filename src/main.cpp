@@ -8,6 +8,11 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
+
 #include "VeritasSync/common/Config.h"
 #include "VeritasSync/common/Logger.h"
 #include "VeritasSync/p2p/P2PManager.h"
@@ -68,13 +73,21 @@ bool relaunch_current_process() {
     exe_path[len] = '\0';
 
     pid_t pid = fork();
+    if (pid < 0) {
+        return false;  // fork 失败
+    }
     if (pid == 0) {
-        // 子进程
+        // 【修复 R2】子进程：新建会话 + 关闭继承的文件描述符
+        setsid();  // 脱离父进程的终端会话，防止 SIGHUP 杀死子进程
+        // 关闭从父进程继承的 socket/DB 句柄（0-2 保留 stdin/stdout/stderr）
+        for (int fd = 3; fd < 1024; ++fd) close(fd);
         char* args[] = {exe_path, nullptr};
         execv(exe_path, args);
         _exit(1);  // execv 失败
     }
-    return pid > 0;
+    // 父进程：回收子进程避免僵尸（子进程已 execv，会很快脱离）
+    waitpid(pid, nullptr, WNOHANG);
+    return true;
 #endif
 }
 

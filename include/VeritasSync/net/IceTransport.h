@@ -178,8 +178,6 @@ public:
     }
 
 private:
-
-private:
     IceTransport(IceTransportCallbacks callbacks);
     
     bool initialize(const IceConfig& config);

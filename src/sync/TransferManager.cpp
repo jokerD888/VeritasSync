@@ -319,8 +319,9 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     ctx->total_chunks = (size > 0) ? static_cast<uint32_t>((size + ctx->chunk_data_size - 1) / ctx->chunk_data_size) : 1;
                     
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                    if (self->m_sending_files.count(make_sending_key(ctx->peer_id, ctx->path))) {
-                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].total_chunks = static_cast<uint32_t>(ctx->total_chunks);
+                    auto it = self->m_sending_files.find(make_sending_key(ctx->peer_id, ctx->path));
+                    if (it != self->m_sending_files.end()) {
+                        it->second.total_chunks = static_cast<uint32_t>(ctx->total_chunks);
                     }
                 }
                 
@@ -375,10 +376,10 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 ctx->current_chunk++;
                 {
                     std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
-                    if (self->m_sending_files.count(make_sending_key(ctx->peer_id, ctx->path))) {
-                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].sent_chunks = ctx->current_chunk;
-                        // 更新活跃时间 (喂狗)
-                        self->m_sending_files[make_sending_key(ctx->peer_id, ctx->path)].last_active = std::chrono::steady_clock::now();
+                    auto it = self->m_sending_files.find(make_sending_key(ctx->peer_id, ctx->path));
+                    if (it != self->m_sending_files.end()) {
+                        it->second.sent_chunks = ctx->current_chunk;
+                        it->second.last_active = std::chrono::steady_clock::now();
                     }
                 }
 
