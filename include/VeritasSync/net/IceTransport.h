@@ -35,6 +35,22 @@ enum class IceConnectionType {
 
 /**
  * @brief ICE 传输配置
+ *
+ * TODO(feature): 多 STUN 服务器并行探测（Multi-STUN Probing）
+ *
+ * 问题场景：双 WAN 负载均衡路由器（Dual-WAN）环境下，同一设备的不同 UDP
+ * 连接可能被路由器分配到不同的公网 IP（按源端口哈希负载均衡）。当前只配置
+ * 一个 STUN 服务器，单次探测只能发现其中一条线路的 reflexive candidate。
+ *
+ * 方案：
+ * 1. Config 增加 stun_servers 数组（替代单个 stun_host/port）
+ * 2. IceTransport::initialize() 前，用独立 UDP socket 向每个 STUN 服务器
+ *    发送 Binding Request（不同 socket = 不同源端口 = 可能命中不同 WAN 线路）
+ * 3. 收集去重后的所有 server-reflexive address
+ * 4. 通过 juice_add_remote_candidate() 将额外发现的地址注入 ICE 流程
+ *
+ * 注意：此方案仅对 Dual-WAN 负载均衡有效。对称 NAT 下多 STUN 探测到的
+ * 地址对第三方不可用（每个目标分配不同映射），此时唯一可靠方案是 TURN relay。
  */
 struct IceConfig {
     std::string stun_host = "stun.l.google.com";

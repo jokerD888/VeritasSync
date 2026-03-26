@@ -27,8 +27,8 @@
 ### 🚀 高性能网络传输
 * **可靠 UDP (KCP)**: 基于 ARQ 机制的可靠 UDP 传输，在丢包率较高的弱网环境下，吞吐量和延迟表现远优于传统 TCP。
 * **智能 NAT 穿透 (ICE)**: 集成 **LibJuice** (STUN/TURN)，支持 Full Cone、Restricted Cone 等多种 NAT 类型穿透。自动探测最佳路径（P2P 直连优先，Relay 中继保底）。
-* **多 WAN 并发探测**: 独有的 **Multi-WAN Probing** 技术，自动利用所有可用出口 IP 进行连通性探测，显著提高多宽带环境下的穿透成功率。
 * **断点续传**: 支持传输中断后自动恢复，基于 bitmap 跟踪已接收分块，确保连续性校验后准确恢复。
+* **🚧 多 STUN 探测 (计划中)**: 针对双 WAN 负载均衡路由器场景——同一设备的不同连接可能被分配到不同公网 IP，单次 STUN 探测只能发现其中一条线路。计划支持配置多个 STUN 服务器并行探测，收集所有线路的 reflexive candidate，提高双宽带环境下的穿透成功率。
 
 ### 🔄 灵活的同步逻辑
 * **双向同步 (Bi-Directional)**: 支持多端互相同步，内置 **源头回声抑制 (Source-side Echo Suppression)** 算法，从源头阻止回声广播，节省带宽。
@@ -193,7 +193,6 @@ VeritasSync/
     "chunk_size": 16384,
     "kcp_window_size": 256,
     "kcp_update_interval_ms": 20,
-    "enable_multi_stun_probing": true,
     "tasks": [
         {
             "sync_key": "your-unique-sync-key-min-16-chars",

@@ -27,8 +27,8 @@ Whether for fast transfer of large files within a LAN or bi-directional synchron
 ### 🚀 High-Performance Networking
 * **Reliable UDP (KCP)**: Built on ARQ-based reliable UDP transmission. In weak network environments with high packet loss, it offers significantly better throughput and latency compared to traditional TCP.
 * **Smart NAT Traversal (ICE)**: Integrated with **LibJuice** (STUN/TURN), supporting traversal for various NAT types including Full Cone and Restricted Cone. Automatically detects the optimal path (prioritizing P2P direct connection, with Relay as a fallback).
-* **Multi-WAN Probing**: Features unique **Multi-WAN Probing** technology that automatically utilizes all available egress IPs for connectivity probing, significantly increasing traversal success rates in multi-broadband environments.
 * **Resumable Transfer**: Supports automatic resumption after transfer interruption with bitmap-based chunk tracking and contiguous verification for accurate recovery.
+* **🚧 Multi-STUN Probing (Planned)**: For Dual-WAN load-balancing router scenarios — different connections from the same device may be assigned to different public IPs, so a single STUN probe only discovers one link. Planned support for configuring multiple STUN servers to probe in parallel, collecting reflexive candidates from all links, improving traversal success rates in dual-broadband environments.
 
 ### 🔄 Flexible Synchronization Logic
 * **Bi-Directional Sync**: Supports mutual synchronization between multiple devices with built-in **Source-side Echo Suppression** algorithm that prevents echo broadcasts at the source, saving bandwidth.
@@ -193,7 +193,6 @@ VeritasSync/
     "chunk_size": 16384,
     "kcp_window_size": 256,
     "kcp_update_interval_ms": 20,
-    "enable_multi_stun_probing": true,
     "tasks": [
         {
             "sync_key": "your-unique-sync-key-min-16-chars",
