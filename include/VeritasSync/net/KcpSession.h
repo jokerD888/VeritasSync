@@ -40,9 +40,6 @@ public:
     
     // 注销上下文（在 KCP 释放时调用）
     void unregister_context(ikcpcb* kcp);
-    
-    // 获取上下文
-    std::shared_ptr<KcpContext> get_context(ikcpcb* kcp);
 
 private:
     KcpContextManager() = default;
@@ -241,11 +238,6 @@ public:
      */
     bool is_valid() const { return m_kcp != nullptr; }
     
-    /**
-     * @brief 获取底层 KCP 指针 (仅供兼容旧代码，后续应移除)
-     */
-    ikcpcb* get_raw_kcp() const { return m_kcp.get(); }
-
 private:
     KcpSession(uint32_t conv, KcpSessionCallbacks callbacks);
     bool initialize(const KcpConfig& config);

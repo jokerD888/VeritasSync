@@ -32,15 +32,6 @@ void KcpContextManager::unregister_context(ikcpcb* kcp) {
     m_contexts.erase(kcp);
 }
 
-std::shared_ptr<KcpContext> KcpContextManager::get_context(ikcpcb* kcp) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_contexts.find(kcp);
-    if (it != m_contexts.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
-
 // ═══════════════════════════════════════════════════════════════
 // KcpSession 实现
 // ═══════════════════════════════════════════════════════════════

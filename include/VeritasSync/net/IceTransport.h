@@ -176,11 +176,8 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         m_callbacks = std::move(callbacks);
     }
-    
-    /**
-     * @brief 获取底层 agent 指针 (仅供兼容旧代码，后续应移除)
-     */
-    juice_agent_t* get_raw_agent() const { return m_agent; }
+
+private:
 
 private:
     IceTransport(IceTransportCallbacks callbacks);
