@@ -79,8 +79,8 @@ bool PeerController::initialize_ice(const IceConfig& ice_config) {
     // 回调将在 bind_callbacks() 中设置（此时 shared_ptr 已就绪）
     
     IceTransportCallbacks ice_callbacks;  // 空回调，后续在 bind_callbacks 中设置
-    
-    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks));
+
+    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), &m_io_context);
     if (!m_ice) {
         if (g_logger) {
             g_logger->error("[PeerController] Failed to create IceTransport for {}", m_peer_id);
@@ -124,6 +124,17 @@ void PeerController::bind_callbacks() {
             self->on_ice_gathering_done(local_desc);
         });
     };
+
+    // 所有候选收集完成（含 Multi-STUN Probing），发送 ice_gathering_done 信号
+    ice_callbacks.on_all_candidates_done = [self_weak, &io]() {
+        boost::asio::post(io, [self_weak]() {
+            auto self = self_weak.lock();
+            if (!self) return;
+            if (self->m_callbacks.on_signal_needed) {
+                self->m_callbacks.on_signal_needed("ice_gathering_done", "");
+            }
+        });
+    };
     
     ice_callbacks.on_data_received = [self_weak, &io](const char* data, size_t size) {
         // 数据接收需要拷贝，因为原始指针在回调返回后可能无效
@@ -132,6 +143,18 @@ void PeerController::bind_callbacks() {
             auto self = self_weak.lock();
             if (!self) return;
             self->on_ice_data_received(data_copy.data(), data_copy.size());
+        });
+    };
+
+    // Multi-STUN Probing: 额外候选地址发现回调
+    ice_callbacks.on_extra_candidate = [self_weak, &io](const std::string& candidate_sdp) {
+        boost::asio::post(io, [self_weak, candidate_sdp]() {
+            auto self = self_weak.lock();
+            if (!self) return;
+            // 通过信令通道发送额外候选给对端
+            if (self->m_callbacks.on_signal_needed) {
+                self->m_callbacks.on_signal_needed("ice_candidate", candidate_sdp);
+            }
         });
     };
     
@@ -354,14 +377,15 @@ void PeerController::on_ice_local_candidate(const std::string& candidate) {
 }
 
 void PeerController::on_ice_gathering_done(const std::string& local_desc) {
-    
+
     if (m_callbacks.on_signal_needed) {
-        // 根据角色发送正确的信令类型
+        // 根据角色发送正确的信令类型（SDP Offer/Answer）
         std::string signal_type = m_is_offer_side ? "sdp_offer" : "sdp_answer";
         m_callbacks.on_signal_needed(signal_type, local_desc);
-        
-        // 同时发送 gathering_done 信号
-        m_callbacks.on_signal_needed("ice_gathering_done", "");
+
+        // 注意：ice_gathering_done 信号由 on_all_candidates_done 回调发送
+        // 如果启用了 Multi-STUN Probing，会在探测完成后才发送
+        // 如果未启用，IceTransport 会立即触发 on_all_candidates_done
     }
 }
 

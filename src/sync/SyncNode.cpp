@@ -221,6 +221,17 @@ bool SyncNode::start() {
                                        m_global_config.turn_username, m_global_config.turn_password);
     }
 
+    // 配置 Multi-STUN Probing（额外 STUN 服务器并行探测）
+    if (m_global_config.enable_multi_stun_probing && !m_global_config.extra_stun_servers.empty()) {
+        std::vector<std::pair<std::string, uint16_t>> servers;
+        servers.reserve(m_global_config.extra_stun_servers.size());
+        for (const auto& s : m_global_config.extra_stun_servers) {
+            servers.emplace_back(s.host, s.port);
+        }
+        p2p->set_extra_stun_servers(std::move(servers), true);
+        g_logger->info("[Config] Multi-STUN Probing 启用，{} 个额外 STUN 服务器", m_global_config.extra_stun_servers.size());
+    }
+
     // 7. 创建 StateManager（可能抛出异常，需要捕获）
     try {
         // 构造回调：将 StateManager 的变更通知连接到 P2PManager 的广播方法

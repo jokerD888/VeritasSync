@@ -59,6 +59,16 @@ struct Config {
     uint32_t file_hash_retry_delay_ms = 250;  // 文件哈希重试延迟
     // ----------------------------
 
+    // --- 多 STUN 探测配置（Multi-STUN Probing，用于双 WAN 环境）---
+    bool enable_multi_stun_probing = true;  // 是否启用多 STUN 并发探测
+    std::string stun_list_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+    struct StunServer {
+        std::string host;
+        uint16_t port = 3478;
+    };
+    std::vector<StunServer> extra_stun_servers;  // 额外 STUN 服务器列表（运行时从 URL 获取或手动配置）
+    // ----------------------------
+
     // --- WebUI 配置  ---
     unsigned short webui_port = 8800;  // Web 控制台端口
     // ----------------------------
@@ -101,6 +111,8 @@ inline void to_json(nlohmann::json& j, const Config& config) {
                        {"turn_port", config.turn_port},
                        {"turn_username", config.turn_username},
                        {"turn_password", config.turn_password},
+                       {"enable_multi_stun_probing", config.enable_multi_stun_probing},
+                       {"stun_list_url", config.stun_list_url},
                        {"log_level", config.log_level},
                        {"libjuice_log_level", config.libjuice_log_level},
                        {"kcp_update_interval_ms", config.kcp_update_interval_ms},
@@ -112,6 +124,13 @@ inline void to_json(nlohmann::json& j, const Config& config) {
                        {"llm_api_key", config.llm_api_key},
                        {"llm_model", config.llm_model},
                        {"tasks", config.tasks}};
+    // 序列化额外 STUN 服务器列表（如果有）
+    if (!config.extra_stun_servers.empty()) {
+        j["extra_stun_servers"] = nlohmann::json::array();
+        for (const auto& s : config.extra_stun_servers) {
+            j["extra_stun_servers"].push_back({{"host", s.host}, {"port", s.port}});
+        }
+    }
 }
 
 inline void from_json(const nlohmann::json& j, Config& config) {
@@ -145,6 +164,22 @@ inline void from_json(const nlohmann::json& j, Config& config) {
 
     // --- 加载 WebUI 配置 (如果存在) ---
     if (j.contains("webui_port")) j.at("webui_port").get_to(config.webui_port);
+    // ---------------------------------
+
+    // --- 加载多 STUN 探测配置 (如果存在) ---
+    if (j.contains("enable_multi_stun_probing")) j.at("enable_multi_stun_probing").get_to(config.enable_multi_stun_probing);
+    if (j.contains("stun_list_url")) j.at("stun_list_url").get_to(config.stun_list_url);
+    if (j.contains("extra_stun_servers")) {
+        config.extra_stun_servers.clear();
+        for (const auto& s : j["extra_stun_servers"]) {
+            Config::StunServer server;
+            server.host = s.value("host", "");
+            server.port = s.value("port", static_cast<uint16_t>(3478));
+            if (!server.host.empty()) {
+                config.extra_stun_servers.push_back(std::move(server));
+            }
+        }
+    }
     // ---------------------------------
 
     // --- 加载 LLM API 配置 (如果存在) ---

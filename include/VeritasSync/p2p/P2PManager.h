@@ -72,6 +72,7 @@ public:
     void set_mode(SyncMode mode);
     void set_stun_config(std::string host, uint16_t port);
     void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
+    void set_extra_stun_servers(std::vector<std::pair<std::string, uint16_t>> servers, bool enable);
 
     virtual ~P2PManager();
 
@@ -218,6 +219,11 @@ protected:
     uint16_t m_turn_port = 3478;
     std::string m_turn_username;
     std::string m_turn_password;
+
+    // --- Multi-STUN Probing 配置 ---
+    std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
+    bool m_enable_multi_stun_probing = false;
+    // --------------------------
 
     // --- 文件组装缓冲区清理 ---
     // 清理过期的传输缓冲区

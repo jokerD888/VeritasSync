@@ -82,6 +82,9 @@ IceConfig P2PManager::create_ice_config() const {
         config.turn_username = m_turn_username;
         config.turn_password = m_turn_password;
     }
+    // Multi-STUN Probing 配置
+    config.extra_stun_servers = m_extra_stun_servers;
+    config.enable_multi_stun_probing = m_enable_multi_stun_probing;
     return config;
 }
 
@@ -322,6 +325,16 @@ void P2PManager::set_turn_config(std::string host, uint16_t port, std::string us
     m_turn_port = port;
     m_turn_username = std::move(username);
     m_turn_password = std::move(password);
+}
+
+void P2PManager::set_extra_stun_servers(std::vector<std::pair<std::string, uint16_t>> servers, bool enable) {
+    m_extra_stun_servers = std::move(servers);
+    m_enable_multi_stun_probing = enable;
+    if (g_logger) {
+        g_logger->info("[Config] Multi-STUN Probing: {} ({} 个额外服务器)",
+                       m_enable_multi_stun_probing ? "启用" : "禁用",
+                       m_extra_stun_servers.size());
+    }
 }
 
 // --- A-2: init 拆分子方法 ---

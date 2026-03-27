@@ -1,6 +1,8 @@
 #include "VeritasSync/net/IceTransport.h"
+#include "VeritasSync/net/StunProber.h"
 #include "VeritasSync/common/Logger.h"
 
+#include <boost/asio/post.hpp>
 #include <cstring>
 
 namespace VeritasSync {
@@ -12,14 +14,16 @@ static constexpr size_t CANDIDATE_BUFFER_SIZE = 1024;  // ICE 候选地址缓冲
 // --- 工厂方法 ---
 std::shared_ptr<IceTransport> IceTransport::create(
     const IceConfig& config,
-    IceTransportCallbacks callbacks) {
-    
+    IceTransportCallbacks callbacks,
+    boost::asio::io_context* io_context) {
+
     // 使用 make_shared 的技巧：通过派生类访问私有构造函数
     struct IceTransportMaker : public IceTransport {
-        IceTransportMaker(IceTransportCallbacks cb) : IceTransport(std::move(cb)) {}
+        IceTransportMaker(IceTransportCallbacks cb, boost::asio::io_context* io)
+            : IceTransport(std::move(cb), io) {}
     };
-    
-    auto transport = std::make_shared<IceTransportMaker>(std::move(callbacks));
+
+    auto transport = std::make_shared<IceTransportMaker>(std::move(callbacks), io_context);
     if (!transport->initialize(config)) {
         return nullptr;
     }
@@ -27,8 +31,8 @@ std::shared_ptr<IceTransport> IceTransport::create(
 }
 
 // --- 构造与析构 ---
-IceTransport::IceTransport(IceTransportCallbacks callbacks)
-    : m_callbacks(std::move(callbacks)) {
+IceTransport::IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context* io_context)
+    : m_callbacks(std::move(callbacks)), m_io_context(io_context) {
 }
 
 IceTransport::~IceTransport() {
@@ -40,12 +44,16 @@ IceTransport::~IceTransport() {
 
 bool IceTransport::initialize(const IceConfig& config) {
     juice_config_t jconfig = {};
-    
+
     // 【安全】将配置字符串拷贝到成员变量，确保 c_str() 在 agent 生命周期内有效
     m_stun_host = config.stun_host;
     m_turn_host = config.turn_host;
     m_turn_username = config.turn_username;
     m_turn_password = config.turn_password;
+
+    // 保存 Multi-STUN 配置
+    m_extra_stun_servers = config.extra_stun_servers;
+    m_enable_multi_stun_probing = config.enable_multi_stun_probing;
     
     // 配置 STUN
     if (!m_stun_host.empty()) {
@@ -193,9 +201,28 @@ void IceTransport::on_juice_candidate(juice_agent_t* /*agent*/, const char* sdp,
 // 对应 IceTransportCallbacks::on_gathering_done
 void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
-    if (self && self->m_callbacks.on_gathering_done) {
+    if (!self) return;
+
+    // 1. 通知上层 SDP 已就绪（上层会发送 sdp_offer/sdp_answer）
+    if (self->m_callbacks.on_gathering_done) {
         std::string local_desc = self->get_local_description();
         self->m_callbacks.on_gathering_done(local_desc);
+    }
+
+    // 2. 如果启用了 Multi-STUN Probing，延迟发送 ice_gathering_done
+    //    探测完成后由 start_multi_stun_probing 的回调触发 on_all_candidates_done
+    bool will_probe = self->m_enable_multi_stun_probing
+                      && !self->m_extra_stun_servers.empty()
+                      && self->m_io_context;
+    if (will_probe) {
+        boost::asio::post(*self->m_io_context, [self]() {
+            self->start_multi_stun_probing();
+        });
+    } else {
+        // 没有 Multi-STUN，立即通知所有候选收集完成
+        if (self->m_callbacks.on_all_candidates_done) {
+            self->m_callbacks.on_all_candidates_done();
+        }
     }
 }
 
@@ -253,6 +280,61 @@ void IceTransport::update_connection_type() {
             m_connection_type.store(IceConnectionType::Relay);
         }
     }
+}
+
+// --- Multi-STUN Probing ---
+
+void IceTransport::start_multi_stun_probing() {
+    if (!m_enable_multi_stun_probing || m_extra_stun_servers.empty() || !m_io_context) {
+        return;
+    }
+
+    if (g_logger) {
+        g_logger->info("[IceTransport] 启动 Multi-STUN 并行探测，{} 个额外服务器",
+                       m_extra_stun_servers.size());
+    }
+
+    // 安全地读取回调（m_callbacks 受 m_mutex 保护）
+    std::function<void(const std::string&)> on_extra;
+    std::function<void()> on_all_done;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        on_extra = m_callbacks.on_extra_candidate;
+        on_all_done = m_callbacks.on_all_candidates_done;
+    }
+
+    auto servers = m_extra_stun_servers;  // 拷贝，避免在异步回调中引用 this
+
+    // 使用调用方的 io_context（由 PeerController 传入），无需创建临时线程
+    auto prober = std::make_shared<StunProber>(*m_io_context);
+
+    prober->probe(servers, std::chrono::milliseconds(3000),
+        [on_extra, on_all_done, prober](std::vector<StunResult> results) {
+            if (g_logger) {
+                g_logger->info("[IceTransport] Multi-STUN 探测完成，发现 {} 个 reflexive 地址",
+                               results.size());
+            }
+            for (const auto& r : results) {
+                // 构造 SDP candidate 字符串
+                // priority 设较低值（1694498815），确保低于 libjuice 原生发现的候选
+                std::string sdp = "candidate:multi 1 UDP 1694498815 " +
+                                  r.reflexive_ip + " " + std::to_string(r.reflexive_port) +
+                                  " typ srflx";
+
+                if (g_logger) {
+                    g_logger->info("[IceTransport] Multi-STUN 额外候选: {}", sdp);
+                }
+
+                if (on_extra) {
+                    on_extra(sdp);
+                }
+            }
+
+            // 所有额外候选已发送，现在通知上层发送 ice_gathering_done
+            if (on_all_done) {
+                on_all_done();
+            }
+        });
 }
 
 } // namespace VeritasSync

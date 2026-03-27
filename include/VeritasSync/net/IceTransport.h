@@ -8,6 +8,9 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <vector>
+
+#include <boost/asio/io_context.hpp>
 
 namespace VeritasSync {
 
@@ -55,11 +58,16 @@ enum class IceConnectionType {
 struct IceConfig {
     std::string stun_host = "stun.l.google.com";
     uint16_t stun_port = 19302;
-    
+
     std::string turn_host;
     uint16_t turn_port = 3478;
     std::string turn_username;
     std::string turn_password;
+
+    // 额外 STUN 服务器（Multi-STUN Probing）
+    // 每个服务器使用独立 socket 探测，发现不同的 reflexive candidate
+    std::vector<std::pair<std::string, uint16_t>> extra_stun_servers;
+    bool enable_multi_stun_probing = false;
 };
 
 /**
@@ -71,15 +79,24 @@ struct IceConfig {
 struct IceTransportCallbacks {
     // ICE 状态变化回调
     std::function<void(IceState state)> on_state_changed;
-    
+
     // 本地候选地址准备好 (需发送给 Signaling Server)
     std::function<void(const std::string& candidate_sdp)> on_local_candidate;
-    
-    // 候选收集完成 (可发送完整 SDP Offer/Answer)
+
+    // libjuice 候选收集完成 (可发送 SDP Offer/Answer，但不要发 gathering_done 信号)
+    // 如果启用了 Multi-STUN Probing，还有后续候选需要探测
     std::function<void(const std::string& local_description)> on_gathering_done;
-    
+
+    // 所有候选收集完成（包括 Multi-STUN Probing），可安全发送 ice_gathering_done 信号
+    // 如果未启用 Multi-STUN，会在 on_gathering_done 之后立即触发
+    std::function<void()> on_all_candidates_done;
+
     // 收到数据 (ICE 连接上的原始字节数据)
     std::function<void(const char* data, size_t size)> on_data_received;
+
+    // 额外候选地址发现（Multi-STUN Probing 结果）
+    // 需要通过信令发送给对端
+    std::function<void(const std::string& candidate_sdp)> on_extra_candidate;
 };
 
 /**
@@ -101,11 +118,13 @@ public:
      * @brief 创建 IceTransport 实例
      * @param config ICE 配置 (STUN/TURN)
      * @param callbacks 事件回调
+     * @param io_context 用于 Multi-STUN Probing 的事件循环（可选，不提供则不执行探测）
      * @return 智能指针，创建失败返回 nullptr
      */
     static std::shared_ptr<IceTransport> create(
         const IceConfig& config,
-        IceTransportCallbacks callbacks);
+        IceTransportCallbacks callbacks,
+        boost::asio::io_context* io_context = nullptr);
     
     ~IceTransport();
     
@@ -194,8 +213,8 @@ public:
     }
 
 private:
-    IceTransport(IceTransportCallbacks callbacks);
-    
+    IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context* io_context);
+
     bool initialize(const IceConfig& config);
     
     // libjuice 静态回调
@@ -207,15 +226,21 @@ private:
     // 内部处理
     void handle_state_changed(juice_state_t state);
     void update_connection_type();
-    
+    void start_multi_stun_probing();
+
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
-    
+    boost::asio::io_context* m_io_context = nullptr;  // 用于 Multi-STUN Probing（不拥有）
+
     // 【安全】保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
     std::string m_stun_host;
     std::string m_turn_host;
     std::string m_turn_username;
     std::string m_turn_password;
+
+    // Multi-STUN Probing 配置
+    std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
+    bool m_enable_multi_stun_probing = false;
     
     // 【关键修复】TURN服务器配置必须使用成员变量，不能是局部变量
     // 因为jconfig.turn_servers会保存指向它的指针，局部变量会导致悬空指针

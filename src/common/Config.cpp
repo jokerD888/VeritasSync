@@ -56,6 +56,18 @@ std::vector<std::string> validate_config(const Config& config) {
         errors.push_back("kcp_window_size 应在 16-4096 之间 (当前: " + std::to_string(config.kcp_window_size) + ")");
     }
 
+    // --- 额外 STUN 服务器验证 ---
+    for (size_t i = 0; i < config.extra_stun_servers.size(); ++i) {
+        const auto& server = config.extra_stun_servers[i];
+        std::string prefix = "extra_stun_servers[" + std::to_string(i) + "]: ";
+        if (server.host.empty()) {
+            errors.push_back(prefix + "host 不能为空");
+        }
+        if (!is_valid_port(server.port)) {
+            errors.push_back(prefix + "port 无效 (必须在 1-65535 之间)");
+        }
+    }
+
     // --- 同步任务验证 ---
     for (size_t i = 0; i < config.tasks.size(); ++i) {
         const auto& task = config.tasks[i];

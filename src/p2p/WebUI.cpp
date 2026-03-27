@@ -396,6 +396,12 @@ void WebUIServer::setup_config_routes() {
                 }
             }
 
+            // Multi-STUN Probing 配置
+            if (j.contains("enable_multi_stun_probing"))
+                m_config.enable_multi_stun_probing = j.value("enable_multi_stun_probing", m_config.enable_multi_stun_probing);
+            if (j.contains("stun_list_url"))
+                m_config.stun_list_url = j.value("stun_list_url", m_config.stun_list_url);
+
             if (save_config_internal()) {
                 res.set_content("{\"success\":true}", "application/json");
             } else {
