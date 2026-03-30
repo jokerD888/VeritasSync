@@ -180,20 +180,15 @@ Config load_config_or_create_default(const std::string& config_path) {
     }
 
     // ─── 回写文件 ───
+    if ((need_save_config || need_save_advanced) && !config_dir.empty()) {
+        std::error_code ec;
+        fs::create_directories(config_dir, ec);
+    }
     if (need_save_config) {
-        // 确保目录存在
-        if (!config_dir.empty()) {
-            std::error_code ec;
-            fs::create_directories(config_dir, ec);
-        }
         std::ofstream o(config_path);
         o << config_to_json(config).dump(4) << std::endl;
     }
     if (need_save_advanced) {
-        if (!config_dir.empty()) {
-            std::error_code ec;
-            fs::create_directories(config_dir, ec);
-        }
         std::ofstream o(advanced_path);
         o << advanced_to_json(config).dump(4) << std::endl;
     }

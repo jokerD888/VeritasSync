@@ -7,6 +7,7 @@
 #include <chrono>
 #include <fstream>
 #include <format>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -17,7 +18,7 @@ namespace VeritasSync {
 
     // E-1: 魔数统一为命名常量（默认值，可通过 set_read_buffer_size 覆盖）
     static constexpr size_t DEFAULT_HASH_READ_BUFFER_SIZE = 64 * 1024;  // 文件哈希读取缓冲区 64KB
-    static size_t s_hash_read_buffer_size = DEFAULT_HASH_READ_BUFFER_SIZE;
+    static std::atomic<size_t> s_hash_read_buffer_size{DEFAULT_HASH_READ_BUFFER_SIZE};
     static constexpr int FILE_LOCK_RETRY_DELAY_MS = 250;        // 文件锁定重试延迟（毫秒）
 
     void Hashing::set_read_buffer_size(size_t bytes) {

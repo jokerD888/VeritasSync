@@ -34,21 +34,25 @@
 // 配置文件路径解析（两级查找：便携模式 → 系统标准路径）
 // ═══════════════════════════════════════════════════════════════
 
-static std::filesystem::path get_exe_directory() {
+static std::filesystem::path get_exe_path() {
 #if defined(_WIN32)
     wchar_t buf[MAX_PATH] = {0};
     GetModuleFileNameW(NULL, buf, MAX_PATH);
-    return std::filesystem::path(buf).parent_path();
+    return std::filesystem::path(buf);
 #elif defined(__linux__)
-    return std::filesystem::canonical("/proc/self/exe").parent_path();
+    return std::filesystem::canonical("/proc/self/exe");
 #elif defined(__APPLE__)
     char buf[1024];
     uint32_t size = sizeof(buf);
     _NSGetExecutablePath(buf, &size);
-    return std::filesystem::canonical(buf).parent_path();
+    return std::filesystem::canonical(buf);
 #else
-    return std::filesystem::current_path();
+    return std::filesystem::current_path() / "veritas_sync";
 #endif
+}
+
+static std::filesystem::path get_exe_directory() {
+    return get_exe_path().parent_path();
 }
 
 static std::filesystem::path get_system_config_dir() {
@@ -111,18 +115,13 @@ void signal_handler(int signum) {
 }
 
 bool relaunch_current_process() {
+    auto exe = get_exe_path();
 #if defined(_WIN32)
-    // 【安全修复 C5】用 CreateProcessW 替代 ShellExecuteW
-    // CreateProcess 是同步创建进程，返回时新进程已经存在，可以安全释放 mutex
-    wchar_t exe_path[MAX_PATH] = {0};
-    if (GetModuleFileNameW(NULL, exe_path, MAX_PATH) == 0) {
-        return false;
-    }
-
+    std::wstring wpath = exe.wstring();
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessW(exe_path, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    BOOL ok = CreateProcessW(wpath.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
     if (ok) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -130,28 +129,16 @@ bool relaunch_current_process() {
     }
     return false;
 #else
-    // 【安全修复 H10】用 /proc/self/exe 获取真实路径，用 fork+execv 替代 system()
-    char exe_path[4096] = {0};
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len <= 0) {
-        return false;
-    }
-    exe_path[len] = '\0';
-
+    std::string path_str = exe.string();
     pid_t pid = fork();
-    if (pid < 0) {
-        return false;  // fork 失败
-    }
+    if (pid < 0) return false;
     if (pid == 0) {
-        // 【修复 R2】子进程：新建会话 + 关闭继承的文件描述符
-        setsid();  // 脱离父进程的终端会话，防止 SIGHUP 杀死子进程
-        // 关闭从父进程继承的 socket/DB 句柄（0-2 保留 stdin/stdout/stderr）
+        setsid();
         for (int fd = 3; fd < 1024; ++fd) close(fd);
-        char* args[] = {exe_path, nullptr};
-        execv(exe_path, args);
-        _exit(1);  // execv 失败
+        char* args[] = {path_str.data(), nullptr};
+        execv(path_str.c_str(), args);
+        _exit(1);
     }
-    // 父进程：回收子进程避免僵尸（子进程已 execv，会很快脱离）
     waitpid(pid, nullptr, WNOHANG);
     return true;
 #endif
