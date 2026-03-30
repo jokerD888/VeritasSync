@@ -57,9 +57,16 @@ NLFilterGenerator::Result NLFilterGenerator::generate(
     // RAG：扫描同步目录生成结构摘要，让 LLM 了解实际项目结构
     std::string dir_summary;
     std::string file_samples;
+    LLMConfig llm_cfg;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        llm_cfg = m_llm_config;
+    }
+
     if (!sync_folder.empty()) {
-        dir_summary = build_directory_summary(sync_folder);
-        file_samples = search_relevant_samples(sync_folder, description);
+        dir_summary = build_directory_summary(sync_folder, 3000,
+                                              llm_cfg.max_scan_files, llm_cfg.large_dir_threshold);
+        file_samples = search_relevant_samples(sync_folder, description, 10, llm_cfg.max_scan_files);
         if (g_logger) {
             g_logger->info("[NLFilter] RAG 上下文: 目录摘要 {} 字符, 文件样本 {} 字符",
                            dir_summary.size(), file_samples.size());
@@ -70,7 +77,7 @@ NLFilterGenerator::Result NLFilterGenerator::generate(
 
     // Dry-Run：在本地文件树上试跑规则，统计将被忽略的文件数
     if (result.success && !sync_folder.empty()) {
-        result.affected_files = dry_run_rules(sync_folder, result.rules);
+        result.affected_files = dry_run_rules(sync_folder, result.rules, llm_cfg.max_scan_files);
         if (g_logger) {
             g_logger->info("[NLFilter] Dry-Run: 规则将影响 {} 个文件", result.affected_files);
         }
@@ -160,8 +167,8 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
                 {"role", "user"},
                 {"content", prompt}
             }}},
-            {"temperature", 0.3},
-            {"max_tokens", 1024},
+            {"temperature", config.temperature},
+            {"max_tokens", config.max_tokens},
             {"response_format", {{"type", "json_object"}}}
         };
 
@@ -384,7 +391,8 @@ bool NLFilterGenerator::validate_rules(const std::string& rules) {
 // RAG：目录结构摘要生成
 // ═══════════════════════════════════════════════════════════════
 
-std::string NLFilterGenerator::build_directory_summary(const std::string& root_path, size_t max_chars) {
+std::string NLFilterGenerator::build_directory_summary(const std::string& root_path, size_t max_chars,
+                                                       size_t max_scan_files, size_t large_dir_threshold) {
     namespace fs = std::filesystem;
 
     // 按目录聚合：每个目录的文件数量和扩展名集合
@@ -399,7 +407,7 @@ std::string NLFilterGenerator::build_directory_summary(const std::string& root_p
         if (!fs::exists(root) || !fs::is_directory(root)) return "";
 
         size_t total_files = 0;
-        constexpr size_t MAX_SCAN_FILES = 50000;  // 防止超大目录卡住
+        const size_t MAX_SCAN_FILES = max_scan_files;  // 防止超大目录卡住
 
         for (auto it = fs::recursive_directory_iterator(
                  root, fs::directory_options::skip_permission_denied);
@@ -464,7 +472,7 @@ std::string NLFilterGenerator::build_directory_summary(const std::string& root_p
         if (total_files >= MAX_SCAN_FILES) oss << "+ (truncated)";
         oss << "\n\n";
 
-        constexpr size_t LARGE_DIR_THRESHOLD = 500;  // 超过此数量的目录折叠显示
+        const size_t LARGE_DIR_THRESHOLD = large_dir_threshold;  // 超过此数量的目录折叠显示
 
         for (const auto& [dir, info] : sorted_dirs) {
             // 检查长度限制
@@ -513,7 +521,8 @@ std::string NLFilterGenerator::build_directory_summary(const std::string& root_p
 // ═══════════════════════════════════════════════════════════════
 
 std::string NLFilterGenerator::search_relevant_samples(
-    const std::string& root_path, const std::string& description, size_t max_samples) {
+    const std::string& root_path, const std::string& description, size_t max_samples,
+    size_t max_scan_files) {
     namespace fs = std::filesystem;
 
     // 1. 从用户描述中提取搜索关键词
@@ -575,7 +584,7 @@ std::string NLFilterGenerator::search_relevant_samples(
         fs::path root(root_path);
         if (!fs::exists(root)) return "";
 
-        constexpr size_t MAX_SCAN = 50000;
+        const size_t MAX_SCAN = (max_scan_files > 0) ? max_scan_files : 50000;
         size_t scanned = 0;
         std::set<std::string> matched_dirs;  // 记录匹配文件所在的目录
 
@@ -688,7 +697,8 @@ std::string NLFilterGenerator::search_relevant_samples(
 // Dry-Run：用生成的规则在文件树上试跑
 // ═══════════════════════════════════════════════════════════════
 
-size_t NLFilterGenerator::dry_run_rules(const std::string& root_path, const std::string& rules) {
+size_t NLFilterGenerator::dry_run_rules(const std::string& root_path, const std::string& rules,
+                                        size_t max_scan_files) {
     namespace fs = std::filesystem;
 
     try {
@@ -701,7 +711,7 @@ size_t NLFilterGenerator::dry_run_rules(const std::string& root_path, const std:
 
         // 遍历文件树，统计匹配数量
         size_t count = 0;
-        constexpr size_t MAX_SCAN = 50000;
+        const size_t MAX_SCAN = (max_scan_files > 0) ? max_scan_files : 50000;
         size_t scanned = 0;
 
         for (auto it = fs::recursive_directory_iterator(

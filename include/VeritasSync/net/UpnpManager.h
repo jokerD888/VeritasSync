@@ -39,7 +39,7 @@ public:
      * 
      * @param pool 工作线程池
      */
-    void init_async(boost::asio::thread_pool& pool);
+    void init_async(boost::asio::thread_pool& pool, int discover_timeout_ms = 2000);
 
     /**
      * @brief 尝试重写 ICE 候选地址（host 类型 → 公网 IP）

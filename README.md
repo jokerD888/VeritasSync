@@ -188,22 +188,54 @@ VeritasSync/
 ```json
 {
     "device_id": "auto-generated-uuid",
-    "tracker_host": "your-tracker-server.com",
-    "tracker_port": 9988,
-    "webui_port": 8800,
-    "stun_host": "stun.l.google.com",
-    "stun_port": 19302,
-    "turn_host": "",
-    "turn_port": 3478,
-    "turn_username": "",
-    "turn_password": "",
-    "enable_multi_stun_probing": true,
-    "chunk_size": 16384,
-    "kcp_window_size": 256,
-    "kcp_update_interval_ms": 20,
-    "llm_api_url": "https://dashscope.aliyuncs.com/compatible-mode",
-    "llm_api_key": "",
-    "llm_model": "qwen-turbo",
+
+    "network": {
+        "tracker_host": "your-tracker-server.com",
+        "tracker_port": 9988,
+        "tracker_reconnect_interval_seconds": 5,
+        "stun_host": "stun.l.google.com",
+        "stun_port": 19302,
+        "turn_host": "",
+        "turn_port": 3478,
+        "enable_multi_stun_probing": true,
+        "ice_answer_wait_timeout_seconds": 30,
+        "upnp_discover_timeout_ms": 2000
+    },
+
+    "transfer": {
+        "chunk_size": 16384,
+        "stall_threshold_ms": 5000,
+        "receive_timeout_minutes": 10,
+        "congestion_wait_high_ms": 200,
+        "congestion_wait_low_ms": 100
+    },
+
+    "kcp": {
+        "update_interval_ms": 20,
+        "window_size": 256
+    },
+
+    "sync": {
+        "session_timeout_seconds": 60,
+        "file_change_debounce_delay_ms": 5000
+    },
+
+    "logging": {
+        "level": "info",
+        "max_file_size_mb": 5,
+        "max_files": 3
+    },
+
+    "webui": {
+        "port": 8800
+    },
+
+    "llm": {
+        "api_url": "https://dashscope.aliyuncs.com/compatible-mode",
+        "api_key": "",
+        "model": "qwen-turbo"
+    },
+
     "tasks": [
         {
             "sync_key": "your-unique-sync-key-min-16-chars",
@@ -214,6 +246,8 @@ VeritasSync/
     ]
 }
 ```
+
+> **注**：所有配置项都有合理的默认值，用户只需修改关心的字段。完整配置项列表参见首次启动时自动生成的 config.json。旧版平铺格式的配置文件会在启动时自动迁移为分组格式。
 
 ### .veritasignore
 

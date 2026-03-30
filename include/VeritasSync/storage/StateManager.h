@@ -41,10 +41,18 @@ namespace VeritasSync {
     class StateManager {
         friend class StateManagerEnhancedTest;
     public:
+        /// 从 Config::Sync 注入的运行时参数
+        struct SyncConfig {
+            int batch_trigger_threshold     = 100;
+            int batch_min_interval_ms       = 1000;
+            int file_change_debounce_delay_ms = 5000;
+        };
+
         // 构造函数接收 io_context 引用和回调，不再依赖 P2PManager
         StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                      StateManagerCallbacks callbacks, bool enable_watcher,
-                     const std::string& sync_key = "unknown");
+                     const std::string& sync_key = "unknown",
+                     SyncConfig sync_config = {});
         ~StateManager();
 
         // 扫描同步目录，生成当前所有文件的状态快照
@@ -110,6 +118,7 @@ namespace VeritasSync {
         std::filesystem::path m_root_path;
         boost::asio::io_context& m_io_context;  // 外部注入的 io_context
         StateManagerCallbacks m_callbacks;       // 变更通知回调
+        SyncConfig m_sync_config;                // 同步参数配置
 
     // 文件状态的核心存储结构
     // 【优化 #10】使用 unordered_map 替代 map，查找从 O(log n) 提升到 O(1)

@@ -54,7 +54,10 @@ public:
                 boost::asio::io_context& io_context,
                 SendToPeerFunc send_to_peer,
                 WithPeerFunc with_peer,
-                GetPeerFunc get_peer);
+                GetPeerFunc get_peer,
+                int flow_control_threshold = 1024,
+                int flow_control_sleep_ms = 20,
+                int sync_timeout_seconds = 60);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
     void set_role(SyncRole role) { m_role = role; }
@@ -105,6 +108,11 @@ private:
 
     // 批量大小配置
     static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;
+
+    // 运行时配置参数（从 Config::Sync 注入）
+    int m_flow_control_threshold = 1024;
+    int m_flow_control_sleep_ms  = 20;
+    int m_sync_timeout_seconds   = 60;
 };
 
 }  // namespace VeritasSync

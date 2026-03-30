@@ -65,7 +65,8 @@ public:
                 boost::asio::io_context& io_context,
                 SendToPeerFunc send_to_peer,
                 SendToPeerSafeFunc send_to_peer_safe,
-                WithPeerFunc with_peer);
+                WithPeerFunc with_peer,
+                int sync_timeout_seconds = 60);
 
     void set_role(SyncRole role) { m_role = role; }
     void set_mode(SyncMode mode) { m_mode = mode; }
@@ -134,6 +135,7 @@ private:
 
     SyncRole m_role = SyncRole::Source;
     SyncMode m_mode = SyncMode::OneWay;
+    int m_sync_timeout_seconds = 60;  // 从 Config::Sync 注入
 
     // 回调函数
     SendToPeerFunc m_send_to_peer;

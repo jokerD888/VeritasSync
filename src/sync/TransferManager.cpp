@@ -39,17 +39,10 @@ private:
     std::function<void()> m_func;
 };
 
-// E-1: 魔数统一为命名常量
-static constexpr int  FILE_OPEN_MAX_RETRIES       = 5;      // 文件打开最大重试次数
-static constexpr int  FILE_OPEN_RETRY_DELAY_MS    = 200;    // 文件打开失败重试延迟（毫秒）
-static constexpr int  FILE_OPEN_EMFILE_DELAY_MS   = 1000;   // 文件句柄耗尽时重试延迟（毫秒）
-static constexpr int  STALL_THRESHOLD_MS          = 5000;   // 传输停滞判定阈值（毫秒）
-static constexpr int  ZOMBIE_THRESHOLD_SECONDS    = 10;     // 僵尸任务判定阈值（秒）
-static constexpr int  RECEIVE_TIMEOUT_MINUTES     = 10;     // 接收超时关闭文件流阈值（分钟）
-static constexpr int  CONGESTION_WAIT_HIGH_MS     = 200;    // 高积压时流控等待（毫秒）
-static constexpr int  CONGESTION_WAIT_LOW_MS      = 100;    // 低积压时流控等待（毫秒）
-static constexpr int  CONGESTION_HIGH_MULTIPLIER  = 4;      // 高积压判定倍数
-static constexpr double SPEED_UPDATE_INTERVAL_SEC = 0.5;    // 速度更新间隔（秒）
+// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时使用 m_transfer_config）
+static constexpr int  DEFAULT_FILE_OPEN_MAX_RETRIES     = 5;
+static constexpr int  DEFAULT_FILE_OPEN_RETRY_DELAY_MS  = 200;
+static constexpr int  DEFAULT_FILE_OPEN_EMFILE_DELAY_MS = 1000;   // 文件句柄耗尽时重试延迟（毫秒）
 
 // --- 上传任务上下文 (用于异步管理状态) ---
 struct UploadContext {
@@ -174,9 +167,9 @@ TransferManager::SessionStats TransferManager::get_session_stats() const {
 }
 TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
                                  boost::asio::thread_pool& pool, SendCallback send_cb,
-                                 size_t chunk_size)
+                                 size_t chunk_size, TransferConfig config)
     : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)),
-      CHUNK_DATA_SIZE(chunk_size) {}
+      CHUNK_DATA_SIZE(chunk_size), m_transfer_config(std::move(config)) {}
 
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
@@ -280,9 +273,9 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 if (!ctx->file.is_open()) {
                     std::string sys_err = GetLastSystemError();
                     // 处理句柄耗尽 (EMFILE/ENFILE) 与 锁定 等待
-                    int wait_ms = (errno == EMFILE || errno == ENFILE) ? FILE_OPEN_EMFILE_DELAY_MS : FILE_OPEN_RETRY_DELAY_MS;
-                    
-                    if (ctx->open_retry_count < FILE_OPEN_MAX_RETRIES) {
+                    int wait_ms = (errno == EMFILE || errno == ENFILE) ? DEFAULT_FILE_OPEN_EMFILE_DELAY_MS : self->m_transfer_config.file_open_retry_delay_ms;
+
+                    if (ctx->open_retry_count < self->m_transfer_config.file_open_max_retries) {
                         ctx->open_retry_count++;
                         g_logger->warn("[Transfer] ⚠️ 文件打开失败(第{}次), 退让{}ms后重试: {} | {}", 
                                       ctx->open_retry_count, wait_ms, ctx->path, sys_err);
@@ -299,7 +292,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         });
                         return; // 释放线程池资源
                     } else {
-                        g_logger->error("[Transfer] ❌ 无法打开文件(重试{}次后放弃): {} | {}", FILE_OPEN_MAX_RETRIES, ctx->path, sys_err);
+                        g_logger->error("[Transfer] ❌ 无法打开文件(重试{}次后放弃): {} | {}", self->m_transfer_config.file_open_max_retries, ctx->path, sys_err);
                         {
                             std::lock_guard<std::mutex> lock(self->m_transfer_mutex);
                             self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
@@ -391,7 +384,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
                     // 增加等待时间，给 KCP 更多时间消耗发送队列
                     // 新版本锁层次增加，需要更长的等待时间
-                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * CONGESTION_HIGH_MULTIPLIER) ? CONGESTION_WAIT_HIGH_MS : CONGESTION_WAIT_LOW_MS;
+                    int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * self->m_transfer_config.congestion_high_multiplier) ? self->m_transfer_config.congestion_wait_high_ms : self->m_transfer_config.congestion_wait_low_ms;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
                     ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
                         if (!ec) {
@@ -601,7 +594,7 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
 
             // 僵尸复活检测
             auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - recv_ptr->last_active).count();
-            if (duration_sec > ZOMBIE_THRESHOLD_SECONDS) {
+            if (duration_sec > self->m_transfer_config.zombie_threshold_seconds) {
                 if (hdr.chunk_index == 0) {
                     g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", hdr.file_path);
                     recv_ptr->received_chunks = 0;
@@ -732,7 +725,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
         auto& recv = *recv_ptr;
         // --- 速度计算逻辑 ---
         std::chrono::duration<double> elapsed = now - recv.last_tick_time;
-        if (elapsed.count() >= SPEED_UPDATE_INTERVAL_SEC) {  // 每 500ms 更新一次速度
+        if (elapsed.count() >= m_transfer_config.speed_update_interval_sec) {  // 每 500ms 更新一次速度
             uint32_t delta_chunks = recv.received_chunks - recv.last_tick_chunks;
             recv.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
             recv.last_tick_chunks = recv.received_chunks;
@@ -741,7 +734,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
 
         // 【新增】检测是否停滞
         auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - recv.last_active).count();
-        bool stalled = (time_since_active > STALL_THRESHOLD_MS);
+        bool stalled = (time_since_active > m_transfer_config.stall_threshold_ms);
 
         // 如果停滞，速度显示为 0，避免用户困惑
         double display_speed = stalled ? 0.0 : recv.current_speed;
@@ -762,7 +755,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
     for (auto& [path, send] : m_sending_files) {
         // --- 速度计算逻辑 ---
         std::chrono::duration<double> elapsed = now - send.last_tick_time;
-        if (elapsed.count() >= SPEED_UPDATE_INTERVAL_SEC) {
+        if (elapsed.count() >= m_transfer_config.speed_update_interval_sec) {
             uint32_t delta_chunks = send.sent_chunks - send.last_tick_chunks;
             send.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
             send.last_tick_chunks = send.sent_chunks;
@@ -771,7 +764,7 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
 
         // 【新增】检测是否停滞
         auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - send.last_active).count();
-        bool stalled = (time_since_active > STALL_THRESHOLD_MS);
+        bool stalled = (time_since_active > m_transfer_config.stall_threshold_ms);
 
         double display_speed = stalled ? 0.0 : send.current_speed;
 
@@ -801,7 +794,7 @@ void TransferManager::cleanup_stale_buffers() {
         
         // 接收超时：只关闭文件流，保留记录和临时文件以便续传
         auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - recv.last_active);
-        if (duration.count() > RECEIVE_TIMEOUT_MINUTES) {
+        if (duration.count() > m_transfer_config.receive_timeout_minutes) {
             if (recv.file_stream.is_open()) {
                 g_logger->warn("[Transfer] ⏰ 接收超时，关闭文件流（保留状态等待续传）: {}", it->first);
                 recv.file_stream.close();

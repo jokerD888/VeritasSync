@@ -22,7 +22,7 @@ class TrackerServer;  // 前向声明
  */
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    Session(tcp::socket socket, TrackerServer& server);
+    Session(tcp::socket socket, TrackerServer& server, unsigned int max_message_length = 262144);
     ~Session();
 
     void start();
@@ -49,6 +49,7 @@ private:
     std::string m_id;              ///< peer_id（由客户端的 device_id 设置）
     std::string m_connection_info; ///< 原始 ip:port，仅用于日志
     std::string m_sync_key;
+    unsigned int m_max_message_length;  ///< 消息体最大长度（从配置注入）
 
     boost::asio::streambuf m_read_buffer;
 };

@@ -261,13 +261,15 @@ for (const auto& item : j["rules"]) { ... }
 
 ```json
 {
-  "llm_api_url": "https://dashscope.aliyuncs.com/compatible-mode",
-  "llm_api_key": "sk-你的API密钥",
-  "llm_model": "qwen-turbo"
+  "llm": {
+    "api_url": "https://dashscope.aliyuncs.com/compatible-mode",
+    "api_key": "sk-你的API密钥",
+    "model": "qwen-turbo"
+  }
 }
 ```
 
-其中 `llm_api_url` 和 `llm_model` 有默认值，只需填写 `llm_api_key` 即可使用。
+其中 `api_url` 和 `model` 有默认值，只需填写 `api_key` 即可使用。
 
 ## 端到端示例
 

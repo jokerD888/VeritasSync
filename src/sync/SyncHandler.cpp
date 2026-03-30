@@ -23,14 +23,16 @@ SyncHandler::SyncHandler(StateManager* state_manager,
                          boost::asio::io_context& io_context,
                          SendToPeerFunc send_to_peer,
                          SendToPeerSafeFunc send_to_peer_safe,
-                         WithPeerFunc with_peer)
+                         WithPeerFunc with_peer,
+                         int sync_timeout_seconds)
     : m_state_manager(state_manager),
       m_transfer_manager(std::move(transfer_manager)),
       m_worker_pool(worker_pool),
       m_io_context(io_context),
       m_send_to_peer(std::move(send_to_peer)),
       m_send_to_peer_safe(std::move(send_to_peer_safe)),
-      m_with_peer(std::move(with_peer)) {}
+      m_with_peer(std::move(with_peer)),
+      m_sync_timeout_seconds(sync_timeout_seconds) {}
 
 bool SyncHandler::can_receive() const {
     return m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional;
@@ -173,9 +175,10 @@ void SyncHandler::refresh_peer_timeout(PeerController* from_peer) {
     uint64_t sid = from_peer->get_sync_session_id();
 
     boost::asio::post(m_io_context, [this, pid, sid]() {
-        m_with_peer(pid, [sid](PeerController* peer) {
+        int timeout = m_sync_timeout_seconds;
+        m_with_peer(pid, [sid, timeout](PeerController* peer) {
             // A-6: 通过封装方法刷新定时器（内部加锁，线程安全）
-            peer->refresh_sync_timeout(sid, Protocol::SYNC_TIMEOUT_SECONDS);
+            peer->refresh_sync_timeout(sid, timeout);
         });
     });
 }

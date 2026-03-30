@@ -10,7 +10,7 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
+// E-1: 魔数统一为命名常量（保留为默认值参考）
 static constexpr size_t LOG_MAX_FILE_SIZE    = 1024 * 1024 * 5;  // 单个日志文件最大 5MB
 static constexpr size_t LOG_MAX_FILES        = 3;                // 最多保留 3 个日志文件
 static constexpr size_t LOG_THREAD_POOL_SIZE = 8192;             // 异步日志线程池队列大小
@@ -21,15 +21,25 @@ std::shared_ptr<spdlog::logger> g_logger;
 // C-6: 使用 std::once_flag 保证 init_logger 在多线程下只执行一次
 static std::once_flag s_logger_init_flag;
 
-void init_logger() {
+// 存储外部注入的参数（在 call_once 之前设置）
+static size_t s_max_file_size    = LOG_MAX_FILE_SIZE;
+static size_t s_max_files        = LOG_MAX_FILES;
+static size_t s_thread_pool_size = LOG_THREAD_POOL_SIZE;
+
+void init_logger(size_t max_file_size, size_t max_files, size_t thread_pool_size) {
+    // 保存参数，供 call_once 内部使用
+    s_max_file_size    = max_file_size;
+    s_max_files        = max_files;
+    s_thread_pool_size = thread_pool_size;
+
     std::call_once(s_logger_init_flag, []() {
         try {
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
             console_sink->set_level(spdlog::level::info);  // 调试级别: info
-            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", LOG_MAX_FILE_SIZE, LOG_MAX_FILES);
+            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", s_max_file_size, s_max_files);
             file_sink->set_level(spdlog::level::info);     // 调试级别: info
 
-            spdlog::init_thread_pool(LOG_THREAD_POOL_SIZE, 1);
+            spdlog::init_thread_pool(s_thread_pool_size, 1);
 
             g_logger =
                 std::make_shared<spdlog::async_logger>("veritas_sync", spdlog::sinks_init_list{console_sink, file_sink},

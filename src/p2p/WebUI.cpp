@@ -33,10 +33,10 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
-static constexpr size_t LOG_TAIL_SIZE_STATUS = 16384;   // GET /api/log 尾部读取字节数
-static constexpr size_t LOG_TAIL_SIZE_TASK   = 32768;   // GET /api/tasks/:id/log 尾部读取字节数
-static constexpr size_t AUTH_TOKEN_BYTES     = 32;      // 认证令牌字节数
+// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时从 m_config.webui 读取）
+static constexpr size_t DEFAULT_LOG_TAIL_SIZE_STATUS = 16384;   // GET /api/log 尾部读取字节数
+static constexpr size_t DEFAULT_LOG_TAIL_SIZE_TASK   = 32768;   // GET /api/tasks/:id/log 尾部读取字节数
+static constexpr size_t DEFAULT_AUTH_TOKEN_BYTES     = 32;      // 认证令牌字节数
 
 // ═══════════════════════════════════════════════════════════════
 // 构造函数
@@ -49,15 +49,24 @@ WebUIServer::WebUIServer(int port, const std::string& config_path)
     } catch (...) {
         m_absolute_config_path = m_config_path;
     }
-    m_auth_token = generate_token(AUTH_TOKEN_BYTES);
+    m_auth_token = generate_token(DEFAULT_AUTH_TOKEN_BYTES);
     reload_config();
+    // 如果配置中有不同的 token 长度，重新生成
+    if (m_config.webui.auth_token_bytes != static_cast<int>(DEFAULT_AUTH_TOKEN_BYTES)) {
+        m_auth_token = generate_token(m_config.webui.auth_token_bytes);
+    }
 
     // 初始化自然语言过滤规则生成器的 LLM 配置（如果有配置的话）
-    if (!m_config.llm_api_url.empty() && !m_config.llm_api_key.empty()) {
+    if (!m_config.llm.api_url.empty() && !m_config.llm.api_key.empty()) {
         NLFilterGenerator::LLMConfig llm_cfg;
-        llm_cfg.api_url = m_config.llm_api_url;
-        llm_cfg.api_key = m_config.llm_api_key;
-        llm_cfg.model = m_config.llm_model;
+        llm_cfg.api_url = m_config.llm.api_url;
+        llm_cfg.api_key = m_config.llm.api_key;
+        llm_cfg.model = m_config.llm.model;
+        llm_cfg.timeout_seconds = m_config.llm.timeout_seconds;
+        llm_cfg.temperature = m_config.llm.temperature;
+        llm_cfg.max_tokens = m_config.llm.max_tokens;
+        llm_cfg.max_scan_files = m_config.llm.max_scan_files;
+        llm_cfg.large_dir_threshold = m_config.llm.large_dir_threshold;
         m_nl_filter.set_llm_config(llm_cfg);
     }
 
@@ -332,7 +341,7 @@ void WebUIServer::setup_status_routes() {
     // GET /api/log
     m_svr.Get("/api/log", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
-        res.set_content(tail_log("veritas_sync.log", LOG_TAIL_SIZE_STATUS), "text/plain; charset=utf-8");
+        res.set_content(tail_log("veritas_sync.log", m_config.webui.log_tail_status_bytes), "text/plain; charset=utf-8");
     });
 }
 
@@ -361,14 +370,14 @@ void WebUIServer::setup_config_routes() {
         try {
             auto j = nlohmann::json::parse(req.body);
 
-            std::string new_tracker_host = j.value("tracker_host", m_config.tracker_host);
-            int new_tracker_port = j.value("tracker_port", (int)m_config.tracker_port);
+            std::string new_tracker_host = j.value("tracker_host", m_config.network.tracker_host);
+            int new_tracker_port = j.value("tracker_port", (int)m_config.network.tracker_port);
 
-            std::string new_stun_host = j.value("stun_host", m_config.stun_host);
-            int new_stun_port = j.value("stun_port", (int)m_config.stun_port);
+            std::string new_stun_host = j.value("stun_host", m_config.network.stun_host);
+            int new_stun_port = j.value("stun_port", (int)m_config.network.stun_port);
 
-            std::string new_turn_host = j.value("turn_host", m_config.turn_host);
-            int new_turn_port = j.value("turn_port", (int)m_config.turn_port);
+            std::string new_turn_host = j.value("turn_host", m_config.network.turn_host);
+            int new_turn_port = j.value("turn_port", (int)m_config.network.turn_port);
 
             if (!is_valid_port(new_tracker_port) || !is_valid_port(new_stun_port) ||
                 !is_valid_port(new_turn_port)) {
@@ -379,28 +388,28 @@ void WebUIServer::setup_config_routes() {
                 return;
             }
 
-            m_config.tracker_host = new_tracker_host;
-            m_config.tracker_port = (unsigned short)new_tracker_port;
-            m_config.stun_host = new_stun_host;
-            m_config.stun_port = (unsigned short)new_stun_port;
-            m_config.turn_host = new_turn_host;
-            m_config.turn_port = (unsigned short)new_turn_port;
+            m_config.network.tracker_host = new_tracker_host;
+            m_config.network.tracker_port = (unsigned short)new_tracker_port;
+            m_config.network.stun_host = new_stun_host;
+            m_config.network.stun_port = (unsigned short)new_stun_port;
+            m_config.network.turn_host = new_turn_host;
+            m_config.network.turn_port = (unsigned short)new_turn_port;
 
             if (j.contains("turn_username"))
-                m_config.turn_username = j.value("turn_username", m_config.turn_username);
+                m_config.network.turn_username = j.value("turn_username", m_config.network.turn_username);
             if (j.contains("turn_password")) {
                 // 【修复 R1】跳过脱敏占位符 "***"，避免覆盖真实密码
                 std::string pw = j.value("turn_password", std::string{});
                 if (pw != "***") {
-                    m_config.turn_password = pw;
+                    m_config.network.turn_password = pw;
                 }
             }
 
             // Multi-STUN Probing 配置
             if (j.contains("enable_multi_stun_probing"))
-                m_config.enable_multi_stun_probing = j.value("enable_multi_stun_probing", m_config.enable_multi_stun_probing);
+                m_config.network.enable_multi_stun_probing = j.value("enable_multi_stun_probing", m_config.network.enable_multi_stun_probing);
             if (j.contains("stun_list_url"))
-                m_config.stun_list_url = j.value("stun_list_url", m_config.stun_list_url);
+                m_config.network.stun_list_url = j.value("stun_list_url", m_config.network.stun_list_url);
 
             if (save_config_internal()) {
                 res.set_content("{\"success\":true}", "application/json");
@@ -591,7 +600,7 @@ void WebUIServer::setup_task_detail_routes() {
                 res.set_content(R"({"success":false,"error":"任务不存在"})", "application/json");
                 return;
             }
-            std::string raw = tail_log("veritas_sync.log", LOG_TAIL_SIZE_TASK);
+            std::string raw = tail_log("veritas_sync.log", m_config.webui.log_tail_task_bytes);
             std::ostringstream oss;
             std::istringstream iss(raw);
             std::string line;
@@ -731,7 +740,7 @@ void WebUIServer::setup_nl_filter_routes() {
         std::string description = body.value("description", "");
 
         // 检查描述长度，防止超长输入攻击
-        const size_t MAX_DESCRIPTION_LENGTH = 4096;
+        const size_t MAX_DESCRIPTION_LENGTH = m_config.webui.max_description_length;
         if (description.empty()) {
             res.status = 400;
             res.set_content("{\"success\":false,\"error\":\"请输入描述\"}", "application/json");
@@ -808,7 +817,7 @@ void WebUIServer::setup_nl_filter_routes() {
         std::string new_rules = body.value("rules", "");
 
         // 检查规则长度，防止超长输入攻击
-        const size_t MAX_RULES_LENGTH = 10000;
+        const size_t MAX_RULES_LENGTH = m_config.webui.max_rules_length;
         if (new_rules.empty()) {
             res.status = 400;
             res.set_content("{\"success\":false,\"error\":\"规则不能为空\"}", "application/json");
@@ -889,7 +898,7 @@ bool WebUIServer::save_config_internal() {
             if (g_logger) g_logger->error("[WebUI] 无法打开文件写入: {}", m_absolute_config_path);
             return false;
         }
-        o << nlohmann::json(m_config).dump(4) << std::endl;
+        o << config_to_json(m_config).dump(4) << std::endl;
         return true;
     } catch (const std::exception& e) {
         if (g_logger) g_logger->error("[WebUI] 保存异常: {}", e.what());

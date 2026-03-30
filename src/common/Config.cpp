@@ -14,19 +14,19 @@ std::vector<std::string> validate_config(const Config& config) {
             errors.push_back(name + " 端口无效 (必须在 1-65535 之间)");
         }
     };
-    check_port("tracker_port", config.tracker_port);
-    check_port("stun_port", config.stun_port);
-    check_port("webui_port", config.webui_port);
+    check_port("tracker_port", config.network.tracker_port);
+    check_port("stun_port", config.network.stun_port);
+    check_port("webui_port", config.webui.port);
     // turn_port 仅在 turn_host 非空时校验
-    if (!config.turn_host.empty()) {
-        check_port("turn_port", config.turn_port);
+    if (!config.network.turn_host.empty()) {
+        check_port("turn_port", config.network.turn_port);
     }
 
     // --- 必填字段验证 ---
-    if (config.tracker_host.empty()) {
+    if (config.network.tracker_host.empty()) {
         errors.push_back("tracker_host 不能为空");
     }
-    if (config.stun_host.empty()) {
+    if (config.network.stun_host.empty()) {
         errors.push_back("stun_host 不能为空");
     }
     if (config.device_id.empty()) {
@@ -38,27 +38,27 @@ std::vector<std::string> validate_config(const Config& config) {
         static const std::vector<std::string> valid_levels = {"debug", "info", "warn", "warning", "error", "err", "critical", "off"};
         bool valid = false;
         for (const auto& l : valid_levels) {
-            if (config.log_level == l) { valid = true; break; }
+            if (config.logging.level == l) { valid = true; break; }
         }
         if (!valid) {
-            errors.push_back("log_level 值无效 ('" + config.log_level + "'), 有效值: debug, info, warn, error, critical, off");
+            errors.push_back("log_level 值无效 ('" + config.logging.level + "'), 有效值: debug, info, warn, error, critical, off");
         }
     }
 
     // --- 性能参数范围验证 ---
-    if (config.kcp_update_interval_ms < 5 || config.kcp_update_interval_ms > 500) {
-        errors.push_back("kcp_update_interval_ms 应在 5-500 之间 (当前: " + std::to_string(config.kcp_update_interval_ms) + ")");
+    if (config.kcp.update_interval_ms < 5 || config.kcp.update_interval_ms > 500) {
+        errors.push_back("kcp_update_interval_ms 应在 5-500 之间 (当前: " + std::to_string(config.kcp.update_interval_ms) + ")");
     }
-    if (config.chunk_size < 1024 || config.chunk_size > 1048576) {
-        errors.push_back("chunk_size 应在 1024-1048576 (1KB-1MB) 之间 (当前: " + std::to_string(config.chunk_size) + ")");
+    if (config.transfer.chunk_size < 1024 || config.transfer.chunk_size > 1048576) {
+        errors.push_back("chunk_size 应在 1024-1048576 (1KB-1MB) 之间 (当前: " + std::to_string(config.transfer.chunk_size) + ")");
     }
-    if (config.kcp_window_size < 16 || config.kcp_window_size > 4096) {
-        errors.push_back("kcp_window_size 应在 16-4096 之间 (当前: " + std::to_string(config.kcp_window_size) + ")");
+    if (config.kcp.window_size < 16 || config.kcp.window_size > 4096) {
+        errors.push_back("kcp_window_size 应在 16-4096 之间 (当前: " + std::to_string(config.kcp.window_size) + ")");
     }
 
     // --- 额外 STUN 服务器验证 ---
-    for (size_t i = 0; i < config.extra_stun_servers.size(); ++i) {
-        const auto& server = config.extra_stun_servers[i];
+    for (size_t i = 0; i < config.network.extra_stun_servers.size(); ++i) {
+        const auto& server = config.network.extra_stun_servers[i];
         std::string prefix = "extra_stun_servers[" + std::to_string(i) + "]: ";
         if (server.host.empty()) {
             errors.push_back(prefix + "host 不能为空");
@@ -110,54 +110,94 @@ std::string generate_uuid_v4() {
 }
 
 Config load_config_or_create_default(const std::string& config_path) {
-    std::ifstream f(config_path);
-    bool need_save = false;
+    namespace fs = std::filesystem;
+
+    // advanced.json 与 config.json 同目录
+    fs::path config_dir = fs::path(config_path).parent_path();
+    std::string advanced_path = (config_dir / "advanced.json").string();
+
+    bool need_save_config = false;
+    bool need_save_advanced = false;
     Config config;
-    
-    if (f.good()) {
-        try {
-            nlohmann::json j;
-            f >> j;
-            f.close();
-            config = j.get<Config>();
-            
-            // 如果配置文件中没有 device_id，生成一个并回写
-            if (config.device_id.empty()) {
+
+    // ─── 加载 config.json ───
+    {
+        std::ifstream f(config_path);
+        if (f.good()) {
+            try {
+                nlohmann::json j;
+                f >> j;
+                f.close();
+                config_from_json(j, config);
+
+                if (config.device_id.empty()) {
+                    config.device_id = generate_uuid_v4();
+                    need_save_config = true;
+                }
+            } catch (const std::exception& e) {
+                f.close();
+                std::string backup_path = config_path + ".bak";
+                std::error_code ec;
+                fs::rename(config_path, backup_path, ec);
+                if (g_logger) {
+                    g_logger->error("[Config] config.json 解析失败: {}，已备份到 {}",
+                                   e.what(), backup_path);
+                }
+                config = Config{};
                 config.device_id = generate_uuid_v4();
-                need_save = true;
+                need_save_config = true;
+                need_save_advanced = true;
             }
-        } catch (const std::exception& e) {
-            // 【修复】配置文件损坏时不崩溃，备份损坏文件并创建默认配置
-            f.close();
-            
-            std::string backup_path = config_path + ".bak";
-            std::error_code ec;
-            std::filesystem::rename(config_path, backup_path, ec);
-            
-            if (g_logger) {
-                g_logger->error("[Config] 配置文件解析失败: {}，已备份到 {}，将使用默认配置",
-                               e.what(), backup_path);
-            }
-            
-            // 使用默认配置
-            // LOGIC-004: Config{} 已包含所有默认值，只需显式设置需要动态生成的字段
+        } else {
+            // 首次启动
             config = Config{};
-            config.device_id = generate_uuid_v4();  // 动态生成唯一设备ID
-            need_save = true;
+            config.device_id = generate_uuid_v4();
+            need_save_config = true;
+            need_save_advanced = true;
         }
-    } else {
-        // 首次启动：Config{} 已包含所有默认值，只需动态生成 device_id
-        config = Config{};
-        config.device_id = generate_uuid_v4();
-        need_save = true;
     }
-    
-    // 回写配置文件（如果有新生成的 device_id 或是新文件）
-    if (need_save) {
+
+    // ─── 加载 advanced.json（可选，不存在则用默认值）───
+    {
+        std::ifstream f(advanced_path);
+        if (f.good()) {
+            try {
+                nlohmann::json j;
+                f >> j;
+                f.close();
+                advanced_from_json(j, config);
+            } catch (const std::exception& e) {
+                f.close();
+                if (g_logger) {
+                    g_logger->warn("[Config] advanced.json 解析失败: {}，将使用默认值", e.what());
+                }
+                need_save_advanced = true;
+            }
+        } else {
+            // advanced.json 不存在：首次启动生成，或用户不需要调优
+            need_save_advanced = true;
+        }
+    }
+
+    // ─── 回写文件 ───
+    if (need_save_config) {
+        // 确保目录存在
+        if (!config_dir.empty()) {
+            std::error_code ec;
+            fs::create_directories(config_dir, ec);
+        }
         std::ofstream o(config_path);
-        o << nlohmann::json(config).dump(4) << std::endl;
+        o << config_to_json(config).dump(4) << std::endl;
     }
-    
+    if (need_save_advanced) {
+        if (!config_dir.empty()) {
+            std::error_code ec;
+            fs::create_directories(config_dir, ec);
+        }
+        std::ofstream o(advanced_path);
+        o << advanced_to_json(config).dump(4) << std::endl;
+    }
+
     return config;
 }
 

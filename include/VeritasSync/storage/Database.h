@@ -26,7 +26,7 @@ struct SyncHistory {
 
 class Database {
 public:
-    Database(const std::filesystem::path& db_path);
+    Database(const std::filesystem::path& db_path, int busy_timeout_ms = 5000);
     ~Database();
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;

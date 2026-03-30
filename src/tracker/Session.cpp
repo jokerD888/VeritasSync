@@ -17,8 +17,8 @@
 
 extern std::shared_ptr<spdlog::logger> g_logger;
 
-// E-1: 魔数统一为命名常量
-static constexpr unsigned int MAX_MESSAGE_LENGTH = 262144;  // 消息体最大长度 256KB（中继数据需要更大空间）
+// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时使用 m_max_message_length）
+static constexpr unsigned int DEFAULT_MAX_MESSAGE_LENGTH = 262144;  // 消息体最大长度 256KB
 
 // ═══════════════════════════════════════════════════════════════
 // Windows UTF-8 辅助函数（消除 handle_read_header / handle_read_body 中的重复）
@@ -57,9 +57,10 @@ static std::string sys_err_to_utf8(const boost::system::error_code& ec) { return
 // Session 实现
 // ═══════════════════════════════════════════════════════════════
 
-Session::Session(tcp::socket socket, TrackerServer& server)
+Session::Session(tcp::socket socket, TrackerServer& server, unsigned int max_message_length)
     : m_socket(std::move(socket)),
-      m_server(server) {
+      m_server(server),
+      m_max_message_length(max_message_length) {
     std::stringstream ss;
     ss << m_socket.remote_endpoint().address().to_string()
        << ":" << m_socket.remote_endpoint().port();
@@ -117,7 +118,7 @@ void Session::handle_read_header(const boost::system::error_code& ec, std::size_
     is.read(reinterpret_cast<char*>(&msg_len_net), 4);
     unsigned int msg_len = boost::asio::detail::socket_ops::network_to_host_long(msg_len_net);
 
-    if (msg_len > MAX_MESSAGE_LENGTH) {
+    if (msg_len > m_max_message_length) {
         g_logger->error("[Session] {} 消息体过长 ({} bytes)。断开连接。", m_id, msg_len);
         m_server.leave(shared_from_this());
         return;

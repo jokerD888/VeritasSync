@@ -166,9 +166,9 @@ bool SyncNode::start() {
 
     // 3. 创建 P2PManager（性能参数通过 config 一次性注入，内部自动初始化子组件）
     P2PManagerConfig perf_config;
-    perf_config.chunk_size = m_global_config.chunk_size;
-    perf_config.kcp_window_size = m_global_config.kcp_window_size;
-    perf_config.kcp_update_interval_ms = m_global_config.kcp_update_interval_ms;
+    perf_config.chunk_size = m_global_config.transfer.chunk_size;
+    perf_config.kcp_window_size = m_global_config.kcp.window_size;
+    perf_config.kcp_update_interval_ms = m_global_config.kcp.update_interval_ms;
     auto p2p = P2PManager::create(perf_config);
     if (!p2p) {
         g_logger->error("[SyncNode] Failed to create P2PManager.");
@@ -178,7 +178,7 @@ bool SyncNode::start() {
     m_p2p_manager.store(p2p);  // 原子存储
 
     // 4. 创建 TrackerClient（共享 P2PManager 的 io_context）
-    auto tracker = std::make_shared<TrackerClient>(p2p->get_io_context(), m_global_config.tracker_host, m_global_config.tracker_port);
+    auto tracker = std::make_shared<TrackerClient>(p2p->get_io_context(), m_global_config.network.tracker_host, m_global_config.network.tracker_port);
     
     // 设置设备 ID（从配置文件中读取的全局唯一标识符）
     tracker->set_device_id(m_global_config.device_id);
@@ -202,33 +202,33 @@ bool SyncNode::start() {
     g_logger->info("[Config] Sync Mode: {}", 
                    m_task.mode == SyncMode::OneWay ? "OneWay" : "BiDirectional");
     g_logger->info("[Config] File Watcher: {}", enable_watcher ? "Enabled" : "Disabled");
-    g_logger->info("[Config] Chunk Size: {} bytes", m_global_config.chunk_size);
-    g_logger->info("[Config] KCP Window Size: {}", m_global_config.kcp_window_size);
-    g_logger->info("[Config] KCP Update Interval: {} ms", m_global_config.kcp_update_interval_ms);
+    g_logger->info("[Config] Chunk Size: {} bytes", m_global_config.transfer.chunk_size);
+    g_logger->info("[Config] KCP Window Size: {}", m_global_config.kcp.window_size);
+    g_logger->info("[Config] KCP Update Interval: {} ms", m_global_config.kcp.update_interval_ms);
 
 
 
     // 配置 STUN
-    if (!m_global_config.stun_host.empty()) {
-        g_logger->info("[Config] Using STUN server at {}:{}", m_global_config.stun_host, m_global_config.stun_port);
-        p2p->set_stun_config(m_global_config.stun_host, m_global_config.stun_port);
+    if (!m_global_config.network.stun_host.empty()) {
+        g_logger->info("[Config] Using STUN server at {}:{}", m_global_config.network.stun_host, m_global_config.network.stun_port);
+        p2p->set_stun_config(m_global_config.network.stun_host, m_global_config.network.stun_port);
     }
 
     // 配置 TURN
-    if (!m_global_config.turn_host.empty()) {
-        g_logger->info("[Config] Using TURN server at {}:{}", m_global_config.turn_host, m_global_config.turn_port);
-        p2p->set_turn_config(m_global_config.turn_host, m_global_config.turn_port,
-                                       m_global_config.turn_username, m_global_config.turn_password);
+    if (!m_global_config.network.turn_host.empty()) {
+        g_logger->info("[Config] Using TURN server at {}:{}", m_global_config.network.turn_host, m_global_config.network.turn_port);
+        p2p->set_turn_config(m_global_config.network.turn_host, m_global_config.network.turn_port,
+                                       m_global_config.network.turn_username, m_global_config.network.turn_password);
     }
 
     // 配置 Multi-STUN Probing（额外 STUN 服务器并行探测）
-    if (m_global_config.enable_multi_stun_probing) {
+    if (m_global_config.network.enable_multi_stun_probing) {
         std::vector<std::pair<std::string, uint16_t>> servers;
 
-        if (!m_global_config.extra_stun_servers.empty()) {
+        if (!m_global_config.network.extra_stun_servers.empty()) {
             // 使用用户配置的 STUN 列表
-            servers.reserve(m_global_config.extra_stun_servers.size());
-            for (const auto& s : m_global_config.extra_stun_servers) {
+            servers.reserve(m_global_config.network.extra_stun_servers.size());
+            for (const auto& s : m_global_config.network.extra_stun_servers) {
                 servers.emplace_back(s.host, s.port);
             }
         } else {
@@ -245,7 +245,7 @@ bool SyncNode::start() {
 
         p2p->set_extra_stun_servers(std::move(servers), true);
         g_logger->info("[Config] Multi-STUN Probing 启用，{} 个额外 STUN 服务器",
-                       m_global_config.extra_stun_servers.empty() ? 5 : m_global_config.extra_stun_servers.size());
+                       m_global_config.network.extra_stun_servers.empty() ? 5 : m_global_config.network.extra_stun_servers.size());
     }
 
     // 7. 创建 StateManager（可能抛出异常，需要捕获）

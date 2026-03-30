@@ -42,10 +42,27 @@ public:
         uint64_t done;   // 成功完成的任务数
     };
 
+    /// 从 Config::Transfer 注入的运行时参数
+    struct TransferConfig {
+        int file_open_max_retries       = 5;
+        int file_open_retry_delay_ms    = 200;
+        int stall_threshold_ms          = 5000;
+        int zombie_threshold_seconds    = 10;
+        int receive_timeout_minutes     = 10;
+        int congestion_wait_high_ms     = 200;
+        int congestion_wait_low_ms      = 100;
+        int congestion_high_multiplier  = 4;
+        int congestion_threshold        = 256;
+        double speed_update_interval_sec = 0.5;
+        size_t max_total_chunks         = 8388608;
+        size_t max_path_length          = 4096;
+    };
+
     // 构造函数注入所有依赖
     TransferManager(StateManager* sm, boost::asio::io_context& io_context,
                     boost::asio::thread_pool& pool, SendCallback send_cb,
-                    size_t chunk_size = DEFAULT_CHUNK_DATA_SIZE);
+                    size_t chunk_size = DEFAULT_CHUNK_DATA_SIZE,
+                    TransferConfig config = {});
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
@@ -129,6 +146,7 @@ private:
     boost::asio::io_context& m_io_context;
     boost::asio::thread_pool& m_worker_pool;
     SendCallback m_send_callback;
+    TransferConfig m_transfer_config;  // 运行时配置参数
 
     struct ReceivingFile {
         // C-2: per-file 锁 —— 保护 file_stream 和写入操作

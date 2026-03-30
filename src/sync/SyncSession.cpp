@@ -12,23 +12,28 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
+// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时使用成员变量）
 // SYNC_TIMEOUT_SECONDS 已统一定义在 Protocol.h (Protocol::SYNC_TIMEOUT_SECONDS)
-static constexpr int FLOW_CONTROL_THRESHOLD         = 1024;  // KCP 发送队列流控阈值
-static constexpr int FLOW_CONTROL_SLEEP_MS          = 20;    // 流控等待间隔（毫秒）
+// FLOW_CONTROL_THRESHOLD 和 FLOW_CONTROL_SLEEP_MS 现在通过构造函数注入
 
 SyncSession::SyncSession(StateManager* state_manager,
                          boost::asio::thread_pool& worker_pool,
                          boost::asio::io_context& io_context,
                          SendToPeerFunc send_to_peer,
                          WithPeerFunc with_peer,
-                         GetPeerFunc get_peer)
+                         GetPeerFunc get_peer,
+                         int flow_control_threshold,
+                         int flow_control_sleep_ms,
+                         int sync_timeout_seconds)
     : m_state_manager(state_manager),
       m_worker_pool(worker_pool),
       m_io_context(io_context),
       m_send_to_peer(std::move(send_to_peer)),
       m_with_peer(std::move(with_peer)),
-      m_get_peer(std::move(get_peer)) {}
+      m_get_peer(std::move(get_peer)),
+      m_flow_control_threshold(flow_control_threshold),
+      m_flow_control_sleep_ms(flow_control_sleep_ms),
+      m_sync_timeout_seconds(sync_timeout_seconds) {}
 
 // ═══════════════════════════════════════════════════════════════
 // 同步会话管理
@@ -81,7 +86,7 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         
         // A-6: 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
         std::string peer_id = from_peer->get_peer_id();
-        from_peer->start_sync_timeout(Protocol::SYNC_TIMEOUT_SECONDS,
+        from_peer->start_sync_timeout(m_sync_timeout_seconds,
             [this, peer_id, session_id](const boost::system::error_code& ec) {
                 if (ec) return;  // 被取消
                 
@@ -234,8 +239,8 @@ void SyncSession::perform_flood_sync(std::shared_ptr<PeerController> controller,
 
         // 【流控】每发送一个批次检查一次 KCP 发送队列积压量
         int pending = controller->get_kcp_wait_send();
-        while (pending > FLOW_CONTROL_THRESHOLD && controller->is_valid()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(FLOW_CONTROL_SLEEP_MS));
+        while (pending > m_flow_control_threshold && controller->is_valid()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(m_flow_control_sleep_ms));
             pending = controller->get_kcp_wait_send();
         }
         

@@ -15,9 +15,16 @@
 
 namespace VeritasSync {
 
-    // E-1: 魔数统一为命名常量
-    static constexpr size_t HASH_READ_BUFFER_SIZE = 64 * 1024;  // 文件哈希读取缓冲区 64KB
+    // E-1: 魔数统一为命名常量（默认值，可通过 set_read_buffer_size 覆盖）
+    static constexpr size_t DEFAULT_HASH_READ_BUFFER_SIZE = 64 * 1024;  // 文件哈希读取缓冲区 64KB
+    static size_t s_hash_read_buffer_size = DEFAULT_HASH_READ_BUFFER_SIZE;
     static constexpr int FILE_LOCK_RETRY_DELAY_MS = 250;        // 文件锁定重试延迟（毫秒）
+
+    void Hashing::set_read_buffer_size(size_t bytes) {
+        if (bytes > 0) {
+            s_hash_read_buffer_size = bytes;
+        }
+    }
 
     // --- EVP SHA256 上下文 RAII 封装 ---
     // 统一管理 EVP_MD_CTX 的生命周期，消除三个函数中重复的 Init/Update/Final 流程
@@ -199,7 +206,7 @@ namespace VeritasSync {
 
         // 4. 分块读取文件并更新哈希值
         // 使用 64KB 缓冲区，对于顺序读取是较优的块大小
-        std::vector<char> buffer(HASH_READ_BUFFER_SIZE);
+        std::vector<char> buffer(s_hash_read_buffer_size);
         while (file.good()) {
             file.read(buffer.data(), buffer.size());
             std::streamsize bytesRead = file.gcount();

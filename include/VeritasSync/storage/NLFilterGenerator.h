@@ -29,6 +29,10 @@ public:
         std::string api_key;        // API 密钥
         std::string model;          // 模型名称（如 qwen-turbo）
         int timeout_seconds = 30;   // 请求超时时间
+        double temperature = 0.3;   // LLM 温度参数
+        int max_tokens = 1024;      // LLM 最大输出 token 数
+        int max_scan_files = 50000; // 目录扫描最大文件数
+        int large_dir_threshold = 500; // 大目录折叠阈值
     };
 
     NLFilterGenerator() = default;
@@ -62,15 +66,18 @@ private:
                                         const std::string& dir_summary);
 
     /// 扫描目录生成摘要（按目录聚合文件扩展名和数量）
-    static std::string build_directory_summary(const std::string& root_path, size_t max_chars = 3000);
+    static std::string build_directory_summary(const std::string& root_path, size_t max_chars = 3000,
+                                               size_t max_scan_files = 50000, size_t large_dir_threshold = 500);
 
     /// 从用户描述中提取关键词，在文件树中搜索匹配的样本路径
     static std::string search_relevant_samples(const std::string& root_path,
                                                const std::string& description,
-                                               size_t max_samples = 10);
+                                               size_t max_samples = 10,
+                                               size_t max_scan_files = 50000);
 
     /// Dry-Run：用生成的规则在文件树上试跑，返回将被忽略的文件数量
-    static size_t dry_run_rules(const std::string& root_path, const std::string& rules);
+    static size_t dry_run_rules(const std::string& root_path, const std::string& rules,
+                                size_t max_scan_files = 50000);
 
     /// 从 LLM 响应中提取规则（JSON 大括号提取法）
     struct ParsedResponse {

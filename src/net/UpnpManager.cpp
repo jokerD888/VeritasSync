@@ -6,8 +6,8 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
-static constexpr int UPNP_DISCOVER_TIMEOUT_MS = 2000;  // UPnP 设备发现超时（毫秒）
+// E-1: 魔数统一为命名常量（保留为默认值参考）
+static constexpr int DEFAULT_UPNP_DISCOVER_TIMEOUT_MS = 2000;  // UPnP 设备发现超时（毫秒）
 
 // ═══════════════════════════════════════════════════════════════
 // 辅助函数
@@ -42,11 +42,11 @@ UpnpManager::~UpnpManager() {
 // 异步初始化
 // ═══════════════════════════════════════════════════════════════
 
-void UpnpManager::init_async(boost::asio::thread_pool& pool) {
-    boost::asio::post(pool, [this]() {
+void UpnpManager::init_async(boost::asio::thread_pool& pool, int discover_timeout_ms) {
+    boost::asio::post(pool, [this, discover_timeout_ms]() {
         int error = 0;
-        // 发现路由器 (2000ms 超时)
-        struct UPNPDev* devlist = upnpDiscover(UPNP_DISCOVER_TIMEOUT_MS, nullptr, nullptr, 0, 0, 2, &error);
+        // 发现路由器 (超时由配置决定)
+        struct UPNPDev* devlist = upnpDiscover(discover_timeout_ms, nullptr, nullptr, 0, 0, 2, &error);
 
         std::lock_guard<std::mutex> lock(m_mutex);
         if (devlist) {

@@ -14,11 +14,14 @@
 #endif
 
 #include "VeritasSync/common/Config.h"
+#include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
 #include "VeritasSync/p2p/P2PManager.h"
 #include "VeritasSync/sync/SyncNode.h"
 #include "VeritasSync/common/TrayIcon.h"
 #include "VeritasSync/p2p/WebUI.h"
+
+#include <filesystem>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -26,6 +29,69 @@
 #include <windows.h>
 #pragma comment(lib, "shell32.lib")
 #endif
+
+// ═══════════════════════════════════════════════════════════════
+// 配置文件路径解析（两级查找：便携模式 → 系统标准路径）
+// ═══════════════════════════════════════════════════════════════
+
+static std::filesystem::path get_exe_directory() {
+#if defined(_WIN32)
+    wchar_t buf[MAX_PATH] = {0};
+    GetModuleFileNameW(NULL, buf, MAX_PATH);
+    return std::filesystem::path(buf).parent_path();
+#elif defined(__linux__)
+    return std::filesystem::canonical("/proc/self/exe").parent_path();
+#elif defined(__APPLE__)
+    char buf[1024];
+    uint32_t size = sizeof(buf);
+    _NSGetExecutablePath(buf, &size);
+    return std::filesystem::canonical(buf).parent_path();
+#else
+    return std::filesystem::current_path();
+#endif
+}
+
+static std::filesystem::path get_system_config_dir() {
+#if defined(_WIN32)
+    // %APPDATA%\VeritasSync (e.g. C:\Users\xxx\AppData\Roaming\VeritasSync)
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata) return std::filesystem::path(appdata) / "VeritasSync";
+    return get_exe_directory();
+#elif defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    if (home) return std::filesystem::path(home) / "Library" / "Application Support" / "VeritasSync";
+    return get_exe_directory();
+#else
+    // Linux: XDG_CONFIG_HOME or ~/.config/veritassync
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg) return std::filesystem::path(xdg) / "veritassync";
+    const char* home = std::getenv("HOME");
+    if (home) return std::filesystem::path(home) / ".config" / "veritassync";
+    return get_exe_directory();
+#endif
+}
+
+/// 解析 config.json 路径：便携模式优先，系统路径兜底
+static std::string resolve_config_path() {
+    namespace fs = std::filesystem;
+    const std::string filename = "config.json";
+
+    // 1. 便携模式：exe 同目录下有 config.json → 直接用
+    auto portable = get_exe_directory() / filename;
+    if (fs::exists(portable)) {
+        return portable.string();
+    }
+
+    // 2. 系统标准路径
+    auto sys_dir = get_system_config_dir();
+    auto sys_path = sys_dir / filename;
+    if (fs::exists(sys_path)) {
+        return sys_path.string();
+    }
+
+    // 3. 都没有 → 在 exe 目录创建（首次启动，便携模式默认）
+    return portable.string();
+}
 
 // --- 全局变量：管理活跃节点 ---
 // 注意：SyncNode 现在必须使用 shared_ptr（支持 enable_shared_from_this）
@@ -140,18 +206,27 @@ int main(int argc, char* argv[]) {
     };
 
     try {
-        VeritasSync::init_logger();
-    VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
-
+    // 先加载配置（不需要日志），然后用配置参数初始化日志系统
     VeritasSync::Config config;
+    std::string config_path = resolve_config_path();
     try {
-        config = VeritasSync::load_config_or_create_default("config.json");
+        config = VeritasSync::load_config_or_create_default(config_path);
     } catch (const std::exception& e) {
+        // 配置加载失败时使用默认参数初始化日志
+        VeritasSync::init_logger();
         VeritasSync::g_logger->warn("{}", e.what());
-        VeritasSync::g_logger->info("Please edit config.json and restart. Shutting down.");
+        VeritasSync::g_logger->info("Please edit {} and restart. Shutting down.", config_path);
         spdlog::shutdown();
         return 1;
     }
+
+    // 使用配置参数初始化日志系统
+    VeritasSync::init_logger(
+        static_cast<size_t>(config.logging.max_file_size_mb) * 1024 * 1024,
+        static_cast<size_t>(config.logging.max_files),
+        static_cast<size_t>(config.logging.thread_pool_size));
+    VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
+    VeritasSync::g_logger->info("Configuration loaded from: {}", config_path);
 
     // 配置验证
     auto config_errors = VeritasSync::validate_config(config);
@@ -160,21 +235,25 @@ int main(int argc, char* argv[]) {
         for (const auto& err : config_errors) {
             VeritasSync::g_logger->warn("  - {}", err);
         }
-        VeritasSync::g_logger->warn("请检查 config.json 并修正上述问题。程序将使用当前配置继续运行。");
+        VeritasSync::g_logger->warn("请检查 {} 并修正上述问题。程序将使用当前配置继续运行。", config_path);
     }
 
-    VeritasSync::g_logger->info("Configuration loaded. Tracker at {}:{}. Found {} task(s).", config.tracker_host,
-                                config.tracker_port, config.tasks.size());
+    VeritasSync::g_logger->info("Configuration loaded. Tracker at {}:{}. Found {} task(s).", config.network.tracker_host,
+                                config.network.tracker_port, config.tasks.size());
+
+    // 注入高级配置参数到静态模块
+    VeritasSync::Hashing::set_read_buffer_size(
+        static_cast<size_t>(config.advanced.hash_read_buffer_size_kb) * 1024);
 
     // 根据配置设置日志级别 (修复: 之前 Config.log_level 未生效)
-    VeritasSync::set_log_level(config.log_level);
+    VeritasSync::set_log_level(config.logging.level);
 
     // 注册信号处理 (跨平台: SIGINT=Ctrl+C, SIGTERM=kill)
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
     // 启动 Web UI (端口从配置读取，默认 8800)
-    VeritasSync::WebUIServer web_ui(config.webui_port, "config.json");
+    VeritasSync::WebUIServer web_ui(config.webui.port, "config.json");
 
     // --- B-02: 重启请求回调（由 main 执行优雅重启） ---
     web_ui.set_on_restart_request([&web_ui]() {
@@ -458,7 +537,7 @@ int main(int argc, char* argv[]) {
 
 #else
     if (webui_started) {
-        VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:{} | 按 Ctrl+C 退出 ---", config.webui_port);
+        VeritasSync::g_logger->info("\n--- 所有同步任务已启动。Web UI: http://127.0.0.1:{} | 按 Ctrl+C 退出 ---", config.webui.port);
     } else {
         VeritasSync::g_logger->warn("WebUI 未成功启动，程序将进入退出流程。");
     }

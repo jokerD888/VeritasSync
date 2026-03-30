@@ -9,8 +9,8 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
-static constexpr int SQLITE_BUSY_TIMEOUT_MS = 5000;  // SQLite 繁忙重试超时（毫秒）
+// E-1: 魔数统一为命名常量（保留为默认值参考）
+static constexpr int DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000;  // SQLite 繁忙重试超时（毫秒）
 
 // --- StmtDeleter 实现 ---
 void Database::StmtDeleter::operator()(sqlite3_stmt* s) {
@@ -19,7 +19,7 @@ void Database::StmtDeleter::operator()(sqlite3_stmt* s) {
     }
 }
 
-Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.string()) {
+Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : m_db_path(db_path.string()) {
     // 注意：成员变量 m_db_path 只是为了存个日志用的 string，转成 UTF-8 存起来
     m_db_path = PathToUtf8(db_path);
 
@@ -44,7 +44,7 @@ Database::Database(const std::filesystem::path& db_path) : m_db_path(db_path.str
 
     // --- 设置繁忙重试超时 (5秒) ---
     // 防止多线程写入时出现 "database is locked" 错误
-    sqlite3_busy_timeout(m_db, SQLITE_BUSY_TIMEOUT_MS);
+    sqlite3_busy_timeout(m_db, busy_timeout_ms);
 
     // --- 优化: 启用 WAL 模式和 Normal 同步 ---
     // WAL: 大幅提升并发性能，避免读写阻塞

@@ -18,17 +18,8 @@
 namespace VeritasSync {
 
     // ═══════════════════════════════════════════════════════════════
-    // 阈值触发配置
+    // 阈值触发配置（保留为默认值参考，实际运行时使用 m_sync_config）
     // ═══════════════════════════════════════════════════════════════
-    
-    // 批量触发阈值：当待处理变更数量达到此值时立即触发处理
-    static constexpr size_t BATCH_TRIGGER_THRESHOLD = 100;
-    
-    // 最小间隔：两次批量处理之间的最小间隔（毫秒），避免过于频繁触发
-    static constexpr int64_t MIN_BATCH_INTERVAL_MS = 1000;
-
-    // 防抖定时器延迟（毫秒）
-    static constexpr int DEBOUNCE_DELAY_MS = 5000;
 
     // UpdateListener 现在更简单了
     // 它只负责通知 StateManager 发生了变化，并处理防抖
@@ -78,7 +69,7 @@ namespace VeritasSync {
             // 3. 如果没有触发阈值，则使用正常的防抖定时器
             if (!triggered) {
                 m_debounce_timer.cancel();
-                m_debounce_timer.expires_after(std::chrono::milliseconds(DEBOUNCE_DELAY_MS));
+                m_debounce_timer.expires_after(std::chrono::milliseconds(m_owner->m_sync_config.file_change_debounce_delay_ms));
 
                 // 计时器触发后，调用 StateManager 的处理函数
                 m_debounce_timer.async_wait([this](const boost::system::error_code& ec) {
@@ -100,11 +91,12 @@ namespace VeritasSync {
 
     StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                                StateManagerCallbacks callbacks, bool enable_watcher,
-                               const std::string& sync_key)
+                               const std::string& sync_key, SyncConfig sync_config)
         : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
           m_io_context(io_context),
           m_callbacks(std::move(callbacks)),
           m_sync_key(sync_key),
+          m_sync_config(std::move(sync_config)),
           // B-06: 重试计时器与 watcher 解耦，Destination+OneWay 也可用
           m_retry_timer(std::make_unique<boost::asio::steady_timer>(m_io_context)) {
         if (!std::filesystem::exists(m_root_path)) {
@@ -214,7 +206,7 @@ namespace VeritasSync {
         }
         
         // 未达到阈值
-        if (pending_count < BATCH_TRIGGER_THRESHOLD) {
+        if (pending_count < static_cast<size_t>(m_sync_config.batch_trigger_threshold)) {
             return false;
         }
         
@@ -223,7 +215,7 @@ namespace VeritasSync {
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - m_last_batch_time).count();
         
-        if (elapsed_ms < MIN_BATCH_INTERVAL_MS) {
+        if (elapsed_ms < m_sync_config.batch_min_interval_ms) {
             return false;  // 间隔太短，等待下一次
         }
         
@@ -233,8 +225,8 @@ namespace VeritasSync {
             return false;  // 已经在处理中
         }
         
-        g_logger->info("[{}] [StateManager] 阈值触发: {} 个变更待处理 (阈值={})", 
-                      m_sync_key, pending_count, BATCH_TRIGGER_THRESHOLD);
+        g_logger->info("[{}] [StateManager] 阈值触发: {} 个变更待处理 (阈值={})",
+                      m_sync_key, pending_count, m_sync_config.batch_trigger_threshold);
         
         // 非阻塞：post 到 io_context，不在监控线程中执行耗时操作
         boost::asio::post(m_io_context, [this]() {

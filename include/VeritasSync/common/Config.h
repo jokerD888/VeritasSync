@@ -24,65 +24,135 @@ enum class SyncRole { Source, Destination };
 // 单个同步任务的结构
 struct SyncTask {
     std::string sync_key;
-    std::string role;  // "source" or "destination" (在双向模式下主要决定谁先发起连接，或作为逻辑标识)
+    std::string role;  // "source" or "destination"
     std::string sync_folder;
     SyncMode mode = SyncMode::OneWay;
 };
 
-// 顶级配置结构
+// ═══════════════════════════════════════════════════════════════
+// 顶级配置结构（分组嵌套式）
+// ═══════════════════════════════════════════════════════════════
+
 struct Config {
     // --- 设备唯一标识符（首次启动时自动生成） ---
     std::string device_id;
-    // ----------------------------
-    
-    std::string tracker_host = "47.121.187.240";
-    unsigned short tracker_port = 9988;
 
-    std::string stun_host = "stun.l.google.com";
-    unsigned short stun_port = 19302;
+    // --- 网络配置 ---
+    struct Network {
+        std::string tracker_host = "47.121.187.240";
+        unsigned short tracker_port = 9988;
+        int tracker_reconnect_interval_seconds = 5;
+        int tracker_max_packet_size_mb = 1;
 
-    std::string turn_host;
-    unsigned short turn_port = 3478;
-    std::string turn_username;
-    std::string turn_password;
-    // ----------------------------
+        std::string stun_host = "stun.l.google.com";
+        unsigned short stun_port = 19302;
 
-    // --- 日志级别配置  ---
-    std::string log_level = "info";  // debug, info, warn, error
-    std::string libjuice_log_level = "info";
-    // ----------------------------
+        std::string turn_host;
+        unsigned short turn_port = 3478;
+        std::string turn_username;
+        std::string turn_password;
 
-    // --- 性能参数配置  ---
-    uint32_t kcp_update_interval_ms = 20;  // KCP更新间隔 (10-100ms)
-    size_t chunk_size = 16384;  // 文件分块大小 (bytes)
-    uint32_t kcp_window_size = 256;  // KCP窗口大小
-    uint32_t file_hash_retry_delay_ms = 250;  // 文件哈希重试延迟
-    // ----------------------------
+        bool enable_multi_stun_probing = true;
+        std::string stun_list_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+        struct StunServer {
+            std::string host;
+            uint16_t port = 3478;
+        };
+        std::vector<StunServer> extra_stun_servers;
 
-    // --- 多 STUN 探测配置（Multi-STUN Probing，用于双 WAN 环境）---
-    bool enable_multi_stun_probing = true;  // 是否启用多 STUN 并发探测
-    std::string stun_list_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
-    struct StunServer {
-        std::string host;
-        uint16_t port = 3478;
-    };
-    std::vector<StunServer> extra_stun_servers;  // 额外 STUN 服务器列表（运行时从 URL 获取或手动配置）
-    // ----------------------------
+        int ice_answer_wait_timeout_seconds = 30;
+        int upnp_discover_timeout_ms = 2000;
+        int peer_cleanup_interval_minutes = 5;
+    } network;
 
-    // --- WebUI 配置  ---
-    unsigned short webui_port = 8800;  // Web 控制台端口
-    // ----------------------------
+    // --- 传输配置 ---
+    struct Transfer {
+        size_t chunk_size = 16384;
+        int stall_threshold_ms = 5000;
+        int zombie_threshold_seconds = 10;
+        int receive_timeout_minutes = 10;
+        int congestion_wait_high_ms = 200;
+        int congestion_wait_low_ms = 100;
+        int congestion_high_multiplier = 4;
+        int congestion_threshold = 256;
+        double speed_update_interval_sec = 0.5;
+        int file_open_max_retries = 5;
+        int file_open_retry_delay_ms = 200;
+        size_t max_total_chunks = 8388608;
+        size_t max_path_length = 4096;
+        int broadcast_file_update_batch_size = 50;
+        int broadcast_file_delete_batch_size = 100;
+    } transfer;
 
-    // --- LLM API 配置（用于自然语言生成过滤规则，可选）---
-    std::string llm_api_url = "https://dashscope.aliyuncs.com/compatible-mode";  // 默认阿里百炼 OpenAI 兼容端点
-    std::string llm_api_key;                    // API 密钥（需用户在 config.json 中填写）
-    std::string llm_model = "qwen-turbo";       // 默认使用通义千问 Turbo
-    // ----------------------------
+    // --- KCP 配置 ---
+    struct Kcp {
+        uint32_t update_interval_ms = 20;
+        uint32_t window_size = 256;
+    } kcp;
 
+    // --- 同步逻辑配置 ---
+    struct Sync {
+        int session_timeout_seconds = 60;
+        int flow_control_threshold = 1024;
+        int flow_control_sleep_ms = 20;
+        int file_change_debounce_delay_ms = 5000;
+        int batch_trigger_threshold = 100;
+        int batch_min_interval_ms = 1000;
+        int file_hash_retry_delay_ms = 250;
+    } sync;
+
+    // --- 日志配置 ---
+    struct Logging {
+        std::string level = "info";
+        std::string libjuice_level = "info";
+        int max_file_size_mb = 5;
+        int max_files = 3;
+        int thread_pool_size = 8192;
+    } logging;
+
+    // --- WebUI 配置 ---
+    struct WebUI {
+        unsigned short port = 8800;
+        int log_tail_status_bytes = 16384;
+        int log_tail_task_bytes = 32768;
+        int auth_token_bytes = 32;
+        int max_description_length = 4096;
+        int max_rules_length = 10000;
+    } webui;
+
+    // --- LLM API 配置 ---
+    struct LLM {
+        std::string api_url = "https://dashscope.aliyuncs.com/compatible-mode";
+        std::string api_key;
+        std::string model = "qwen-turbo";
+        double temperature = 0.3;
+        int max_tokens = 1024;
+        int timeout_seconds = 30;
+        int max_scan_files = 50000;
+        int large_dir_threshold = 500;
+    } llm;
+
+    // --- 数据库配置 ---
+    struct Database {
+        int busy_timeout_ms = 5000;
+    } database;
+
+    // --- 高级配置 ---
+    struct Advanced {
+        int worker_thread_count = 0;     // 0 = auto (hardware_concurrency)
+        int hash_thread_count = 0;       // 0 = auto
+        int hash_read_buffer_size_kb = 64;
+        int tracker_max_message_length_bytes = 262144;
+    } advanced;
+
+    // --- 同步任务列表 ---
     std::vector<SyncTask> tasks;
 };
 
-// --- nlohmann/json 集成 ---
+// ═══════════════════════════════════════════════════════════════
+// nlohmann/json 集成
+// ═══════════════════════════════════════════════════════════════
+
 NLOHMANN_JSON_SERIALIZE_ENUM(SyncMode, {{SyncMode::OneWay, "oneway"}, {SyncMode::BiDirectional, "bidirectional"}})
 
 inline void to_json(nlohmann::json& j, const SyncTask& task) {
@@ -101,95 +171,270 @@ inline void from_json(const nlohmann::json& j, SyncTask& task) {
     }
 }
 
-inline void to_json(nlohmann::json& j, const Config& config) {
-    j = nlohmann::json{{"device_id", config.device_id},
-                       {"tracker_host", config.tracker_host},
-                       {"tracker_port", config.tracker_port},
-                       {"stun_host", config.stun_host},
-                       {"stun_port", config.stun_port},
-                       {"turn_host", config.turn_host},
-                       {"turn_port", config.turn_port},
-                       {"turn_username", config.turn_username},
-                       {"turn_password", config.turn_password},
-                       {"enable_multi_stun_probing", config.enable_multi_stun_probing},
-                       {"stun_list_url", config.stun_list_url},
-                       {"log_level", config.log_level},
-                       {"libjuice_log_level", config.libjuice_log_level},
-                       {"kcp_update_interval_ms", config.kcp_update_interval_ms},
-                       {"chunk_size", config.chunk_size},
-                       {"kcp_window_size", config.kcp_window_size},
-                       {"file_hash_retry_delay_ms", config.file_hash_retry_delay_ms},
-                       {"webui_port", config.webui_port},
-                       {"llm_api_url", config.llm_api_url},
-                       {"llm_api_key", config.llm_api_key},
-                       {"llm_model", config.llm_model},
-                       {"tasks", config.tasks}};
-    // 序列化额外 STUN 服务器列表（如果有）
-    if (!config.extra_stun_servers.empty()) {
-        j["extra_stun_servers"] = nlohmann::json::array();
-        for (const auto& s : config.extra_stun_servers) {
-            j["extra_stun_servers"].push_back({{"host", s.host}, {"port", s.port}});
+// --- to_json / from_json：拆分为 config.json（用户配置）和 advanced.json（专家调优）---
+
+// 辅助宏
+#define LOAD_OPT(src, key, dst) do { if ((src).contains(key)) (src).at(key).get_to(dst); } while(0)
+
+/// config.json 序列化（用户常改的配置）
+inline nlohmann::json config_to_json(const Config& c) {
+    nlohmann::json j = {
+        {"device_id", c.device_id},
+        {"network", {
+            {"tracker_host", c.network.tracker_host},
+            {"tracker_port", c.network.tracker_port},
+            {"stun_host", c.network.stun_host},
+            {"stun_port", c.network.stun_port},
+            {"turn_host", c.network.turn_host},
+            {"turn_port", c.network.turn_port},
+            {"turn_username", c.network.turn_username},
+            {"turn_password", c.network.turn_password},
+            {"enable_multi_stun_probing", c.network.enable_multi_stun_probing}
+        }},
+        {"logging", {
+            {"level", c.logging.level}
+        }},
+        {"webui", {
+            {"port", c.webui.port}
+        }},
+        {"llm", {
+            {"api_url", c.llm.api_url},
+            {"api_key", c.llm.api_key},
+            {"model", c.llm.model}
+        }},
+        {"tasks", c.tasks}
+    };
+    if (!c.network.extra_stun_servers.empty()) {
+        j["network"]["extra_stun_servers"] = nlohmann::json::array();
+        for (const auto& s : c.network.extra_stun_servers) {
+            j["network"]["extra_stun_servers"].push_back({{"host", s.host}, {"port", s.port}});
         }
     }
+    return j;
 }
 
-inline void from_json(const nlohmann::json& j, Config& config) {
-    // --- 加载 device_id (如果存在) ---
-    if (j.contains("device_id")) j.at("device_id").get_to(config.device_id);
-    // ---------------------------------
-    
-    j.at("tracker_host").get_to(config.tracker_host);
-    j.at("tracker_port").get_to(config.tracker_port);
+/// config.json 反序列化
+inline void config_from_json(const nlohmann::json& j, Config& c) {
+    LOAD_OPT(j, "device_id", c.device_id);
 
-    // --- 加载 STUN (如果存在) ---
-    if (j.contains("stun_host")) j.at("stun_host").get_to(config.stun_host);
-    if (j.contains("stun_port")) j.at("stun_port").get_to(config.stun_port);
-    // ---------------------------------
-
-    // --- 加载 TURN (如果存在) ---
-    if (j.contains("turn_host")) j.at("turn_host").get_to(config.turn_host);
-    if (j.contains("turn_port")) j.at("turn_port").get_to(config.turn_port);
-    if (j.contains("turn_username")) j.at("turn_username").get_to(config.turn_username);
-    if (j.contains("turn_password")) j.at("turn_password").get_to(config.turn_password);
-    // ---------------------------------
-
-    // --- 加载日志和性能配置 (如果存在) ---
-    if (j.contains("log_level")) j.at("log_level").get_to(config.log_level);
-    if (j.contains("libjuice_log_level")) j.at("libjuice_log_level").get_to(config.libjuice_log_level);
-    if (j.contains("kcp_update_interval_ms")) j.at("kcp_update_interval_ms").get_to(config.kcp_update_interval_ms);
-    if (j.contains("chunk_size")) j.at("chunk_size").get_to(config.chunk_size);
-    if (j.contains("kcp_window_size")) j.at("kcp_window_size").get_to(config.kcp_window_size);
-    if (j.contains("file_hash_retry_delay_ms")) j.at("file_hash_retry_delay_ms").get_to(config.file_hash_retry_delay_ms);
-    // ---------------------------------
-
-    // --- 加载 WebUI 配置 (如果存在) ---
-    if (j.contains("webui_port")) j.at("webui_port").get_to(config.webui_port);
-    // ---------------------------------
-
-    // --- 加载多 STUN 探测配置 (如果存在) ---
-    if (j.contains("enable_multi_stun_probing")) j.at("enable_multi_stun_probing").get_to(config.enable_multi_stun_probing);
-    if (j.contains("stun_list_url")) j.at("stun_list_url").get_to(config.stun_list_url);
-    if (j.contains("extra_stun_servers")) {
-        config.extra_stun_servers.clear();
-        for (const auto& s : j["extra_stun_servers"]) {
-            Config::StunServer server;
-            server.host = s.value("host", "");
-            server.port = s.value("port", static_cast<uint16_t>(3478));
-            if (!server.host.empty()) {
-                config.extra_stun_servers.push_back(std::move(server));
+    if (j.contains("network")) {
+        const auto& n = j["network"];
+        LOAD_OPT(n, "tracker_host", c.network.tracker_host);
+        LOAD_OPT(n, "tracker_port", c.network.tracker_port);
+        LOAD_OPT(n, "stun_host", c.network.stun_host);
+        LOAD_OPT(n, "stun_port", c.network.stun_port);
+        LOAD_OPT(n, "turn_host", c.network.turn_host);
+        LOAD_OPT(n, "turn_port", c.network.turn_port);
+        LOAD_OPT(n, "turn_username", c.network.turn_username);
+        LOAD_OPT(n, "turn_password", c.network.turn_password);
+        LOAD_OPT(n, "enable_multi_stun_probing", c.network.enable_multi_stun_probing);
+        if (n.contains("extra_stun_servers")) {
+            c.network.extra_stun_servers.clear();
+            for (const auto& s : n["extra_stun_servers"]) {
+                Config::Network::StunServer server;
+                server.host = s.value("host", "");
+                server.port = s.value("port", static_cast<uint16_t>(3478));
+                if (!server.host.empty()) c.network.extra_stun_servers.push_back(std::move(server));
             }
         }
     }
-    // ---------------------------------
-
-    // --- 加载 LLM API 配置 (如果存在) ---
-    if (j.contains("llm_api_url")) j.at("llm_api_url").get_to(config.llm_api_url);
-    if (j.contains("llm_api_key")) j.at("llm_api_key").get_to(config.llm_api_key);
-    if (j.contains("llm_model")) j.at("llm_model").get_to(config.llm_model);
-    // ---------------------------------
-
-    j.at("tasks").get_to(config.tasks);
+    if (j.contains("logging")) {
+        const auto& l = j["logging"];
+        LOAD_OPT(l, "level", c.logging.level);
+    }
+    if (j.contains("webui")) {
+        const auto& w = j["webui"];
+        LOAD_OPT(w, "port", c.webui.port);
+    }
+    if (j.contains("llm")) {
+        const auto& l = j["llm"];
+        LOAD_OPT(l, "api_url", c.llm.api_url);
+        LOAD_OPT(l, "api_key", c.llm.api_key);
+        LOAD_OPT(l, "model", c.llm.model);
+    }
+    if (j.contains("tasks")) {
+        j.at("tasks").get_to(c.tasks);
+    }
 }
+
+/// advanced.json 序列化（专家调优配置）
+inline nlohmann::json advanced_to_json(const Config& c) {
+    return {
+        {"network", {
+            {"tracker_reconnect_interval_seconds", c.network.tracker_reconnect_interval_seconds},
+            {"tracker_max_packet_size_mb", c.network.tracker_max_packet_size_mb},
+            {"stun_list_url", c.network.stun_list_url},
+            {"ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds},
+            {"upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms},
+            {"peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes}
+        }},
+        {"transfer", {
+            {"chunk_size", c.transfer.chunk_size},
+            {"stall_threshold_ms", c.transfer.stall_threshold_ms},
+            {"zombie_threshold_seconds", c.transfer.zombie_threshold_seconds},
+            {"receive_timeout_minutes", c.transfer.receive_timeout_minutes},
+            {"congestion_wait_high_ms", c.transfer.congestion_wait_high_ms},
+            {"congestion_wait_low_ms", c.transfer.congestion_wait_low_ms},
+            {"congestion_high_multiplier", c.transfer.congestion_high_multiplier},
+            {"congestion_threshold", c.transfer.congestion_threshold},
+            {"speed_update_interval_sec", c.transfer.speed_update_interval_sec},
+            {"file_open_max_retries", c.transfer.file_open_max_retries},
+            {"file_open_retry_delay_ms", c.transfer.file_open_retry_delay_ms},
+            {"max_total_chunks", c.transfer.max_total_chunks},
+            {"max_path_length", c.transfer.max_path_length},
+            {"broadcast_file_update_batch_size", c.transfer.broadcast_file_update_batch_size},
+            {"broadcast_file_delete_batch_size", c.transfer.broadcast_file_delete_batch_size}
+        }},
+        {"kcp", {
+            {"update_interval_ms", c.kcp.update_interval_ms},
+            {"window_size", c.kcp.window_size}
+        }},
+        {"sync", {
+            {"session_timeout_seconds", c.sync.session_timeout_seconds},
+            {"flow_control_threshold", c.sync.flow_control_threshold},
+            {"flow_control_sleep_ms", c.sync.flow_control_sleep_ms},
+            {"file_change_debounce_delay_ms", c.sync.file_change_debounce_delay_ms},
+            {"batch_trigger_threshold", c.sync.batch_trigger_threshold},
+            {"batch_min_interval_ms", c.sync.batch_min_interval_ms},
+            {"file_hash_retry_delay_ms", c.sync.file_hash_retry_delay_ms}
+        }},
+        {"logging", {
+            {"libjuice_level", c.logging.libjuice_level},
+            {"max_file_size_mb", c.logging.max_file_size_mb},
+            {"max_files", c.logging.max_files},
+            {"thread_pool_size", c.logging.thread_pool_size}
+        }},
+        {"webui", {
+            {"log_tail_status_bytes", c.webui.log_tail_status_bytes},
+            {"log_tail_task_bytes", c.webui.log_tail_task_bytes},
+            {"auth_token_bytes", c.webui.auth_token_bytes},
+            {"max_description_length", c.webui.max_description_length},
+            {"max_rules_length", c.webui.max_rules_length}
+        }},
+        {"llm", {
+            {"temperature", c.llm.temperature},
+            {"max_tokens", c.llm.max_tokens},
+            {"timeout_seconds", c.llm.timeout_seconds},
+            {"max_scan_files", c.llm.max_scan_files},
+            {"large_dir_threshold", c.llm.large_dir_threshold}
+        }},
+        {"database", {
+            {"busy_timeout_ms", c.database.busy_timeout_ms}
+        }},
+        {"advanced", {
+            {"worker_thread_count", c.advanced.worker_thread_count},
+            {"hash_thread_count", c.advanced.hash_thread_count},
+            {"hash_read_buffer_size_kb", c.advanced.hash_read_buffer_size_kb},
+            {"tracker_max_message_length_bytes", c.advanced.tracker_max_message_length_bytes}
+        }}
+    };
+}
+
+/// advanced.json 反序列化
+inline void advanced_from_json(const nlohmann::json& j, Config& c) {
+    if (j.contains("network")) {
+        const auto& n = j["network"];
+        LOAD_OPT(n, "tracker_reconnect_interval_seconds", c.network.tracker_reconnect_interval_seconds);
+        LOAD_OPT(n, "tracker_max_packet_size_mb", c.network.tracker_max_packet_size_mb);
+        LOAD_OPT(n, "stun_list_url", c.network.stun_list_url);
+        LOAD_OPT(n, "ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds);
+        LOAD_OPT(n, "upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms);
+        LOAD_OPT(n, "peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes);
+    }
+    if (j.contains("transfer")) {
+        const auto& t = j["transfer"];
+        LOAD_OPT(t, "chunk_size", c.transfer.chunk_size);
+        LOAD_OPT(t, "stall_threshold_ms", c.transfer.stall_threshold_ms);
+        LOAD_OPT(t, "zombie_threshold_seconds", c.transfer.zombie_threshold_seconds);
+        LOAD_OPT(t, "receive_timeout_minutes", c.transfer.receive_timeout_minutes);
+        LOAD_OPT(t, "congestion_wait_high_ms", c.transfer.congestion_wait_high_ms);
+        LOAD_OPT(t, "congestion_wait_low_ms", c.transfer.congestion_wait_low_ms);
+        LOAD_OPT(t, "congestion_high_multiplier", c.transfer.congestion_high_multiplier);
+        LOAD_OPT(t, "congestion_threshold", c.transfer.congestion_threshold);
+        LOAD_OPT(t, "speed_update_interval_sec", c.transfer.speed_update_interval_sec);
+        LOAD_OPT(t, "file_open_max_retries", c.transfer.file_open_max_retries);
+        LOAD_OPT(t, "file_open_retry_delay_ms", c.transfer.file_open_retry_delay_ms);
+        LOAD_OPT(t, "max_total_chunks", c.transfer.max_total_chunks);
+        LOAD_OPT(t, "max_path_length", c.transfer.max_path_length);
+        LOAD_OPT(t, "broadcast_file_update_batch_size", c.transfer.broadcast_file_update_batch_size);
+        LOAD_OPT(t, "broadcast_file_delete_batch_size", c.transfer.broadcast_file_delete_batch_size);
+    }
+    if (j.contains("kcp")) {
+        const auto& k = j["kcp"];
+        LOAD_OPT(k, "update_interval_ms", c.kcp.update_interval_ms);
+        LOAD_OPT(k, "window_size", c.kcp.window_size);
+    }
+    if (j.contains("sync")) {
+        const auto& s = j["sync"];
+        LOAD_OPT(s, "session_timeout_seconds", c.sync.session_timeout_seconds);
+        LOAD_OPT(s, "flow_control_threshold", c.sync.flow_control_threshold);
+        LOAD_OPT(s, "flow_control_sleep_ms", c.sync.flow_control_sleep_ms);
+        LOAD_OPT(s, "file_change_debounce_delay_ms", c.sync.file_change_debounce_delay_ms);
+        LOAD_OPT(s, "batch_trigger_threshold", c.sync.batch_trigger_threshold);
+        LOAD_OPT(s, "batch_min_interval_ms", c.sync.batch_min_interval_ms);
+        LOAD_OPT(s, "file_hash_retry_delay_ms", c.sync.file_hash_retry_delay_ms);
+    }
+    if (j.contains("logging")) {
+        const auto& l = j["logging"];
+        LOAD_OPT(l, "libjuice_level", c.logging.libjuice_level);
+        LOAD_OPT(l, "max_file_size_mb", c.logging.max_file_size_mb);
+        LOAD_OPT(l, "max_files", c.logging.max_files);
+        LOAD_OPT(l, "thread_pool_size", c.logging.thread_pool_size);
+    }
+    if (j.contains("webui")) {
+        const auto& w = j["webui"];
+        LOAD_OPT(w, "log_tail_status_bytes", c.webui.log_tail_status_bytes);
+        LOAD_OPT(w, "log_tail_task_bytes", c.webui.log_tail_task_bytes);
+        LOAD_OPT(w, "auth_token_bytes", c.webui.auth_token_bytes);
+        LOAD_OPT(w, "max_description_length", c.webui.max_description_length);
+        LOAD_OPT(w, "max_rules_length", c.webui.max_rules_length);
+    }
+    if (j.contains("llm")) {
+        const auto& l = j["llm"];
+        LOAD_OPT(l, "temperature", c.llm.temperature);
+        LOAD_OPT(l, "max_tokens", c.llm.max_tokens);
+        LOAD_OPT(l, "timeout_seconds", c.llm.timeout_seconds);
+        LOAD_OPT(l, "max_scan_files", c.llm.max_scan_files);
+        LOAD_OPT(l, "large_dir_threshold", c.llm.large_dir_threshold);
+    }
+    if (j.contains("database")) {
+        const auto& d = j["database"];
+        LOAD_OPT(d, "busy_timeout_ms", c.database.busy_timeout_ms);
+    }
+    if (j.contains("advanced")) {
+        const auto& a = j["advanced"];
+        LOAD_OPT(a, "worker_thread_count", c.advanced.worker_thread_count);
+        LOAD_OPT(a, "hash_thread_count", c.advanced.hash_thread_count);
+        LOAD_OPT(a, "hash_read_buffer_size_kb", c.advanced.hash_read_buffer_size_kb);
+        LOAD_OPT(a, "tracker_max_message_length_bytes", c.advanced.tracker_max_message_length_bytes);
+    }
+}
+
+/// nlohmann to_json/from_json 适配（合并两个文件的所有字段）
+inline void to_json(nlohmann::json& j, const Config& c) {
+    // 合并 config 和 advanced 的所有字段到一个 JSON（用于 WebUI API 等需要完整配置的场景）
+    j = config_to_json(c);
+    auto adv = advanced_to_json(c);
+    // 逐组合并（advanced 的字段补充到 config 的同名组中）
+    for (auto& [key, val] : adv.items()) {
+        if (j.contains(key) && j[key].is_object() && val.is_object()) {
+            j[key].update(val);
+        } else {
+            j[key] = val;
+        }
+    }
+}
+
+inline void from_json(const nlohmann::json& j, Config& c) {
+    config_from_json(j, c);
+    advanced_from_json(j, c);
+}
+
+#undef LOAD_OPT
+
+// ═══════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════
 
 /// 端口验证辅助函数（unsigned short 版本，只需检查 > 0）
 inline bool is_valid_port(unsigned short port) { return port > 0; }
@@ -222,11 +467,10 @@ inline std::string get_sync_key_validation_error(const std::string& sync_key) {
     return "";
 }
 
-/// sync_key 验证：仅允许字母/数字/下划线/中划线，且长度 1-64
+/// sync_key 验证
 inline bool is_valid_sync_key(const std::string& sync_key) {
     return get_sync_key_validation_error(sync_key).empty();
 }
-
 
 /// 配置验证：检查所有字段的有效性，返回错误信息列表（空 = 全部通过）
 std::vector<std::string> validate_config(const Config& config);
