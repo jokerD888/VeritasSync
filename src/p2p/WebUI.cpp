@@ -763,8 +763,17 @@ void WebUIServer::setup_nl_filter_routes() {
             }
         }
 
-        // 调用自然语言规则生成器
-        auto result = m_nl_filter.generate(description, existing_rules);
+        // 获取同步目录路径（供 RAG 目录摘要）
+        std::string sync_folder;
+        {
+            std::lock_guard<std::mutex> lock(m_config_mutex);
+            if (idx < m_config.tasks.size()) {
+                sync_folder = m_config.tasks[idx].sync_folder;
+            }
+        }
+
+        // 调用自然语言规则生成器（带目录结构 RAG）
+        auto result = m_nl_filter.generate(description, existing_rules, sync_folder);
 
         nlohmann::json j;
         j["success"] = result.success;
@@ -772,6 +781,7 @@ void WebUIServer::setup_nl_filter_routes() {
             j["rules"] = result.rules;
             j["explanation"] = result.explanation;
             j["source"] = result.source;
+            j["affected_files"] = result.affected_files;
         } else {
             j["error"] = result.error;
         }

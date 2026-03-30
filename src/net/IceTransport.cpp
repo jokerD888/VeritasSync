@@ -2,10 +2,44 @@
 #include "VeritasSync/net/StunProber.h"
 #include "VeritasSync/common/Logger.h"
 
+#include <juice/juice.h>
 #include <boost/asio/post.hpp>
 #include <cstring>
+#include <mutex>
 
 namespace VeritasSync {
+
+// --- libjuice 日志集成（只初始化一次）---
+static std::once_flag s_juice_log_init;
+
+static void init_juice_logging() {
+    std::call_once(s_juice_log_init, []() {
+        juice_set_log_level(JUICE_LOG_LEVEL_INFO);
+        juice_set_log_handler([](juice_log_level_t level, const char* message) {
+            if (!g_logger) return;
+            // 去除 libjuice 日志末尾的换行符
+            std::string msg(message);
+            while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
+                msg.pop_back();
+
+            switch (level) {
+                case JUICE_LOG_LEVEL_VERBOSE:
+                case JUICE_LOG_LEVEL_DEBUG:
+                    g_logger->debug("[libjuice] {}", msg);
+                    break;
+                case JUICE_LOG_LEVEL_INFO:
+                    g_logger->info("[libjuice] {}", msg);
+                    break;
+                case JUICE_LOG_LEVEL_WARN:
+                    g_logger->warn("[libjuice] {}", msg);
+                    break;
+                default:
+                    g_logger->error("[libjuice] {}", msg);
+                    break;
+            }
+        });
+    });
+}
 
 // E-1: 魔数统一为命名常量
 static constexpr size_t SDP_BUFFER_SIZE       = 4096;  // SDP 描述缓冲区大小
@@ -43,6 +77,7 @@ IceTransport::~IceTransport() {
 }
 
 bool IceTransport::initialize(const IceConfig& config) {
+    init_juice_logging();  // 确保 libjuice 日志已初始化
     juice_config_t jconfig = {};
 
     // 【安全】将配置字符串拷贝到成员变量，确保 c_str() 在 agent 生命周期内有效
@@ -206,6 +241,19 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_
     // 1. 通知上层 SDP 已就绪（上层会发送 sdp_offer/sdp_answer）
     if (self->m_callbacks.on_gathering_done) {
         std::string local_desc = self->get_local_description();
+
+        // 【诊断】记录 SDP 中的候选者类型，帮助排查 NAT 穿透问题
+        if (g_logger) {
+            bool has_host = local_desc.find("typ host") != std::string::npos;
+            bool has_srflx = local_desc.find("typ srflx") != std::string::npos;
+            bool has_relay = local_desc.find("typ relay") != std::string::npos;
+            g_logger->info("[ICE] Gathering 完成。候选者类型: host={} srflx={} relay={}",
+                           has_host ? "✓" : "✗", has_srflx ? "✓" : "✗", has_relay ? "✓" : "✗");
+            if (!has_srflx && !has_relay) {
+                g_logger->warn("[ICE] ⚠️ 无 srflx/relay 候选者！STUN 服务器可能不可达，NAT 穿透将失败");
+            }
+        }
+
         self->m_callbacks.on_gathering_done(local_desc);
     }
 

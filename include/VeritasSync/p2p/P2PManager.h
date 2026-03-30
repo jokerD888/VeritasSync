@@ -171,6 +171,10 @@ protected:
     // 【重构】新增：PeerController 回调处理
     void handle_peer_state_changed(const std::string& peer_id, PeerState state);
     void handle_peer_message(const std::string& peer_id, const std::string& message);
+
+    // 【中继回退】ICE 失败时通过 Tracker 中继数据
+    void attempt_relay_fallback(const std::string& peer_id);
+    void handle_relay_data(const std::string& from_peer_id, const uint8_t* data, size_t len);
     
     // 【重构】新增：创建 ICE 配置
     IceConfig create_ice_config() const;

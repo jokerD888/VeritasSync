@@ -301,7 +301,21 @@ void P2PManager::set_state_manager(StateManager* sm) {
     }
 }
 
-void P2PManager::set_tracker_client(TrackerClient* tc) { m_tracker_client = tc; }
+void P2PManager::set_tracker_client(TrackerClient* tc) {
+    m_tracker_client = tc;
+    if (tc) {
+        // 注册中继数据回调：收到 RELAY_DATA 时分发给对应的 PeerController
+        tc->set_relay_callback(
+            [this](const std::string& from, const uint8_t* data, size_t len) {
+                // post 到 io_context 确保线程安全（回调可能来自 TCP 读取线程）
+                boost::asio::post(m_io_context,
+                    [this, self = shared_from_this(), from,
+                     d = std::vector<uint8_t>(data, data + len)]() {
+                        handle_relay_data(from, d.data(), d.size());
+                    });
+            });
+    }
+}
 void P2PManager::set_role(SyncRole role) {
     m_role = role;
     if (m_sync_handler) m_sync_handler->set_role(role);
@@ -653,8 +667,54 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
             }
         }
     } else if (state == PeerState::Failed) {
-        g_logger->warn("[ICE] ❌ 与 {} 连接失败", peer_id);
+        g_logger->warn("[ICE] ❌ 与 {} 连接失败，尝试中继回退...", peer_id);
+        attempt_relay_fallback(peer_id);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 中继回退（ICE 失败时通过 Tracker 中继数据）
+// ═══════════════════════════════════════════════════════════════
+
+void P2PManager::attempt_relay_fallback(const std::string& peer_id) {
+    if (!m_tracker_client || !m_tracker_client->is_connected()) {
+        g_logger->error("[P2PManager] 无法启用中继：Tracker 未连接");
+        return;
+    }
+
+    auto controller = find_peer(peer_id);
+    if (!controller || !controller->is_valid()) {
+        g_logger->error("[P2PManager] 无法启用中继：未找到 PeerController ({})", peer_id);
+        return;
+    }
+
+    // 如果已经在中继模式，跳过
+    if (controller->is_relay_mode()) return;
+
+    auto tc = m_tracker_client;
+    controller->enable_relay_mode(
+        [tc](const std::string& to_peer, const uint8_t* data, size_t len) {
+            if (tc && tc->is_connected()) {
+                tc->send_relay_data(to_peer, data, len);
+            }
+        });
+}
+
+void P2PManager::handle_relay_data(const std::string& from_peer_id,
+                                    const uint8_t* data, size_t len) {
+    auto controller = find_peer(from_peer_id);
+    if (!controller || !controller->is_valid()) {
+        g_logger->warn("[P2PManager] 收到中继数据但未找到对应 Peer: {}", from_peer_id);
+        return;
+    }
+
+    // 如果对端还没有启用中继模式（我们先收到了对方的中继数据），自动启用
+    if (!controller->is_relay_mode()) {
+        g_logger->info("[P2PManager] 收到 {} 的中继数据，自动启用中继模式", from_peer_id);
+        attempt_relay_fallback(from_peer_id);
+    }
+
+    controller->feed_relay_data(data, len);
 }
 
 // 新增：处理 Peer 消息（来自 PeerController 的回调）
@@ -889,16 +949,20 @@ std::vector<P2PManager::PeerInfo> P2PManager::get_peers_info() {
         }
         
         // 转换 IceConnectionType 到字符串
-        switch (controller->get_connection_type()) {
-            case IceConnectionType::Direct:
-                info.connection_type = "direct";
-                break;
-            case IceConnectionType::Relay:
-                info.connection_type = "relay";
-                break;
-            default:
-                info.connection_type = "unknown";
-                break;
+        if (controller->is_relay_mode()) {
+            info.connection_type = "relay (tracker)";
+        } else {
+            switch (controller->get_connection_type()) {
+                case IceConnectionType::Direct:
+                    info.connection_type = "direct";
+                    break;
+                case IceConnectionType::Relay:
+                    info.connection_type = "relay";
+                    break;
+                default:
+                    info.connection_type = "unknown";
+                    break;
+            }
         }
         
         result.push_back(std::move(info));

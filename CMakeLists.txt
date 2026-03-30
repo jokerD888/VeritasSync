@@ -11,6 +11,19 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --- 构建目标选择 ---
+# 可选值: ALL(默认,构建所有), CLIENT(仅客户端), TRACKER(仅Tracker服务器)
+# 使用方式: cmake -DBUILD_TARGET=CLIENT ..
+set(BUILD_TARGET "ALL" CACHE STRING "构建目标: ALL | CLIENT | TRACKER")
+set_property(CACHE BUILD_TARGET PROPERTY STRINGS ALL CLIENT TRACKER)
+
+# 验证参数合法性
+if(NOT BUILD_TARGET MATCHES "^(ALL|CLIENT|TRACKER)$")
+    message(FATAL_ERROR "无效的 BUILD_TARGET: '${BUILD_TARGET}'，可选值: ALL, CLIENT, TRACKER")
+endif()
+
+message(STATUS "构建目标: ${BUILD_TARGET}")
+
 # --- 为Windows平台添加必要的宏定义 ---
 if(WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00) # 将目标平台设置为 Windows 10
@@ -45,8 +58,9 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 
 # ===========================================================
-# 目标 1: veritas_sync (主程序)
+# 目标 1: veritas_sync (主程序) - 仅在 ALL 或 CLIENT 模式下构建
 # ===========================================================
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "CLIENT")
 add_executable(veritas_sync WIN32
     veritas.rc
     src/main.cpp
@@ -113,19 +127,34 @@ target_link_libraries(veritas_sync PRIVATE
     httplib::httplib
     unofficial::sqlite3::sqlite3
 )
+endif() # BUILD_TARGET CLIENT
 
 
 
 # ===========================================================
-# 目标 2: veritas_tracker (服务器程序)
+# 目标 2: veritas_tracker (服务器程序) - 仅在 ALL 或 TRACKER 模式下构建
 # ===========================================================
-add_executable(veritas_tracker 
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "TRACKER")
+add_executable(veritas_tracker
     src/tracker/main.cpp
     src/tracker/Session.cpp
     src/tracker/TrackerServer.cpp
 )
 target_include_directories(veritas_tracker PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
+# --- 为 veritas_tracker 链接库 ---
+target_link_libraries(veritas_tracker PRIVATE
+    Boost::system
+    Boost::asio
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog
+    httplib::httplib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+endif() # BUILD_TARGET TRACKER
+
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "CLIENT")
 add_executable(efsw_test
     src/efsw_test.cpp
 )
@@ -141,34 +170,33 @@ target_include_directories(nat_demo PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(nat_demo PRIVATE
     LibJuice::LibJuice
 )
-
-
-# --- 为 veritas_tracker 链接库 ---
-target_link_libraries(veritas_tracker PRIVATE
-    Boost::system
-    Boost::asio
-    nlohmann_json::nlohmann_json
-    spdlog::spdlog
-    httplib::httplib
-    OpenSSL::SSL
-    OpenSSL::Crypto
-)
+endif() # BUILD_TARGET CLIENT utilities
 
 # ===========================================================
 # 安装规则：自动收集所有依赖DLL并生成发行版
 # ===========================================================
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Installation Directory")
 
-# 安装所有可执行文件到 bin 目录
-install(TARGETS veritas_sync veritas_tracker efsw_test nat_demo
+# 安装所有可执行文件到 bin 目录 (根据构建目标选择)
+set(_INSTALL_TARGETS "")
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "CLIENT")
+    list(APPEND _INSTALL_TARGETS veritas_sync efsw_test nat_demo)
+endif()
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "TRACKER")
+    list(APPEND _INSTALL_TARGETS veritas_tracker)
+endif()
+
+install(TARGETS ${_INSTALL_TARGETS}
     RUNTIME DESTINATION bin
     COMPONENT Runtime
 )
 
+if(BUILD_TARGET STREQUAL "ALL" OR BUILD_TARGET STREQUAL "CLIENT")
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/web"
     DESTINATION bin
     COMPONENT Runtime
 )
+endif()
 
 if(WIN32)
     # 1. 尝试定位 vcpkg 的 bin 目录 (Manifest 模式下，通常在构建目录的 vcpkg_installed 中)

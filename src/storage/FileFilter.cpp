@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Logger.h"
@@ -107,6 +108,49 @@ void FileFilter::load_rules(const std::filesystem::path& root_path) {
 
         // 如果行首 ! 来自转义 \!，则告知 parse_rule 这不是取反规则
         parse_rule(processed, /*is_default=*/false, leading_bang_escaped);
+    }
+}
+
+void FileFilter::load_rules_from_string(const std::string& rules) {
+    std::unique_lock lock(m_mutex);
+
+    // 重置状态
+    m_default_fast.exts.clear();
+    m_default_fast.dirs.clear();
+    m_default_complex.clear();
+    m_user_rules.clear();
+    m_user_fast.exts.clear();
+    m_user_fast.dirs.clear();
+    m_has_negation = false;
+
+    // 加载默认规则
+    for (const auto& pat : kDefaultIgnorePatterns) {
+        parse_rule(pat, /*is_default=*/true);
+    }
+
+    // 逐行解析用户规则
+    std::istringstream iss(rules);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        size_t line_start = line.find_first_not_of(" \t");
+        if (line_start == std::string::npos) continue;
+
+        // 简化处理（不含转义逻辑，dry-run 足够）
+        std::string trimmed = line.substr(line_start);
+        size_t comment_pos = trimmed.find('#');
+        if (comment_pos == 0) continue;  // 注释行
+        if (comment_pos != std::string::npos) trimmed = trimmed.substr(0, comment_pos);
+
+        // 去除尾部空白
+        size_t end = trimmed.find_last_not_of(" \t");
+        if (end == std::string::npos) continue;
+        trimmed = trimmed.substr(0, end + 1);
+
+        if (!trimmed.empty()) {
+            parse_rule(trimmed);
+        }
     }
 }
 

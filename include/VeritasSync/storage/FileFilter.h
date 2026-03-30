@@ -23,6 +23,9 @@ public:
 
     void load_rules(const std::filesystem::path& root_path);
 
+    /// 从字符串加载规则（用于 Dry-Run 等不需要读文件的场景）
+    void load_rules_from_string(const std::string& rules);
+
     // 检查路径是否应该被忽略 (使用 string_view 实现零拷贝)
     // 注意：输入路径应已规范化为使用 '/' 作为分隔符
     bool should_ignore(std::string_view path) const;

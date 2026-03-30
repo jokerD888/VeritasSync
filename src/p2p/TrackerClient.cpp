@@ -4,11 +4,42 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+extern "C" {
+#include <b64/cencode.h>
+#include <b64/cdecode.h>
+}
+
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Logger.h"
 #include "VeritasSync/p2p/P2PManager.h"
 
 namespace VeritasSync {
+
+// --- Base64 编解码辅助函数（用于中继数据通道，使用 libb64 C API）---
+static std::string relay_b64_encode(const uint8_t* data, size_t len) {
+    size_t b64_max = 4 * ((len + 2) / 3) + 4;  // base64 精确上界
+    std::string result(b64_max, '\0');
+    base64_encodestate state;
+    base64_init_encodestate(&state);
+    state.chars_per_line = 0;  // 不插入换行符
+    size_t written = base64_encode_block(
+        reinterpret_cast<const char*>(data), static_cast<int>(len),
+        result.data(), &state);
+    written += base64_encode_blockend(result.data() + written, &state);
+    result.resize(written);
+    return result;
+}
+
+static std::vector<uint8_t> relay_b64_decode(const std::string& encoded) {
+    std::vector<uint8_t> result(encoded.size(), 0);
+    base64_decodestate state;
+    base64_init_decodestate(&state);
+    size_t written = base64_decode_block(
+        encoded.data(), static_cast<int>(encoded.size()),
+        reinterpret_cast<char*>(result.data()), &state);
+    result.resize(written);
+    return result;
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -416,6 +447,20 @@ void TrackerClient::register_handlers() {
             m_p2p_manager->handle_signaling_message(from, signal_type, sdp);
         }
     };
+
+    m_handlers[SignalProto::TYPE_RELAY_DATA] = [this](const nlohmann::json& payload) {
+        try {
+            std::string from_peer = payload.at("from").get<std::string>();
+            std::string b64_data = payload.at("data").get<std::string>();
+
+            std::vector<uint8_t> decoded = relay_b64_decode(b64_data);
+            if (m_relay_callback && !decoded.empty()) {
+                m_relay_callback(from_peer, decoded.data(), decoded.size());
+            }
+        } catch (const std::exception& e) {
+            g_logger->error("[TrackerClient] 处理中继数据失败: {}", e.what());
+        }
+    };
 }
 
 /**
@@ -468,6 +513,30 @@ void TrackerClient::close_socket() {
             self->m_socket.close(ec);
         }
     });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 中继数据通道（ICE 失败时的回退方案）
+// ═══════════════════════════════════════════════════════════════
+
+void TrackerClient::send_relay_data(const std::string& to_peer_id, const uint8_t* data, size_t len) {
+    if (!is_connected()) return;
+
+    std::string b64_data = relay_b64_encode(data, len);
+
+    nlohmann::json msg;
+    msg[SignalProto::MSG_TYPE] = SignalProto::TYPE_RELAY_DATA;
+    msg[SignalProto::MSG_PAYLOAD] = {
+        {"from", m_self_id},
+        {"to", to_peer_id},
+        {"data", b64_data}
+    };
+
+    do_write(msg.dump());
+}
+
+void TrackerClient::set_relay_callback(RelayDataCallback cb) {
+    m_relay_callback = std::move(cb);
 }
 
 }  // namespace VeritasSync

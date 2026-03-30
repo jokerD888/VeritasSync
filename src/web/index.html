@@ -858,6 +858,16 @@
             };
         })();
 
+        // 安全刷新：携带 auth token 重载页面，避免 GET / 时 401 Unauthorized
+        function safeReload() {
+            const token = sessionStorage.getItem('vs_auth_token');
+            if (token) {
+                window.location.href = '/?token=' + encodeURIComponent(token);
+            } else {
+                location.reload();
+            }
+        }
+
         let rawLog = "";
         // 【性能优化】轮询变更检测：只在数据真正变化时更新 DOM
         let _lastStatusJson = "";
@@ -1036,8 +1046,8 @@
                 try { 
                     const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); 
                     const r = await fetch('/api/config', { signal: ctl.signal }); 
-                    if (r.ok) { clearInterval(t); location.reload(); } 
-                } catch (e) { if (c > 30) { clearInterval(t); location.reload(); } } 
+                    if (r.ok) { clearInterval(t); safeReload(); } 
+                } catch (e) { if (c > 30) { clearInterval(t); safeReload(); } } 
             }, 2000); 
         }
 
@@ -1167,19 +1177,21 @@
                     id('nl-explain').textContent = data.explanation || '';
                     id('nl-explain').style.display = data.explanation ? 'block' : 'none';
 
+                    // 显示 Dry-Run 结果
+                    if (data.affected_files !== undefined && data.affected_files > 0) {
+                        id('nl-explain').textContent =
+                            (data.explanation || '') +
+                            (data.explanation ? '\n' : '') +
+                            '📊 预计将忽略本地 ' + data.affected_files + ' 个文件';
+                        id('nl-explain').style.display = 'block';
+                    }
+
                     // 显示来源标签
                     const srcEl = id('nl-source');
-                    if (data.source === 'template') {
-                        srcEl.textContent = '⚡ 本地模板';
-                        srcEl.style.background = 'rgba(16, 185, 129, 0.15)';
-                        srcEl.style.color = '#34d399';
-                        srcEl.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-                    } else {
-                        srcEl.textContent = '🤖 AI 生成';
-                        srcEl.style.background = 'rgba(99, 102, 241, 0.15)';
-                        srcEl.style.color = '#a5b4fc';
-                        srcEl.style.borderColor = 'rgba(99, 102, 241, 0.3)';
-                    }
+                    srcEl.textContent = '🤖 AI 生成';
+                    srcEl.style.background = 'rgba(99, 102, 241, 0.15)';
+                    srcEl.style.color = '#a5b4fc';
+                    srcEl.style.borderColor = 'rgba(99, 102, 241, 0.3)';
 
                     id('nl-preview').classList.add('visible');
                 } else {
@@ -1285,7 +1297,7 @@
                 const err = await resp.json().catch(() => ({}));
                 return alert('添加任务失败: ' + (err.error || resp.statusText));
             }
-            closeModal(); location.reload();
+            closeModal(); safeReload();
         }
 
         // 【UX 修复】删除确认显示任务名，检查响应
@@ -1298,7 +1310,7 @@
                 const err = await resp.json().catch(() => ({}));
                 return alert('删除失败: ' + (err.error || resp.statusText));
             }
-            location.reload();
+            safeReload();
         }
         async function fetchGlobalLog() { const r = await fetch('/api/log'); rawLog = await r.text(); renderLog(); }
         
@@ -1382,7 +1394,13 @@
                 const ledEl = document.querySelector('.led');
                 const statusAddrDiv = document.getElementById('display-tracker-addr'); 
 
-                if (global.tracker_online) {
+                if (nodes.length === 0) {
+                    // 无任务配置 → 黄色中性状态
+                    ledEl.style.background = '#f59e0b';
+                    ledEl.style.boxShadow = '0 0 10px #f59e0b';
+                    statusTextDiv.innerHTML = '<span class="led" style="background:#f59e0b;box-shadow:0 0 10px #f59e0b;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> 未配置任务';
+                    statusTextDiv.style.color = '#f59e0b';
+                } else if (global.tracker_online) {
                     ledEl.style.background = '#10b981'; 
                     ledEl.style.boxShadow = '0 0 10px #10b981';
                     // 使用 innerHTML 替换文本

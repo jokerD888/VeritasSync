@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -10,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/storage/FileFilter.h"
 
 namespace VeritasSync {
 
@@ -40,290 +44,48 @@ bool NLFilterGenerator::has_llm() const {
 // ═══════════════════════════════════════════════════════════════
 
 NLFilterGenerator::Result NLFilterGenerator::generate(
-    const std::string& description, const std::string& existing_rules) const {
-    
-    // 第一层：尝试模板匹配
-    auto result = generate_from_template(description);
-    if (result.success) {
+    const std::string& description, const std::string& existing_rules,
+    const std::string& sync_folder) const {
+
+    if (!has_llm()) {
+        Result result;
+        result.success = false;
+        result.error = "未配置 AI API Key。请在设置页面或 config.json 中填写 llm_api_key 以启用 AI 智能生成。";
         return result;
     }
 
-    // 第二层：回退到 LLM
-    if (has_llm()) {
-        return generate_from_llm(description, existing_rules);
-    }
-
-    // 两层都失败
-    result.success = false;
-    result.error = "无法理解该描述。请尝试更具体的表述，例如：\n"
-                   "  · \"忽略所有日志文件\"\n"
-                   "  · \"忽略 build 目录\"\n"
-                   "  · \"忽略所有图片文件\"\n"
-                   "  · \"忽略 node_modules 和 .git 目录\"";
-    return result;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 第一层：模板引擎
-// ═══════════════════════════════════════════════════════════════
-
-NLFilterGenerator::Result NLFilterGenerator::generate_from_template(const std::string& description) const {
-    std::string normalized = normalize(description);
-    
-    Result result;
-    std::string combined_rules;
-    std::string combined_explanation;
-    int match_count = 0;
-
-    const auto& templates = get_templates();
-
-    // 遍历所有模板，收集所有匹配的规则
-    for (const auto& tmpl : templates) {
-        for (const auto& keyword : tmpl.keywords) {
-            if (contains_keyword(normalized, keyword)) {
-                if (!combined_rules.empty()) {
-                    combined_rules += "\n";
-                    combined_explanation += "；";
-                }
-                combined_rules += tmpl.rules;
-                combined_explanation += tmpl.explanation;
-                ++match_count;
-                break;  // 每个模板最多匹配一次
-            }
-        }
-    }
-
-    // 处理取反（白名单）意图
-    auto exceptions = extract_exceptions(normalized);
-    for (const auto& exc : exceptions) {
-        combined_rules += "\n!" + exc;
-        combined_explanation += "；但保留 " + exc;
-    }
-
-    if (match_count > 0) {
-        result.success = true;
-        result.rules = combined_rules;
-        result.explanation = combined_explanation;
-        result.source = "template";
+    // RAG：扫描同步目录生成结构摘要，让 LLM 了解实际项目结构
+    std::string dir_summary;
+    std::string file_samples;
+    if (!sync_folder.empty()) {
+        dir_summary = build_directory_summary(sync_folder);
+        file_samples = search_relevant_samples(sync_folder, description);
         if (g_logger) {
-            g_logger->info("[NLFilter] 模板匹配成功: {} 条规则, 输入=\"{}\"", match_count, description);
+            g_logger->info("[NLFilter] RAG 上下文: 目录摘要 {} 字符, 文件样本 {} 字符",
+                           dir_summary.size(), file_samples.size());
+        }
+    }
+
+    auto result = generate_from_llm(description, existing_rules, dir_summary + file_samples);
+
+    // Dry-Run：在本地文件树上试跑规则，统计将被忽略的文件数
+    if (result.success && !sync_folder.empty()) {
+        result.affected_files = dry_run_rules(sync_folder, result.rules);
+        if (g_logger) {
+            g_logger->info("[NLFilter] Dry-Run: 规则将影响 {} 个文件", result.affected_files);
         }
     }
 
     return result;
-}
-
-// ─── 内置模板表 ─────────────────────────────────────────────────
-
-const std::vector<NLFilterGenerator::TemplateEntry>& NLFilterGenerator::get_templates() {
-    static const std::vector<TemplateEntry> templates = {
-        // --- 日志文件 ---
-        {{"日志文件", "日志", "log文件", "log", ".log"},
-         "*.log\n*.log.*",
-         "忽略所有日志文件 (*.log, *.log.*)"},
-
-        // --- 临时文件 ---
-        {{"临时文件", "临时", "temp文件", "tmp文件", "temp", "tmp", "备份文件", "备份", "bak"},
-         "*.tmp\n*.temp\n*.bak\n*.swp\n*~\n*.old",
-         "忽略临时文件和备份文件 (*.tmp, *.temp, *.bak, *.swp, *~, *.old)"},
-
-        // --- 编译/构建产物 ---
-        {{"编译", "构建", "build", "编译产物", "构建产物", "编译输出", "构建输出", "编译结果"},
-         "build/\ndist/\nout/\nbin/\nobj/\n*.o\n*.obj\n*.exe\n*.dll\n*.so\n*.dylib\n*.a\n*.lib",
-         "忽略编译和构建产物目录及文件"},
-
-        // --- 图片文件 ---
-        {{"图片", "图像", "图片文件", "image", "图像文件", "照片"},
-         "*.jpg\n*.jpeg\n*.png\n*.gif\n*.bmp\n*.webp\n*.svg\n*.ico\n*.tiff\n*.tif",
-         "忽略常见图片格式文件"},
-
-        // --- 视频文件 ---
-        {{"视频", "视频文件", "video", "影片", "电影"},
-         "*.mp4\n*.avi\n*.mkv\n*.mov\n*.wmv\n*.flv\n*.webm\n*.m4v",
-         "忽略常见视频格式文件"},
-
-        // --- 音频文件 ---
-        {{"音频", "音频文件", "audio", "音乐", "声音"},
-         "*.mp3\n*.wav\n*.flac\n*.aac\n*.ogg\n*.wma\n*.m4a",
-         "忽略常见音频格式文件"},
-
-        // --- 压缩文件 ---
-        {{"压缩", "压缩文件", "archive", "压缩包", "归档"},
-         "*.zip\n*.rar\n*.7z\n*.tar\n*.gz\n*.bz2\n*.xz\n*.tar.gz\n*.tar.bz2",
-         "忽略压缩和归档文件"},
-
-        // --- Node.js ---
-        {{"node_modules", "npm", "yarn", "node依赖", "前端依赖", "nodejs"},
-         "node_modules/\npackage-lock.json\nyarn.lock\n.npm/",
-         "忽略 Node.js 依赖目录和锁文件"},
-
-        // --- Python ---
-        {{"python缓存", "pycache", "__pycache__", "pyc", "python编译", "虚拟环境", "venv"},
-         "__pycache__/\n*.pyc\n*.pyo\n*.pyd\nvenv/\n.venv/\n*.egg-info/",
-         "忽略 Python 缓存、编译文件和虚拟环境"},
-
-        // --- Java ---
-        {{"java编译", "class文件", "target目录", "maven", "gradle"},
-         "target/\n*.class\n*.jar\n*.war\n.gradle/\nbuild/",
-         "忽略 Java/Maven/Gradle 构建产物"},
-
-        // --- IDE/编辑器 ---
-        {{"ide配置", "编辑器配置", "ide", ".idea", ".vscode", "vs配置", "编辑器"},
-         ".idea/\n.vscode/\n*.suo\n*.user\n*.sln.docstates\n.vs/\n*.swp\n*.swo\n*~",
-         "忽略 IDE 和编辑器配置文件"},
-
-        // --- macOS ---
-        {{"macos", "ds_store", ".ds_store", "苹果系统"},
-         ".DS_Store\n._*\n.Spotlight-V100\n.Trashes",
-         "忽略 macOS 系统生成文件"},
-
-        // --- Windows ---
-        {{"windows系统", "thumbs.db", "desktop.ini", "windows缩略图"},
-         "Thumbs.db\ndesktop.ini\nehthumbs.db\n$RECYCLE.BIN/",
-         "忽略 Windows 系统生成文件"},
-
-        // --- 文档 ---
-        {{"文档", "doc文件", "文档文件", "word", "excel", "ppt", "办公文档"},
-         "*.doc\n*.docx\n*.xls\n*.xlsx\n*.ppt\n*.pptx\n*.pdf",
-         "忽略办公文档文件 (Word, Excel, PPT, PDF)"},
-
-        // --- 大文件 ---
-        {{"大文件", "二进制", "二进制文件"},
-         "*.iso\n*.dmg\n*.img\n*.vmdk\n*.vdi\n*.bin",
-         "忽略常见大型二进制文件 (ISO, 磁盘镜像等)"},
-
-        // --- 数据库文件 ---
-        {{"数据库", "数据库文件", "db文件", "sqlite"},
-         "*.db\n*.sqlite\n*.sqlite3\n*.mdb",
-         "忽略数据库文件"},
-
-        // --- 缓存 ---
-        {{"缓存", "cache", "缓存文件", "缓存目录"},
-         ".cache/\n*.cache\ncache/",
-         "忽略缓存目录和文件"},
-
-        // --- 环境配置/密钥 ---
-        {{"环境变量", "env文件", ".env", "密钥", "secret", "私钥", "证书"},
-         ".env\n.env.*\n*.pem\n*.key\n*.crt\n*.p12\n*.pfx",
-         "忽略环境变量文件和密钥证书文件"},
-
-        // --- Git ---
-        {{"git", ".git", "git目录", "gitignore"},
-         ".git/\n.gitignore",
-         "忽略 Git 版本控制目录"},
-
-        // --- 所有隐藏文件 ---
-        {{"隐藏文件", "点文件", "dotfile"},
-         ".*",
-         "忽略所有隐藏文件和目录（以 . 开头的文件）"},
-    };
-
-    return templates;
-}
-
-// ─── 文本工具函数 ───────────────────────────────────────────────
-
-std::string NLFilterGenerator::normalize(const std::string& text) {
-    std::string result;
-    result.reserve(text.size());
-
-    bool last_was_space = false;
-    for (unsigned char ch : text) {
-        if (ch >= 'A' && ch <= 'Z') {
-            // ASCII 大写转小写
-            result += static_cast<char>(ch + 32);
-            last_was_space = false;
-        } else if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
-            // 合并多余空白
-            if (!last_was_space && !result.empty()) {
-                result += ' ';
-                last_was_space = true;
-            }
-        } else {
-            result += static_cast<char>(ch);
-            last_was_space = false;
-        }
-    }
-
-    // 去除尾部空白
-    while (!result.empty() && result.back() == ' ') {
-        result.pop_back();
-    }
-
-    return result;
-}
-
-bool NLFilterGenerator::contains_keyword(const std::string& text, const std::string& keyword) {
-    // 对于中文关键词（含多字节字符），直接做子串匹配
-    // 对于纯 ASCII 关键词，做大小写不敏感匹配
-    std::string lower_keyword = normalize(keyword);
-
-    // 子串搜索
-    return text.find(lower_keyword) != std::string::npos;
-}
-
-std::vector<std::string> NLFilterGenerator::extract_exceptions(const std::string& text) {
-    std::vector<std::string> exceptions;
-    
-    // 匹配常见的取反模式：
-    //   "但保留 xxx"、"但是保留 xxx"、"除了 xxx"、"排除 xxx 以外"
-    //   "不包括 xxx"、"xxx 除外"
-    // 这些模式中的 xxx 通常是文件名或通配符模式
-    
-    // 简化版：提取 "但保留"/"除了"/"不包括" 后跟的文件名模式
-    static const std::vector<std::string> exception_prefixes = {
-        "但保留", "但是保留", "除了", "不包括", "不要忽略", "保留",
-        "except", "but keep", "exclude"
-    };
-
-    std::string normalized = normalize(text);
-
-    for (const auto& prefix : exception_prefixes) {
-        auto pos = normalized.find(prefix);
-        if (pos == std::string::npos) continue;
-
-        // 提取 prefix 后面的内容
-        std::string after = normalized.substr(pos + prefix.size());
-        
-        // 去除前导空白
-        size_t start = 0;
-        while (start < after.size() && after[start] == ' ') ++start;
-        after = after.substr(start);
-
-        if (after.empty()) continue;
-
-        // 提取文件名模式（到下一个中文标点或句尾）
-        std::string pattern;
-        for (size_t i = 0; i < after.size(); ++i) {
-            unsigned char ch = static_cast<unsigned char>(after[i]);
-            // 遇到中文标点或常见分隔符时停止
-            if (ch == ',' || ch == ';' || ch == '\n') break;
-            // 检测 UTF-8 中文标点（简化：遇到某些终止模式停止）
-            if (i + 2 < after.size() && ch == 0xEF) break;  // 全角标点起始字节
-            pattern += after[i];
-        }
-
-        // 去除尾部空白
-        while (!pattern.empty() && pattern.back() == ' ') {
-            pattern.pop_back();
-        }
-
-        if (!pattern.empty()) {
-            // 如果用户说的是纯文件名（没有通配符），原样保留
-            // 用户可能说 "error.log" 或 "*.important"
-            exceptions.push_back(pattern);
-        }
-    }
-
-    return exceptions;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 第二层：LLM API 调用
+// LLM API 调用
 // ═══════════════════════════════════════════════════════════════
 
 NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
-    const std::string& description, const std::string& existing_rules) const {
+    const std::string& description, const std::string& existing_rules,
+    const std::string& dir_summary) const {
     
     Result result;
     LLMConfig config;
@@ -391,15 +153,16 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
         cli.set_bearer_token_auth(config.api_key);
 
         // 构建请求体
-        std::string prompt = build_llm_prompt(description, existing_rules);
+        std::string prompt = build_llm_prompt(description, existing_rules, dir_summary);
         nlohmann::json request_body = {
-            {"model", config.model.empty() ? "deepseek-chat" : config.model},
+            {"model", config.model.empty() ? "qwen-turbo" : config.model},
             {"messages", {{
                 {"role", "user"},
                 {"content", prompt}
             }}},
             {"temperature", 0.3},
-            {"max_tokens", 1024}
+            {"max_tokens", 1024},
+            {"response_format", {{"type", "json_object"}}}
         };
 
         if (g_logger) {
@@ -438,29 +201,29 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
             return result;
         }
 
-        // 提取规则
-        std::string rules = extract_rules_from_response(content);
-        if (rules.empty()) {
+        // 提取规则（JSON 结构化解析）
+        auto parsed = extract_rules_from_response(content);
+        if (parsed.rules.empty()) {
             result.success = false;
             result.error = "LLM 未生成有效的过滤规则";
             return result;
         }
 
         // 验证规则合法性
-        if (!validate_rules(rules)) {
+        if (!validate_rules(parsed.rules)) {
             result.success = false;
             result.error = "LLM 生成的规则格式无效";
             return result;
         }
 
         result.success = true;
-        result.rules = rules;
-        result.explanation = "由 AI 根据描述自动生成";
+        result.rules = parsed.rules;
+        result.explanation = parsed.explanation;
         result.source = "llm";
 
         if (g_logger) {
-            g_logger->info("[NLFilter] LLM 生成成功: 输入=\"{}\", 规则行数={}", 
-                description, std::count(rules.begin(), rules.end(), '\n') + 1);
+            g_logger->info("[NLFilter] LLM 生成成功: 输入=\"{}\", 规则行数={}",
+                description, std::count(parsed.rules.begin(), parsed.rules.end(), '\n') + 1);
         }
 
     } catch (const std::exception& e) {
@@ -473,8 +236,9 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
 }
 
 std::string NLFilterGenerator::build_llm_prompt(
-    const std::string& description, const std::string& existing_rules) {
-    
+    const std::string& description, const std::string& existing_rules,
+    const std::string& dir_summary) {
+
     std::string prompt = R"(你是一个文件同步工具的过滤规则生成助手。用户会用自然语言描述想要忽略的文件，你需要生成 .gitignore 兼容格式的过滤规则。
 
 ## 规则语法（.gitignore 兼容）：
@@ -487,14 +251,20 @@ std::string NLFilterGenerator::build_llm_prompt(
 - `#` 开头表示注释
 - 前导 `/` 表示从根目录开始匹配
 
-## 要求：
-1. 只输出过滤规则，每行一条
-2. 可以添加 # 注释来解释每组规则的用途
-3. 不要输出其他任何解释性文字
-4. 把规则放在 ```rules ... ``` 代码块中
+## 输出格式要求（最高优先级）：
+1. 你必须且只能输出一个合法的 JSON 对象
+2. 绝对不要输出任何解释性文字
+3. JSON 结构如下：
+{"rules": ["第一条规则", "第二条规则"], "explanation": "简要说明"}
+4. rules 数组中每个元素是一条独立的忽略规则
 5. 不要重复已有的规则
+6. 根据项目实际目录结构生成精准规则，不要生成项目中不存在的目录或文件类型的规则
 
 )";
+
+    if (!dir_summary.empty()) {
+        prompt += "## 项目目录结构：\n```\n" + dir_summary + "\n```\n\n";
+    }
 
     if (!existing_rules.empty()) {
         prompt += "## 用户已有的规则：\n```\n" + existing_rules + "\n```\n\n";
@@ -505,47 +275,75 @@ std::string NLFilterGenerator::build_llm_prompt(
     return prompt;
 }
 
-std::string NLFilterGenerator::extract_rules_from_response(const std::string& response) {
-    // 尝试从 ```rules ... ``` 或 ``` ... ``` 代码块中提取
-    std::string result;
-    
-    // 查找代码块
-    size_t block_start = std::string::npos;
-    size_t block_end = std::string::npos;
+NLFilterGenerator::ParsedResponse NLFilterGenerator::extract_rules_from_response(const std::string& response) {
+    ParsedResponse parsed;
 
-    // 尝试匹配 ```rules 或 ```gitignore 或 ``` 
-    std::vector<std::string> markers = {"```rules", "```gitignore", "```"};
-    for (const auto& marker : markers) {
-        auto pos = response.find(marker);
-        if (pos != std::string::npos) {
-            // 跳过该行（到换行符后）
-            block_start = response.find('\n', pos);
-            if (block_start != std::string::npos) {
-                ++block_start;
-                // 找到结束的 ```
-                block_end = response.find("```", block_start);
-                if (block_end != std::string::npos) {
-                    result = response.substr(block_start, block_end - block_start);
-                    break;
+    // === JSON 大括号提取法（Brace Extraction）===
+    // 无论 LLM 在 JSON 前后加了什么废话，{ } 的边界是确定的
+    size_t start = response.find_first_of('{');
+    size_t end = response.find_last_of('}');
+
+    if (start != std::string::npos && end != std::string::npos && start < end) {
+        std::string json_str = response.substr(start, end - start + 1);
+
+        try {
+            auto j = nlohmann::json::parse(json_str);
+
+            // 提取 rules 数组
+            if (j.contains("rules") && j["rules"].is_array()) {
+                std::ostringstream oss;
+                for (const auto& item : j["rules"]) {
+                    if (item.is_string()) {
+                        std::string rule = item.get<std::string>();
+                        if (!rule.empty()) {
+                            if (!oss.str().empty()) oss << "\n";
+                            oss << rule;
+                        }
+                    }
                 }
+                parsed.rules = oss.str();
             }
+
+            // 提取 explanation
+            if (j.contains("explanation") && j["explanation"].is_string()) {
+                parsed.explanation = j["explanation"].get<std::string>();
+            }
+
+            if (!parsed.rules.empty()) return parsed;
+        } catch (const nlohmann::json::parse_error&) {
+            // JSON 解析失败，落入下方 fallback
+            if (g_logger) g_logger->warn("[NLFilter] JSON 解析失败，尝试 fallback 提取");
         }
     }
 
-    // 如果没有代码块，尝试直接使用整个响应
-    if (result.empty()) {
-        result = response;
+    // === Fallback：逐行过滤 ===
+    // 某些旧模型不支持 json_object 模式，可能输出纯文本
+    std::istringstream iss(response);
+    std::string line;
+    std::ostringstream cleaned;
+    while (std::getline(iss, line)) {
+        size_t s = line.find_first_not_of(" \t\r");
+        if (s == std::string::npos) continue;
+        char first = line[s];
+        // 规则行特征：以 * . / ! # [ 或 ASCII 字母开头，且不含中文
+        if (first == '*' || first == '.' || first == '/' || first == '!' ||
+            first == '#' || first == '[' || std::isalpha(static_cast<unsigned char>(first))) {
+            bool has_multibyte = false;
+            for (size_t i = s; i < line.size() && i < s + 30; ++i) {
+                if (static_cast<unsigned char>(line[i]) > 0x7F) { has_multibyte = true; break; }
+            }
+            if (!has_multibyte) {
+                if (!cleaned.str().empty()) cleaned << "\n";
+                cleaned << line.substr(s);
+            }
+        }
+    }
+    parsed.rules = cleaned.str();
+    if (parsed.explanation.empty()) {
+        parsed.explanation = "由 AI 根据描述自动生成";
     }
 
-    // 清理：去除空行首尾
-    while (!result.empty() && (result.front() == '\n' || result.front() == '\r')) {
-        result.erase(result.begin());
-    }
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
-        result.pop_back();
-    }
-
-    return result;
+    return parsed;
 }
 
 bool NLFilterGenerator::validate_rules(const std::string& rules) {
@@ -580,6 +378,362 @@ bool NLFilterGenerator::validate_rules(const std::string& rules) {
     }
 
     return valid_rules > 0;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RAG：目录结构摘要生成
+// ═══════════════════════════════════════════════════════════════
+
+std::string NLFilterGenerator::build_directory_summary(const std::string& root_path, size_t max_chars) {
+    namespace fs = std::filesystem;
+
+    // 按目录聚合：每个目录的文件数量和扩展名集合
+    struct DirInfo {
+        size_t file_count = 0;
+        std::map<std::string, size_t> ext_counts;  // 扩展名 → 数量
+    };
+    std::map<std::string, DirInfo> dirs;  // 相对目录路径 → 信息
+
+    try {
+        fs::path root(root_path);
+        if (!fs::exists(root) || !fs::is_directory(root)) return "";
+
+        size_t total_files = 0;
+        constexpr size_t MAX_SCAN_FILES = 50000;  // 防止超大目录卡住
+
+        for (auto it = fs::recursive_directory_iterator(
+                 root, fs::directory_options::skip_permission_denied);
+             it != fs::recursive_directory_iterator(); ++it) {
+
+            if (total_files >= MAX_SCAN_FILES) break;
+
+            // 跳过 .git 和 .veritas.db 等内部文件
+            const auto& p = it->path();
+            std::string filename = p.filename().string();
+            if (filename == ".git" || filename == ".veritas.db") {
+                it.disable_recursion_pending();
+                continue;
+            }
+
+            if (!it->is_regular_file()) continue;
+            ++total_files;
+
+            // 计算相对目录路径
+            auto rel = fs::relative(p.parent_path(), root).string();
+            if (rel == ".") rel = "(root)";
+            // 统一路径分隔符
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+
+            // 提取扩展名
+            // 注意：.gitignore 等以点开头的隐藏文件，extension() 行为不一致
+            // 有些平台返回 "" (整个是 stem)，有些返回 ".gitignore" (整个是 extension)
+            std::string fname_str = p.filename().string();
+            std::string ext;
+            if (fname_str.size() > 1 && fname_str[0] == '.') {
+                // 以点开头的隐藏文件：如果除了前导点之外还有扩展名则取之，否则归入 (dotfile)
+                auto dot_pos = fname_str.find('.', 1);
+                ext = (dot_pos != std::string::npos) ? fname_str.substr(dot_pos) : "(dotfile)";
+            } else {
+                ext = p.extension().string();
+                if (ext.empty()) ext = "(no ext)";
+            }
+
+            dirs[rel].file_count++;
+            dirs[rel].ext_counts[ext]++;
+        }
+
+        if (dirs.empty()) return "(empty directory)";
+
+        // 输出策略：浅层目录优先，大目录折叠
+        // 按目录深度排序（浅层优先），同深度按文件数降序
+        std::vector<std::pair<std::string, DirInfo>> sorted_dirs(dirs.begin(), dirs.end());
+        std::sort(sorted_dirs.begin(), sorted_dirs.end(),
+            [](const auto& a, const auto& b) {
+                // 计算路径深度（/ 的数量）
+                auto depth = [](const std::string& s) {
+                    return std::count(s.begin(), s.end(), '/');
+                };
+                int da = depth(a.first), db = depth(b.first);
+                if (da != db) return da < db;  // 浅层优先
+                return a.second.file_count > b.second.file_count;  // 同深度按文件数降序
+            });
+
+        // 格式化输出
+        std::ostringstream oss;
+        oss << "Total: " << total_files << " files";
+        if (total_files >= MAX_SCAN_FILES) oss << "+ (truncated)";
+        oss << "\n\n";
+
+        constexpr size_t LARGE_DIR_THRESHOLD = 500;  // 超过此数量的目录折叠显示
+
+        for (const auto& [dir, info] : sorted_dirs) {
+            // 检查长度限制
+            if (oss.str().size() > max_chars) {
+                oss << "... (truncated, too many directories)\n";
+                break;
+            }
+
+            // 大目录折叠：只显示一行摘要，不列扩展名细节
+            if (info.file_count > LARGE_DIR_THRESHOLD) {
+                oss << dir << "/  " << info.file_count << " files [large dir]\n";
+                continue;
+            }
+
+            oss << dir << "/  " << info.file_count << " files (";
+
+            // 按数量降序列出扩展名
+            std::vector<std::pair<size_t, std::string>> sorted_exts;
+            for (const auto& [ext, cnt] : info.ext_counts) {
+                sorted_exts.emplace_back(cnt, ext);
+            }
+            std::sort(sorted_exts.rbegin(), sorted_exts.rend());
+
+            // 最多显示 5 种扩展名
+            size_t shown = 0;
+            for (const auto& [cnt, ext] : sorted_exts) {
+                if (shown > 0) oss << ", ";
+                if (shown >= 5) { oss << "..."; break; }
+                oss << ext;
+                if (cnt > 1) oss << "×" << cnt;
+                ++shown;
+            }
+            oss << ")\n";
+        }
+
+        return oss.str();
+
+    } catch (const std::exception& e) {
+        if (g_logger) g_logger->warn("[NLFilter] 扫描目录失败: {}", e.what());
+        return "";
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RAG：关键词采样 — 从用户描述中提取关键词，搜索匹配文件样本
+// ═══════════════════════════════════════════════════════════════
+
+std::string NLFilterGenerator::search_relevant_samples(
+    const std::string& root_path, const std::string& description, size_t max_samples) {
+    namespace fs = std::filesystem;
+
+    // 1. 从用户描述中提取搜索关键词
+    //    常见模式：test, build, log, cache, temp, doc, image, video, config 等
+    //    同时处理中文关键词到英文的映射
+    static const std::vector<std::pair<std::string, std::vector<std::string>>> keyword_map = {
+        {"test",   {"test", "测试", "spec", "mock"}},
+        {"build",  {"build", "编译", "构建", "dist", "output", "产物"}},
+        {"log",    {"log", "日志"}},
+        {"cache",  {"cache", "缓存"}},
+        {"temp",   {"temp", "tmp", "临时"}},
+        {"doc",    {"doc", "文档", "readme"}},
+        {"config", {"config", "配置", "conf", "setting"}},
+        {"image",  {"image", "图片", "img", "图像", "照片"}},
+        {"video",  {"video", "视频"}},
+        {"font",   {"font", "字体"}},
+    };
+
+    // 小写化描述
+    std::string desc_lower;
+    desc_lower.reserve(description.size());
+    for (unsigned char c : description) {
+        if (c >= 'A' && c <= 'Z') desc_lower += static_cast<char>(c + 32);
+        else desc_lower += static_cast<char>(c);
+    }
+
+    // 收集匹配的搜索关键词
+    std::vector<std::string> search_terms;
+    for (const auto& [term, triggers] : keyword_map) {
+        for (const auto& trigger : triggers) {
+            if (desc_lower.find(trigger) != std::string::npos) {
+                search_terms.push_back(term);
+                break;
+            }
+        }
+    }
+
+    // 如果没有匹配到预定义关键词，把用户描述中的英文单词都作为搜索词
+    if (search_terms.empty()) {
+        std::string word;
+        for (char c : desc_lower) {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.') {
+                word += c;
+            } else {
+                if (word.size() >= 3) search_terms.push_back(word);
+                word.clear();
+            }
+        }
+        if (word.size() >= 3) search_terms.push_back(word);
+    }
+
+    if (search_terms.empty()) return "";
+
+    // 2. 扫描文件树，搜索匹配的路径
+    std::vector<std::string> matched_paths;
+    std::vector<std::string> unmatched_siblings;  // 同目录下不匹配的文件（用于对比）
+
+    try {
+        fs::path root(root_path);
+        if (!fs::exists(root)) return "";
+
+        constexpr size_t MAX_SCAN = 50000;
+        size_t scanned = 0;
+        std::set<std::string> matched_dirs;  // 记录匹配文件所在的目录
+
+        for (auto it = fs::recursive_directory_iterator(
+                 root, fs::directory_options::skip_permission_denied);
+             it != fs::recursive_directory_iterator(); ++it) {
+
+            if (scanned >= MAX_SCAN) break;
+
+            const auto& p = it->path();
+            std::string fname = p.filename().string();
+            if (fname == ".git" || fname == ".veritas.db") {
+                it.disable_recursion_pending();
+                continue;
+            }
+
+            if (!it->is_regular_file()) continue;
+            ++scanned;
+
+            auto rel = fs::relative(p, root).string();
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+
+            // 小写化路径用于匹配
+            std::string rel_lower;
+            rel_lower.reserve(rel.size());
+            for (unsigned char c : rel) {
+                rel_lower += (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : static_cast<char>(c);
+            }
+
+            // 检查路径是否包含任一搜索词
+            bool matches = false;
+            for (const auto& term : search_terms) {
+                if (rel_lower.find(term) != std::string::npos) {
+                    matches = true;
+                    break;
+                }
+            }
+
+            if (matches && matched_paths.size() < max_samples) {
+                matched_paths.push_back(rel);
+                // 记录所在目录
+                auto parent = fs::relative(p.parent_path(), root).string();
+                std::replace(parent.begin(), parent.end(), '\\', '/');
+                matched_dirs.insert(parent);
+            }
+        }
+
+        // 3. 从匹配文件所在的目录中找几个不匹配的文件（给 LLM 做对比参考）
+        if (!matched_dirs.empty()) {
+            for (auto it = fs::recursive_directory_iterator(
+                     root, fs::directory_options::skip_permission_denied);
+                 it != fs::recursive_directory_iterator(); ++it) {
+
+                if (!it->is_regular_file()) continue;
+
+                auto parent = fs::relative(it->path().parent_path(), root).string();
+                std::replace(parent.begin(), parent.end(), '\\', '/');
+
+                if (matched_dirs.count(parent)) {
+                    auto rel = fs::relative(it->path(), root).string();
+                    std::replace(rel.begin(), rel.end(), '\\', '/');
+
+                    // 确认这个文件不在匹配列表中
+                    bool is_matched = false;
+                    for (const auto& m : matched_paths) {
+                        if (m == rel) { is_matched = true; break; }
+                    }
+
+                    if (!is_matched && unmatched_siblings.size() < 5) {
+                        unmatched_siblings.push_back(rel);
+                    }
+                }
+
+                if (unmatched_siblings.size() >= 5) break;
+            }
+        }
+
+    } catch (const std::exception& e) {
+        if (g_logger) g_logger->warn("[NLFilter] 文件采样失败: {}", e.what());
+        return "";
+    }
+
+    if (matched_paths.empty()) return "";
+
+    // 4. 格式化输出
+    std::ostringstream oss;
+    oss << "\n## 与用户需求相关的文件样本（本地搜索 \"";
+    for (size_t i = 0; i < search_terms.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << search_terms[i];
+    }
+    oss << "\"）：\n";
+
+    oss << "匹配的文件 (应被忽略规则覆盖):\n";
+    for (const auto& p : matched_paths) {
+        oss << "  ✓ " << p << "\n";
+    }
+
+    if (!unmatched_siblings.empty()) {
+        oss << "同目录下不匹配的文件 (不应被误伤):\n";
+        for (const auto& p : unmatched_siblings) {
+            oss << "  ✗ " << p << "\n";
+        }
+    }
+
+    return oss.str();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Dry-Run：用生成的规则在文件树上试跑
+// ═══════════════════════════════════════════════════════════════
+
+size_t NLFilterGenerator::dry_run_rules(const std::string& root_path, const std::string& rules) {
+    namespace fs = std::filesystem;
+
+    try {
+        fs::path root(root_path);
+        if (!fs::exists(root)) return 0;
+
+        // 用 FileFilter 加载规则（纯内存操作，不读写文件）
+        FileFilter filter;
+        filter.load_rules_from_string(rules);
+
+        // 遍历文件树，统计匹配数量
+        size_t count = 0;
+        constexpr size_t MAX_SCAN = 50000;
+        size_t scanned = 0;
+
+        for (auto it = fs::recursive_directory_iterator(
+                 root, fs::directory_options::skip_permission_denied);
+             it != fs::recursive_directory_iterator(); ++it) {
+
+            if (scanned >= MAX_SCAN) break;
+
+            const auto& p = it->path();
+            std::string fname = p.filename().string();
+            if (fname == ".git" || fname == ".veritas.db") {
+                it.disable_recursion_pending();
+                continue;
+            }
+
+            if (!it->is_regular_file()) continue;
+            ++scanned;
+
+            auto rel = fs::relative(p, root).string();
+            std::replace(rel.begin(), rel.end(), '\\', '/');
+
+            if (filter.should_ignore(rel)) {
+                ++count;
+            }
+        }
+
+        return count;
+
+    } catch (const std::exception& e) {
+        if (g_logger) g_logger->warn("[NLFilter] Dry-run 失败: {}", e.what());
+        return 0;
+    }
 }
 
 }  // namespace VeritasSync

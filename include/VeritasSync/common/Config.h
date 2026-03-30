@@ -74,9 +74,9 @@ struct Config {
     // ----------------------------
 
     // --- LLM API 配置（用于自然语言生成过滤规则，可选）---
-    std::string llm_api_url;                    // API 端点（如 https://api.deepseek.com）
-    std::string llm_api_key;                    // API 密钥
-    std::string llm_model = "deepseek-chat";    // 模型名称
+    std::string llm_api_url = "https://dashscope.aliyuncs.com/compatible-mode";  // 默认阿里百炼 OpenAI 兼容端点
+    std::string llm_api_key;                    // API 密钥（需用户在 config.json 中填写）
+    std::string llm_model = "qwen-turbo";       // 默认使用通义千问 Turbo
     // ----------------------------
 
     std::vector<SyncTask> tasks;

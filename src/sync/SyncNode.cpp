@@ -222,14 +222,30 @@ bool SyncNode::start() {
     }
 
     // 配置 Multi-STUN Probing（额外 STUN 服务器并行探测）
-    if (m_global_config.enable_multi_stun_probing && !m_global_config.extra_stun_servers.empty()) {
+    if (m_global_config.enable_multi_stun_probing) {
         std::vector<std::pair<std::string, uint16_t>> servers;
-        servers.reserve(m_global_config.extra_stun_servers.size());
-        for (const auto& s : m_global_config.extra_stun_servers) {
-            servers.emplace_back(s.host, s.port);
+
+        if (!m_global_config.extra_stun_servers.empty()) {
+            // 使用用户配置的 STUN 列表
+            servers.reserve(m_global_config.extra_stun_servers.size());
+            for (const auto& s : m_global_config.extra_stun_servers) {
+                servers.emplace_back(s.host, s.port);
+            }
+        } else {
+            // 用户未配置额外 STUN → 使用内置默认列表，提高 NAT 穿透成功率
+            servers = {
+                {"stun1.l.google.com",        19302},
+                {"stun2.l.google.com",        19302},
+                {"stun.stunprotocol.org",     3478},
+                {"stun.nextcloud.com",        443},
+                {"stun.miwifi.com",           3478},
+            };
+            g_logger->info("[Config] 使用内置默认 STUN 服务器列表 ({} 个)", servers.size());
         }
+
         p2p->set_extra_stun_servers(std::move(servers), true);
-        g_logger->info("[Config] Multi-STUN Probing 启用，{} 个额外 STUN 服务器", m_global_config.extra_stun_servers.size());
+        g_logger->info("[Config] Multi-STUN Probing 启用，{} 个额外 STUN 服务器",
+                       m_global_config.extra_stun_servers.empty() ? 5 : m_global_config.extra_stun_servers.size());
     }
 
     // 7. 创建 StateManager（可能抛出异常，需要捕获）

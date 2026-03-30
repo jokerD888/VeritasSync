@@ -26,9 +26,10 @@
 
 ### 🚀 高性能网络传输
 * **可靠 UDP (KCP)**: 基于 ARQ 机制的可靠 UDP 传输，在丢包率较高的弱网环境下，吞吐量和延迟表现远优于传统 TCP。
-* **智能 NAT 穿透 (ICE)**: 集成 **LibJuice** (STUN/TURN)，支持 Full Cone、Restricted Cone 等多种 NAT 类型穿透。自动探测最佳路径（P2P 直连优先，Relay 中继保底）。
+* **智能 NAT 穿透 (ICE)**: 集成 **LibJuice** (STUN/TURN)，支持 Full Cone、Restricted Cone、Port Restricted Cone 等多种 NAT 类型穿透。自动探测最佳路径（P2P 直连优先，Relay 中继保底）。
 * **断点续传**: 支持传输中断后自动恢复，基于 bitmap 跟踪已接收分块，确保连续性校验后准确恢复。
-* **🚧 多 STUN 探测 (计划中)**: 针对双 WAN 负载均衡路由器场景——同一设备的不同连接可能被分配到不同公网 IP，单次 STUN 探测只能发现其中一条线路。计划支持配置多个 STUN 服务器并行探测，收集所有线路的 reflexive candidate，提高双宽带环境下的穿透成功率。
+* **多 STUN 并行探测**: 内置 5 个公共 STUN 服务器并行探测，收集多条线路的 reflexive candidate，显著提高 NAT3+NAT3 等复杂环境下的穿透成功率。支持自定义 STUN 列表。
+* **Tracker 中继回退**: 当 ICE 直连失败时（如对称 NAT），自动通过 Tracker TCP 信令连接中继数据，确保极端网络环境下仍能同步。
 
 ### 🔄 灵活的同步逻辑
 * **双向同步 (Bi-Directional)**: 支持多端互相同步，内置 **源头回声抑制 (Source-side Echo Suppression)** 算法，从源头阻止回声广播，节省带宽。
@@ -50,16 +51,17 @@
 * **传输监控**: 实时显示活跃传输的进度条、速度、分块状态；支持停滞检测。
 * **P2P 连接详情**: 显示每个对等点的连接类型（直连/中继）、连接时长、状态。
 * **系统托盘集成**: 原生 Windows 托盘支持，支持开机自启、后台静默运行。
-* **AI 忽略规则生成**: 支持用自然语言描述需要忽略的文件，自动生成 `.veritasignore` 规则（内置模板引擎 + 可选 LLM 后端）。
+* **AI 忽略规则生成**: 支持用自然语言描述需要忽略的文件，基于 LLM + 轻量级 RAG 自动生成 `.veritasignore` 规则。自动扫描项目目录结构辅助生成精准规则，并提供 Dry-Run 预览（"预计忽略 34 个文件"）。详见 [AI_IGNORE_RULES.md](AI_IGNORE_RULES.md)。
 
 ## 🛠️ 技术栈
 
 | 类别 | 技术 |
 |------|------|
 | **核心语言** | C++20 (std::jthread, std::span, std::shared_mutex, std::atomic) |
-| **构建系统** | CMake, vcpkg (Manifest Mode) |
+| **构建系统** | CMake (支持 BUILD_TARGET 分离编译), vcpkg (Manifest Mode) |
 | **网络通信** | Boost.Asio, KCP, LibJuice (ICE), miniUPnPc |
 | **Web 服务** | cpp-httplib (CSP/CORS 安全头), nlohmann/json |
+| **AI 集成** | OpenAI 兼容 API (阿里百炼/DeepSeek/OpenAI), JSON 结构化输出 |
 | **数据存储** | SQLite3 (WAL 模式) + Write-Through 内存缓存 |
 | **加密压缩** | OpenSSL (AES-256-GCM, HKDF-SHA256), Snappy |
 | **系统集成** | Win32 API (Tray, Mutex), efsw (File Watcher) |
@@ -114,6 +116,10 @@ cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<path_to_vcpkg>/scripts/buildsystems/
 
 # 4. 编译 (Release 模式)
 cmake --build build --config Release
+
+# 也可以只编译客户端或 Tracker（用于分开部署）
+cmake -B build -S . -DBUILD_TARGET=CLIENT   # 仅客户端
+cmake -B build -S . -DBUILD_TARGET=TRACKER  # 仅 Tracker 服务器
 
 # 5. 运行测试 (可选)
 cd build && ctest --output-on-failure
@@ -170,8 +176,9 @@ VeritasSync/
 │   └── web/               # Web 前端资源 (HTML/CSS/JS)
 ├── tests/                 # 单元测试 (30 个测试文件, 557 个测试用例)
 ├── docs/                  # 架构文档
+├── AI_IGNORE_RULES.md     # AI 忽略规则生成技术方案
 ├── vcpkg.json             # 依赖包清单
-└── CMakeLists.txt         # 构建脚本
+└── CMakeLists.txt         # 构建脚本 (支持 BUILD_TARGET 参数)
 ```
 
 ## 🔧 配置文件
@@ -190,9 +197,13 @@ VeritasSync/
     "turn_port": 3478,
     "turn_username": "",
     "turn_password": "",
+    "enable_multi_stun_probing": true,
     "chunk_size": 16384,
     "kcp_window_size": 256,
     "kcp_update_interval_ms": 20,
+    "llm_api_url": "https://dashscope.aliyuncs.com/compatible-mode",
+    "llm_api_key": "",
+    "llm_model": "qwen-turbo",
     "tasks": [
         {
             "sync_key": "your-unique-sync-key-min-16-chars",
