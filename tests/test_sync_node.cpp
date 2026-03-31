@@ -13,21 +13,24 @@ using namespace VeritasSync;
 
 REGISTER_VERITAS_TEST_ENV();
 
+// 共用测试配置工厂
+static Config make_test_config(const std::string& device_id = "test-device") {
+    Config cfg;
+    cfg.device_id = device_id;
+    cfg.network.tracker_host = "127.0.0.1";
+    cfg.network.tracker_port = 9988;
+    cfg.network.stun_host = "stun.l.google.com";
+    cfg.network.stun_port = 19302;
+    return cfg;
+}
+
 // ============================================================================
 // SyncNode 工厂方法和构造
 // ============================================================================
 
 class SyncNodeCreationTest : public ::testing::Test {
 protected:
-    Config make_config() {
-        Config cfg;
-        cfg.device_id = "test-device-001";
-        cfg.tracker_host = "127.0.0.1";
-        cfg.tracker_port = 9988;
-        cfg.stun_host = "stun.l.google.com";
-        cfg.stun_port = 19302;
-        return cfg;
-    }
+    Config make_config() { return make_test_config("test-device-001"); }
 };
 
 TEST_F(SyncNodeCreationTest, Create_ReturnsSharedPtr) {
@@ -71,15 +74,7 @@ TEST_F(SyncNodeCreationTest, Create_InitialState) {
 
 class SyncNodeValidationTest : public ::testing::Test {
 protected:
-    Config make_config() {
-        Config cfg;
-        cfg.device_id = "test-device-002";
-        cfg.tracker_host = "127.0.0.1";
-        cfg.tracker_port = 9988;
-        cfg.stun_host = "stun.l.google.com";
-        cfg.stun_port = 19302;
-        return cfg;
-    }
+    Config make_config() { return make_test_config("test-device-002"); }
 };
 
 TEST_F(SyncNodeValidationTest, Start_EmptySyncKey_Fails) {
@@ -163,15 +158,7 @@ TEST_F(SyncNodeValidationTest, Start_ValidDestination_Role) {
 
 class SyncNodeLifecycleTest : public ::testing::Test {
 protected:
-    Config make_config() {
-        Config cfg;
-        cfg.device_id = "test-device-003";
-        cfg.tracker_host = "127.0.0.1";
-        cfg.tracker_port = 9988;
-        cfg.stun_host = "stun.l.google.com";
-        cfg.stun_port = 19302;
-        return cfg;
-    }
+    Config make_config() { return make_test_config("test-device-003"); }
 };
 
 TEST_F(SyncNodeLifecycleTest, Stop_WithoutStart_Safe) {
@@ -273,15 +260,7 @@ TEST_F(SyncNodeLifecycleTest, StopThenRestart) {
 
 class SyncNodeDirectoryTest : public ::testing::Test {
 protected:
-    Config make_config() {
-        Config cfg;
-        cfg.device_id = "test-device-004";
-        cfg.tracker_host = "127.0.0.1";
-        cfg.tracker_port = 9988;
-        cfg.stun_host = "stun.l.google.com";
-        cfg.stun_port = 19302;
-        return cfg;
-    }
+    Config make_config() { return make_test_config("test-device-004"); }
 };
 
 TEST_F(SyncNodeDirectoryTest, Start_CreatesDirectory_IfNotExists) {
@@ -313,10 +292,7 @@ TEST_F(SyncNodeDirectoryTest, Start_CreatesDirectory_IfNotExists) {
 
 TEST(SyncNodeFactoryDesign, SharedPtr_CanBeWeak) {
     SyncTask task{"key1", "source", "test_sync_node_dir_weak"};
-    Config cfg;
-    cfg.device_id = "test";
-    cfg.tracker_host = "127.0.0.1";
-    cfg.tracker_port = 9988;
+    Config cfg = make_test_config();
 
     auto node = SyncNode::create(task, cfg);
     std::weak_ptr<SyncNode> weak = node;
@@ -333,10 +309,7 @@ TEST(SyncNodeFactoryDesign, GetKey_MatchesSyncKey) {
     task.role = "source";
     task.sync_folder = "/tmp/test";
 
-    Config cfg;
-    cfg.device_id = "test";
-    cfg.tracker_host = "127.0.0.1";
-    cfg.tracker_port = 9988;
+    Config cfg = make_test_config();
 
     auto node = SyncNode::create(task, cfg);
     EXPECT_EQ(node->get_key(), "unique-sync-key-xyz");
@@ -348,10 +321,7 @@ TEST(SyncNodeFactoryDesign, GetRootPath_MatchesSyncFolder) {
     task.role = "destination";
     task.sync_folder = "D:\\Data\\Sync\\folder1";
 
-    Config cfg;
-    cfg.device_id = "test";
-    cfg.tracker_host = "127.0.0.1";
-    cfg.tracker_port = 9988;
+    Config cfg = make_test_config();
 
     auto node = SyncNode::create(task, cfg);
     EXPECT_EQ(node->get_root_path(), "D:\\Data\\Sync\\folder1");

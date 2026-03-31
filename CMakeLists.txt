@@ -43,7 +43,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # --- 查找依赖包 ---
-find_package(openssl CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(efsw CONFIG CONFIG REQUIRED)
 find_package(Boost 1.88.0 REQUIRED CONFIG COMPONENTS system asio)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -314,14 +314,15 @@ add_executable(unit_tests
 target_include_directories(unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 
 # 链接依赖
-target_link_libraries(unit_tests PRIVATE 
-    GTest::gtest 
+target_link_libraries(unit_tests PRIVATE
+    GTest::gtest
     GTest::gtest_main
     nlohmann_json::nlohmann_json
-    spdlog::spdlog 
+    spdlog::spdlog
     OpenSSL::Crypto
     OpenSSL::SSL
     unofficial::sqlite3::sqlite3
+    unofficial::b64::b64
     kcp::kcp
     Boost::system
     Boost::asio

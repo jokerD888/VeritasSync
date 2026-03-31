@@ -69,37 +69,37 @@ class ConfigTest : public ::testing::Test {};
 
 TEST_F(ConfigTest, DefaultValues) {
     Config cfg;
-    EXPECT_EQ(cfg.tracker_port, 9988);
-    EXPECT_EQ(cfg.stun_host, "stun.l.google.com");
-    EXPECT_EQ(cfg.stun_port, 19302);
-    EXPECT_EQ(cfg.turn_port, 3478);
-    EXPECT_EQ(cfg.log_level, "info");
-    EXPECT_EQ(cfg.kcp_update_interval_ms, 20u);
-    EXPECT_EQ(cfg.chunk_size, 16384u);
-    EXPECT_EQ(cfg.kcp_window_size, 256u);
-    EXPECT_EQ(cfg.webui_port, 8800);
-    EXPECT_TRUE(cfg.turn_host.empty());
+    EXPECT_EQ(cfg.network.tracker_port, 9988);
+    EXPECT_EQ(cfg.network.stun_host, "stun.l.google.com");
+    EXPECT_EQ(cfg.network.stun_port, 19302);
+    EXPECT_EQ(cfg.network.turn_port, 3478);
+    EXPECT_EQ(cfg.logging.level, "info");
+    EXPECT_EQ(cfg.kcp.update_interval_ms, 20u);
+    EXPECT_EQ(cfg.transfer.chunk_size, 16384u);
+    EXPECT_EQ(cfg.kcp.window_size, 256u);
+    EXPECT_EQ(cfg.webui.port, 8800);
+    EXPECT_TRUE(cfg.network.turn_host.empty());
     EXPECT_TRUE(cfg.tasks.empty());
 }
 
 TEST_F(ConfigTest, JsonRoundTrip_Full) {
     Config cfg;
     cfg.device_id = "test-device-uuid";
-    cfg.tracker_host = "192.168.1.100";
-    cfg.tracker_port = 7777;
-    cfg.stun_host = "stun.example.com";
-    cfg.stun_port = 3478;
-    cfg.turn_host = "turn.example.com";
-    cfg.turn_port = 5349;
-    cfg.turn_username = "user1";
-    cfg.turn_password = "pass1";
-    cfg.log_level = "debug";
-    cfg.libjuice_log_level = "warn";
-    cfg.kcp_update_interval_ms = 50;
-    cfg.chunk_size = 32768;
-    cfg.kcp_window_size = 512;
-    cfg.file_hash_retry_delay_ms = 500;
-    cfg.webui_port = 9900;
+    cfg.network.tracker_host = "192.168.1.100";
+    cfg.network.tracker_port = 7777;
+    cfg.network.stun_host = "stun.example.com";
+    cfg.network.stun_port = 3478;
+    cfg.network.turn_host = "turn.example.com";
+    cfg.network.turn_port = 5349;
+    cfg.network.turn_username = "user1";
+    cfg.network.turn_password = "pass1";
+    cfg.logging.level = "debug";
+    cfg.logging.libjuice_level = "warn";
+    cfg.kcp.update_interval_ms = 50;
+    cfg.transfer.chunk_size = 32768;
+    cfg.kcp.window_size = 512;
+    cfg.sync.file_hash_retry_delay_ms = 500;
+    cfg.webui.port = 9900;
     cfg.tasks.push_back({"key1", "source", "/tmp/src", SyncMode::OneWay});
     cfg.tasks.push_back({"key2", "destination", "/tmp/dst", SyncMode::BiDirectional});
 
@@ -107,21 +107,21 @@ TEST_F(ConfigTest, JsonRoundTrip_Full) {
     Config restored = j.get<Config>();
 
     EXPECT_EQ(restored.device_id, "test-device-uuid");
-    EXPECT_EQ(restored.tracker_host, "192.168.1.100");
-    EXPECT_EQ(restored.tracker_port, 7777);
-    EXPECT_EQ(restored.stun_host, "stun.example.com");
-    EXPECT_EQ(restored.stun_port, 3478);
-    EXPECT_EQ(restored.turn_host, "turn.example.com");
-    EXPECT_EQ(restored.turn_port, 5349);
-    EXPECT_EQ(restored.turn_username, "user1");
-    EXPECT_EQ(restored.turn_password, "pass1");
-    EXPECT_EQ(restored.log_level, "debug");
-    EXPECT_EQ(restored.libjuice_log_level, "warn");
-    EXPECT_EQ(restored.kcp_update_interval_ms, 50u);
-    EXPECT_EQ(restored.chunk_size, 32768u);
-    EXPECT_EQ(restored.kcp_window_size, 512u);
-    EXPECT_EQ(restored.file_hash_retry_delay_ms, 500u);
-    EXPECT_EQ(restored.webui_port, 9900);
+    EXPECT_EQ(restored.network.tracker_host, "192.168.1.100");
+    EXPECT_EQ(restored.network.tracker_port, 7777);
+    EXPECT_EQ(restored.network.stun_host, "stun.example.com");
+    EXPECT_EQ(restored.network.stun_port, 3478);
+    EXPECT_EQ(restored.network.turn_host, "turn.example.com");
+    EXPECT_EQ(restored.network.turn_port, 5349);
+    EXPECT_EQ(restored.network.turn_username, "user1");
+    EXPECT_EQ(restored.network.turn_password, "pass1");
+    EXPECT_EQ(restored.logging.level, "debug");
+    EXPECT_EQ(restored.logging.libjuice_level, "warn");
+    EXPECT_EQ(restored.kcp.update_interval_ms, 50u);
+    EXPECT_EQ(restored.transfer.chunk_size, 32768u);
+    EXPECT_EQ(restored.kcp.window_size, 512u);
+    EXPECT_EQ(restored.sync.file_hash_retry_delay_ms, 500);
+    EXPECT_EQ(restored.webui.port, 9900);
     ASSERT_EQ(restored.tasks.size(), 2);
     EXPECT_EQ(restored.tasks[0].sync_key, "key1");
     EXPECT_EQ(restored.tasks[1].mode, SyncMode::BiDirectional);
@@ -130,31 +130,37 @@ TEST_F(ConfigTest, JsonRoundTrip_Full) {
 TEST_F(ConfigTest, FromJson_OptionalFields_UseDefaults) {
     // 最小配置：只有必填字段
     json j = {
-        {"tracker_host", "10.0.0.1"},
-        {"tracker_port", 9988},
+        {"network", {
+            {"tracker_host", "10.0.0.1"},
+            {"tracker_port", 9988}
+        }},
         {"tasks", json::array()}
     };
 
     Config cfg = j.get<Config>();
-    EXPECT_EQ(cfg.tracker_host, "10.0.0.1");
+    EXPECT_EQ(cfg.network.tracker_host, "10.0.0.1");
     // 可选字段应使用默认值
-    EXPECT_EQ(cfg.stun_host, "stun.l.google.com");
-    EXPECT_EQ(cfg.log_level, "info");
-    EXPECT_EQ(cfg.kcp_update_interval_ms, 20u);
-    EXPECT_EQ(cfg.webui_port, 8800);
+    EXPECT_EQ(cfg.network.stun_host, "stun.l.google.com");
+    EXPECT_EQ(cfg.logging.level, "info");
+    EXPECT_EQ(cfg.kcp.update_interval_ms, 20u);
+    EXPECT_EQ(cfg.webui.port, 8800);
     EXPECT_TRUE(cfg.device_id.empty());
 }
 
 TEST_F(ConfigTest, FromJson_WithWebuiPort) {
     json j = {
-        {"tracker_host", "10.0.0.1"},
-        {"tracker_port", 9988},
-        {"webui_port", 3000},
+        {"network", {
+            {"tracker_host", "10.0.0.1"},
+            {"tracker_port", 9988}
+        }},
+        {"webui", {
+            {"port", 3000}
+        }},
         {"tasks", json::array()}
     };
 
     Config cfg = j.get<Config>();
-    EXPECT_EQ(cfg.webui_port, 3000);
+    EXPECT_EQ(cfg.webui.port, 3000);
 }
 
 TEST_F(ConfigTest, SyncMode_SerializationValues) {
@@ -175,15 +181,15 @@ protected:
     Config make_valid_config() {
         Config cfg;
         cfg.device_id = "some-uuid-1234";
-        cfg.tracker_host = "192.168.1.1";
-        cfg.tracker_port = 9988;
-        cfg.stun_host = "stun.l.google.com";
-        cfg.stun_port = 19302;
-        cfg.webui_port = 8800;
-        cfg.log_level = "info";
-        cfg.kcp_update_interval_ms = 20;
-        cfg.chunk_size = 16384;
-        cfg.kcp_window_size = 256;
+        cfg.network.tracker_host = "192.168.1.1";
+        cfg.network.tracker_port = 9988;
+        cfg.network.stun_host = "stun.l.google.com";
+        cfg.network.stun_port = 19302;
+        cfg.webui.port = 8800;
+        cfg.logging.level = "info";
+        cfg.kcp.update_interval_ms = 20;
+        cfg.transfer.chunk_size = 16384;
+        cfg.kcp.window_size = 256;
         cfg.tasks.push_back({"key1", "source", "/tmp/sync"});
         return cfg;
     }
@@ -197,7 +203,7 @@ TEST_F(ConfigValidationTest, ValidConfig_NoErrors) {
 
 TEST_F(ConfigValidationTest, EmptyTrackerHost) {
     auto cfg = make_valid_config();
-    cfg.tracker_host = "";
+    cfg.network.tracker_host = "";
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 
@@ -211,7 +217,7 @@ TEST_F(ConfigValidationTest, EmptyTrackerHost) {
 
 TEST_F(ConfigValidationTest, EmptyStunHost) {
     auto cfg = make_valid_config();
-    cfg.stun_host = "";
+    cfg.network.stun_host = "";
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 
@@ -237,7 +243,7 @@ TEST_F(ConfigValidationTest, EmptyDeviceId) {
 
 TEST_F(ConfigValidationTest, ZeroPort_TrackerPort) {
     auto cfg = make_valid_config();
-    cfg.tracker_port = 0;
+    cfg.network.tracker_port = 0;
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 
@@ -250,14 +256,14 @@ TEST_F(ConfigValidationTest, ZeroPort_TrackerPort) {
 
 TEST_F(ConfigValidationTest, ZeroPort_StunPort) {
     auto cfg = make_valid_config();
-    cfg.stun_port = 0;
+    cfg.network.stun_port = 0;
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
 
 TEST_F(ConfigValidationTest, ZeroPort_WebuiPort) {
     auto cfg = make_valid_config();
-    cfg.webui_port = 0;
+    cfg.webui.port = 0;
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
@@ -266,8 +272,8 @@ TEST_F(ConfigValidationTest, TurnPort_OnlyCheckedWhenTurnHostSet) {
     auto cfg = make_valid_config();
 
     // turn_host 为空时，turn_port = 0 不应报错
-    cfg.turn_host = "";
-    cfg.turn_port = 0;
+    cfg.network.turn_host = "";
+    cfg.network.turn_port = 0;
     auto errors = validate_config(cfg);
     // 应该没有 turn_port 相关错误
     bool found_turn = false;
@@ -277,8 +283,8 @@ TEST_F(ConfigValidationTest, TurnPort_OnlyCheckedWhenTurnHostSet) {
     EXPECT_FALSE(found_turn) << "turn_port should not be checked when turn_host is empty";
 
     // turn_host 非空时，turn_port = 0 应报错
-    cfg.turn_host = "turn.example.com";
-    cfg.turn_port = 0;
+    cfg.network.turn_host = "turn.example.com";
+    cfg.network.turn_port = 0;
     errors = validate_config(cfg);
     found_turn = false;
     for (const auto& e : errors) {
@@ -289,7 +295,7 @@ TEST_F(ConfigValidationTest, TurnPort_OnlyCheckedWhenTurnHostSet) {
 
 TEST_F(ConfigValidationTest, InvalidLogLevel) {
     auto cfg = make_valid_config();
-    cfg.log_level = "verbose";  // 无效
+    cfg.logging.level = "verbose";  // 无效
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 
@@ -304,7 +310,7 @@ TEST_F(ConfigValidationTest, ValidLogLevels) {
     auto cfg = make_valid_config();
     std::vector<std::string> valid = {"debug", "info", "warn", "warning", "error", "err", "critical", "off"};
     for (const auto& level : valid) {
-        cfg.log_level = level;
+        cfg.logging.level = level;
         auto errors = validate_config(cfg);
         bool found = false;
         for (const auto& e : errors) {
@@ -316,47 +322,47 @@ TEST_F(ConfigValidationTest, ValidLogLevels) {
 
 TEST_F(ConfigValidationTest, KcpUpdateInterval_TooLow) {
     auto cfg = make_valid_config();
-    cfg.kcp_update_interval_ms = 3;  // 低于 5
+    cfg.kcp.update_interval_ms = 3;  // 低于 5
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
 
 TEST_F(ConfigValidationTest, KcpUpdateInterval_TooHigh) {
     auto cfg = make_valid_config();
-    cfg.kcp_update_interval_ms = 600;  // 高于 500
+    cfg.kcp.update_interval_ms = 600;  // 高于 500
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
 
 TEST_F(ConfigValidationTest, KcpUpdateInterval_BoundaryValid) {
     auto cfg = make_valid_config();
-    cfg.kcp_update_interval_ms = 5;
+    cfg.kcp.update_interval_ms = 5;
     EXPECT_TRUE(validate_config(cfg).empty());
 
-    cfg.kcp_update_interval_ms = 500;
+    cfg.kcp.update_interval_ms = 500;
     EXPECT_TRUE(validate_config(cfg).empty());
 }
 
 TEST_F(ConfigValidationTest, ChunkSize_TooSmall) {
     auto cfg = make_valid_config();
-    cfg.chunk_size = 512;  // 低于 1024
+    cfg.transfer.chunk_size = 512;  // 低于 1024
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
 
 TEST_F(ConfigValidationTest, ChunkSize_TooLarge) {
     auto cfg = make_valid_config();
-    cfg.chunk_size = 2 * 1024 * 1024;  // 2MB，超过 1MB
+    cfg.transfer.chunk_size = 2 * 1024 * 1024;  // 2MB，超过 1MB
     auto errors = validate_config(cfg);
     EXPECT_FALSE(errors.empty());
 }
 
 TEST_F(ConfigValidationTest, KcpWindowSize_OutOfRange) {
     auto cfg = make_valid_config();
-    cfg.kcp_window_size = 10;  // 低于 16
+    cfg.kcp.window_size = 10;  // 低于 16
     EXPECT_FALSE(validate_config(cfg).empty());
 
-    cfg.kcp_window_size = 5000;  // 高于 4096
+    cfg.kcp.window_size = 5000;  // 高于 4096
     EXPECT_FALSE(validate_config(cfg).empty());
 }
 
@@ -503,9 +509,9 @@ TEST_F(ConfigFileTest, LoadExisting_PreservesValues) {
     // 先创建一个配置文件
     Config original;
     original.device_id = "existing-device-id";
-    original.tracker_host = "10.0.0.5";
-    original.tracker_port = 1234;
-    original.webui_port = 3000;
+    original.network.tracker_host = "10.0.0.5";
+    original.network.tracker_port = 1234;
+    original.webui.port = 3000;
     original.tasks.push_back({"my-key", "source", "/data/sync"});
 
     {
@@ -516,9 +522,9 @@ TEST_F(ConfigFileTest, LoadExisting_PreservesValues) {
     Config loaded = load_config_or_create_default(temp_config_path);
 
     EXPECT_EQ(loaded.device_id, "existing-device-id");
-    EXPECT_EQ(loaded.tracker_host, "10.0.0.5");
-    EXPECT_EQ(loaded.tracker_port, 1234);
-    EXPECT_EQ(loaded.webui_port, 3000);
+    EXPECT_EQ(loaded.network.tracker_host, "10.0.0.5");
+    EXPECT_EQ(loaded.network.tracker_port, 1234);
+    EXPECT_EQ(loaded.webui.port, 3000);
     ASSERT_EQ(loaded.tasks.size(), 1);
     EXPECT_EQ(loaded.tasks[0].sync_key, "my-key");
 }
@@ -526,8 +532,10 @@ TEST_F(ConfigFileTest, LoadExisting_PreservesValues) {
 TEST_F(ConfigFileTest, LoadExisting_GeneratesDeviceId_IfMissing) {
     // 创建一个没有 device_id 的配置文件
     json j = {
-        {"tracker_host", "10.0.0.1"},
-        {"tracker_port", 9988},
+        {"network", {
+            {"tracker_host", "10.0.0.1"},
+            {"tracker_port", 9988}
+        }},
         {"tasks", json::array()}
     };
     {

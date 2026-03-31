@@ -37,6 +37,15 @@ namespace VeritasSync {
 static constexpr size_t DEFAULT_LOG_TAIL_SIZE_STATUS = 16384;   // GET /api/log 尾部读取字节数
 static constexpr size_t DEFAULT_LOG_TAIL_SIZE_TASK   = 32768;   // GET /api/tasks/:id/log 尾部读取字节数
 static constexpr size_t DEFAULT_AUTH_TOKEN_BYTES     = 32;      // 认证令牌字节数
+static constexpr const char* kMaskedPlaceholder      = "***";   // 敏感字段脱敏占位符
+
+/// 脱敏 JSON 中某个嵌套段下的敏感字段
+static void mask_field(nlohmann::json& j, const std::string& section, const std::string& key) {
+    if (j.contains(section) && j[section].contains(key)
+        && !j[section][key].get<std::string>().empty()) {
+        j[section][key] = kMaskedPlaceholder;
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 构造函数
@@ -316,8 +325,8 @@ void WebUIServer::setup_routes() {
 // ─── C-1 子函数：首页路由 ───────────────────────────────────────
 
 void WebUIServer::setup_page_routes() {
-    m_svr.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
-        if (!check_auth(req, res)) return;
+    // GET / — 返回前端页面（无需认证，页面本身不含敏感数据，所有 API 调用有独立认证）
+    m_svr.Get("/", [this]([[maybe_unused]] const httplib::Request& req, httplib::Response& res) {
         res.set_content(get_index_html(), "text/html; charset=utf-8");
     });
 }
@@ -351,15 +360,16 @@ void WebUIServer::setup_config_routes() {
     // GET /api/config
     m_svr.Get("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
-        std::lock_guard<std::mutex> lock(m_config_mutex);
-        auto j = nlohmann::json(m_config);
+        // 在锁内拷贝配置快照，锁外执行序列化和 dump（减少 mutex 持有时间）
+        Config snapshot;
+        {
+            std::lock_guard<std::mutex> lock(m_config_mutex);
+            snapshot = m_config;
+        }
+        auto j = nlohmann::json(snapshot);
         // 【安全修复 M6】脱敏敏感字段，防止 API 泄露密码/密钥
-        if (j.contains("turn_password") && !j["turn_password"].get<std::string>().empty()) {
-            j["turn_password"] = "***";
-        }
-        if (j.contains("llm_api_key") && !j["llm_api_key"].get<std::string>().empty()) {
-            j["llm_api_key"] = "***";
-        }
+        mask_field(j, "network", "turn_password");
+        mask_field(j, "llm", "api_key");
         res.set_content(j.dump(2), "application/json; charset=utf-8");
     });
 
@@ -371,13 +381,13 @@ void WebUIServer::setup_config_routes() {
             auto j = nlohmann::json::parse(req.body);
 
             std::string new_tracker_host = j.value("tracker_host", m_config.network.tracker_host);
-            int new_tracker_port = j.value("tracker_port", (int)m_config.network.tracker_port);
+            int new_tracker_port = j.value("tracker_port", static_cast<int>(m_config.network.tracker_port));
 
             std::string new_stun_host = j.value("stun_host", m_config.network.stun_host);
-            int new_stun_port = j.value("stun_port", (int)m_config.network.stun_port);
+            int new_stun_port = j.value("stun_port", static_cast<int>(m_config.network.stun_port));
 
             std::string new_turn_host = j.value("turn_host", m_config.network.turn_host);
-            int new_turn_port = j.value("turn_port", (int)m_config.network.turn_port);
+            int new_turn_port = j.value("turn_port", static_cast<int>(m_config.network.turn_port));
 
             if (!is_valid_port(new_tracker_port) || !is_valid_port(new_stun_port) ||
                 !is_valid_port(new_turn_port)) {
@@ -389,18 +399,18 @@ void WebUIServer::setup_config_routes() {
             }
 
             m_config.network.tracker_host = new_tracker_host;
-            m_config.network.tracker_port = (unsigned short)new_tracker_port;
+            m_config.network.tracker_port = static_cast<unsigned short>(new_tracker_port);
             m_config.network.stun_host = new_stun_host;
-            m_config.network.stun_port = (unsigned short)new_stun_port;
+            m_config.network.stun_port = static_cast<unsigned short>(new_stun_port);
             m_config.network.turn_host = new_turn_host;
-            m_config.network.turn_port = (unsigned short)new_turn_port;
+            m_config.network.turn_port = static_cast<unsigned short>(new_turn_port);
 
             if (j.contains("turn_username"))
                 m_config.network.turn_username = j.value("turn_username", m_config.network.turn_username);
             if (j.contains("turn_password")) {
                 // 【修复 R1】跳过脱敏占位符 "***"，避免覆盖真实密码
                 std::string pw = j.value("turn_password", std::string{});
-                if (pw != "***") {
+                if (pw != kMaskedPlaceholder) {
                     m_config.network.turn_password = pw;
                 }
             }
@@ -410,6 +420,18 @@ void WebUIServer::setup_config_routes() {
                 m_config.network.enable_multi_stun_probing = j.value("enable_multi_stun_probing", m_config.network.enable_multi_stun_probing);
             if (j.contains("stun_list_url"))
                 m_config.network.stun_list_url = j.value("stun_list_url", m_config.network.stun_list_url);
+
+            // LLM API 配置
+            if (j.contains("llm_api_url"))
+                m_config.llm.api_url = j.value("llm_api_url", m_config.llm.api_url);
+            if (j.contains("llm_api_key")) {
+                std::string key = j.value("llm_api_key", std::string{});
+                if (key != kMaskedPlaceholder) {
+                    m_config.llm.api_key = key;
+                }
+            }
+            if (j.contains("llm_model"))
+                m_config.llm.model = j.value("llm_model", m_config.llm.model);
 
             if (save_config_internal()) {
                 res.set_content("{\"success\":true}", "application/json");

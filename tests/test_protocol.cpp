@@ -26,15 +26,15 @@ TEST(ProtocolTest, FileInfoJsonConversion) {
 // 2. 测试 Config 序列化 (防止配置文件解析挂掉)
 TEST(ProtocolTest, ConfigJsonConversion) {
     Config cfg;
-    cfg.tracker_host = "192.168.1.100";
-    cfg.tracker_port = 6666;
+    cfg.network.tracker_host = "192.168.1.100";
+    cfg.network.tracker_port = 6666;
     cfg.tasks.push_back({"key1", "source", "/tmp/sync"});
 
     json j = cfg;
     Config restored = j.get<Config>();
 
-    EXPECT_EQ(restored.tracker_host, "192.168.1.100");
-    EXPECT_EQ(restored.tracker_port, 6666);
+    EXPECT_EQ(restored.network.tracker_host, "192.168.1.100");
+    EXPECT_EQ(restored.network.tracker_port, 6666);
     ASSERT_EQ(restored.tasks.size(), 1);
     EXPECT_EQ(restored.tasks[0].sync_key, "key1");
 }

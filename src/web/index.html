@@ -685,6 +685,27 @@
                         <input id="cfgStunListUrl" class="form-input" placeholder="https://..." style="font-family:var(--font-mono);font-size:0.85rem;">
                     </div>
                 </div>
+
+                <div class="glass-card" style="margin-top: 2rem;">
+                    <h3 style="color:var(--secondary); margin-bottom:1.5rem; border-bottom:1px solid var(--border); padding-bottom:10px;">🤖 AI 智能忽略规则 (LLM API)</h3>
+                    <div class="form-group">
+                        <label>API 地址</label>
+                        <input id="cfgLlmApiUrl" class="form-input" placeholder="https://dashscope.aliyuncs.com/compatible-mode" style="font-family:var(--font-mono);font-size:0.85rem;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                        <div class="form-group">
+                            <label>API Key</label>
+                            <input id="cfgLlmApiKey" class="form-input" type="password" placeholder="sk-...">
+                        </div>
+                        <div class="form-group">
+                            <label>模型名称</label>
+                            <input id="cfgLlmModel" class="form-input" placeholder="qwen-turbo">
+                        </div>
+                    </div>
+                    <div class="text-sm-sub" style="margin-top:8px;">
+                        * 用于 AI 智能生成忽略规则。支持 OpenAI 兼容 API 格式 (通义千问、DeepSeek、OpenAI 等)。API Key 不会明文显示。
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -928,8 +949,8 @@
                 
                 id('task-count').innerText = c.tasks.length;
                 
-                if (c.tracker_host) {
-                    id('display-tracker-addr').innerText = `${c.tracker_host}:${c.tracker_port}`;
+                if (c.network && c.network.tracker_host) {
+                    id('display-tracker-addr').innerText = `${c.network.tracker_host}:${c.network.tracker_port}`;
                 }
 
                 const container = id('task-container');
@@ -1000,30 +1021,40 @@
             try {
                 const r = await fetch('/api/config');
                 const c = await r.json();
-                id('cfgTrackerHost').value = c.tracker_host || "";
-                id('cfgTrackerPort').value = c.tracker_port || 9988;
-                id('cfgStunHost').value = c.stun_host || "";
-                id('cfgTurnHost').value = c.turn_host || "";
-                id('cfgTurnUser').value = c.turn_username || "";
-                id('cfgTurnPass').value = c.turn_password || "";
-                
+                const net = c.network || {};
+                const llm = c.llm || {};
+                id('cfgTrackerHost').value = net.tracker_host || "";
+                id('cfgTrackerPort').value = net.tracker_port || 9988;
+                id('cfgStunHost').value = net.stun_host || "";
+                id('cfgTurnHost').value = net.turn_host || "";
+                id('cfgTurnUser').value = net.turn_username || "";
+                id('cfgTurnPass').value = net.turn_password || "";
+
                 // 多 WAN 配置回填
-                id('cfgEnableMultiWan').checked = (c.enable_multi_stun_probing !== false);
-                id('cfgStunListUrl').value = c.stun_list_url || "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+                id('cfgEnableMultiWan').checked = (net.enable_multi_stun_probing !== false);
+                id('cfgStunListUrl').value = net.stun_list_url || "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
+
+                // LLM API 配置回填
+                id('cfgLlmApiUrl').value = llm.api_url || "";
+                id('cfgLlmApiKey').value = llm.api_key || "";
+                id('cfgLlmModel').value = llm.model || "";
             } catch (e) { console.error("加载配置失败", e); }
         }
 
-        async function saveSettings() { 
-            const b = id('btnSave'); b.disabled = true; b.innerText = "保存中..."; 
-            const d = { 
-                tracker_host: id('cfgTrackerHost').value, 
-                tracker_port: parseInt(id('cfgTrackerPort').value || 9988), 
-                stun_host: id('cfgStunHost').value, 
-                turn_host: id('cfgTurnHost').value, 
-                turn_username: id('cfgTurnUser').value, 
+        async function saveSettings() {
+            const b = id('btnSave'); b.disabled = true; b.innerText = "保存中...";
+            const d = {
+                tracker_host: id('cfgTrackerHost').value,
+                tracker_port: parseInt(id('cfgTrackerPort').value || 9988),
+                stun_host: id('cfgStunHost').value,
+                turn_host: id('cfgTurnHost').value,
+                turn_username: id('cfgTurnUser').value,
                 turn_password: id('cfgTurnPass').value,
-                enable_multi_stun_probing: id('cfgEnableMultiWan').checked, 
-                stun_list_url: id('cfgStunListUrl').value 
+                enable_multi_stun_probing: id('cfgEnableMultiWan').checked,
+                stun_list_url: id('cfgStunListUrl').value,
+                llm_api_url: id('cfgLlmApiUrl').value,
+                llm_api_key: id('cfgLlmApiKey').value,
+                llm_model: id('cfgLlmModel').value
             }; 
             try { 
                 const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(d) }); 

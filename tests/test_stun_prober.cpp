@@ -171,38 +171,38 @@ class ConfigMultiStunTest : public ::testing::Test {};
 
 TEST_F(ConfigMultiStunTest, DefaultValues) {
     Config cfg;
-    EXPECT_TRUE(cfg.enable_multi_stun_probing);
-    EXPECT_FALSE(cfg.stun_list_url.empty());
-    EXPECT_TRUE(cfg.extra_stun_servers.empty());
+    EXPECT_TRUE(cfg.network.enable_multi_stun_probing);
+    EXPECT_FALSE(cfg.network.stun_list_url.empty());
+    EXPECT_TRUE(cfg.network.extra_stun_servers.empty());
 }
 
 TEST_F(ConfigMultiStunTest, JsonRoundTrip_EnableFlag) {
     Config cfg;
     cfg.device_id = "test-uuid";
-    cfg.enable_multi_stun_probing = false;
-    cfg.stun_list_url = "https://example.com/stun.txt";
+    cfg.network.enable_multi_stun_probing = false;
+    cfg.network.stun_list_url = "https://example.com/stun.txt";
 
     json j = cfg;
     Config restored = j.get<Config>();
 
-    EXPECT_FALSE(restored.enable_multi_stun_probing);
-    EXPECT_EQ(restored.stun_list_url, "https://example.com/stun.txt");
+    EXPECT_FALSE(restored.network.enable_multi_stun_probing);
+    EXPECT_EQ(restored.network.stun_list_url, "https://example.com/stun.txt");
 }
 
 TEST_F(ConfigMultiStunTest, JsonRoundTrip_WithExtraServers) {
     Config cfg;
     cfg.device_id = "test-uuid";
-    cfg.extra_stun_servers.push_back({"stun1.example.com", 3478});
-    cfg.extra_stun_servers.push_back({"stun2.example.com", 19302});
+    cfg.network.extra_stun_servers.push_back({"stun1.example.com", 3478});
+    cfg.network.extra_stun_servers.push_back({"stun2.example.com", 19302});
 
     json j = cfg;
     Config restored = j.get<Config>();
 
-    ASSERT_EQ(restored.extra_stun_servers.size(), 2u);
-    EXPECT_EQ(restored.extra_stun_servers[0].host, "stun1.example.com");
-    EXPECT_EQ(restored.extra_stun_servers[0].port, 3478);
-    EXPECT_EQ(restored.extra_stun_servers[1].host, "stun2.example.com");
-    EXPECT_EQ(restored.extra_stun_servers[1].port, 19302);
+    ASSERT_EQ(restored.network.extra_stun_servers.size(), 2u);
+    EXPECT_EQ(restored.network.extra_stun_servers[0].host, "stun1.example.com");
+    EXPECT_EQ(restored.network.extra_stun_servers[0].port, 3478);
+    EXPECT_EQ(restored.network.extra_stun_servers[1].host, "stun2.example.com");
+    EXPECT_EQ(restored.network.extra_stun_servers[1].port, 19302);
 }
 
 TEST_F(ConfigMultiStunTest, JsonRoundTrip_EmptyServers_NotSerialized) {
@@ -210,47 +210,51 @@ TEST_F(ConfigMultiStunTest, JsonRoundTrip_EmptyServers_NotSerialized) {
     cfg.device_id = "test-uuid";
     // extra_stun_servers 为空，不应出现在 JSON 中
     json j = cfg;
-    EXPECT_FALSE(j.contains("extra_stun_servers"));
+    EXPECT_FALSE(j["network"].contains("extra_stun_servers"));
 }
 
 TEST_F(ConfigMultiStunTest, FromJson_MissingMultiStunFields_UseDefaults) {
     // 旧配置文件不含新字段
     json j = {
-        {"tracker_host", "1.2.3.4"},
-        {"tracker_port", 9988},
+        {"network", {
+            {"tracker_host", "1.2.3.4"},
+            {"tracker_port", 9988}
+        }},
         {"tasks", json::array()}
     };
 
     Config cfg = j.get<Config>();
-    EXPECT_TRUE(cfg.enable_multi_stun_probing);  // 默认值
-    EXPECT_FALSE(cfg.stun_list_url.empty());
-    EXPECT_TRUE(cfg.extra_stun_servers.empty());
+    EXPECT_TRUE(cfg.network.enable_multi_stun_probing);  // 默认值
+    EXPECT_FALSE(cfg.network.stun_list_url.empty());
+    EXPECT_TRUE(cfg.network.extra_stun_servers.empty());
 }
 
 TEST_F(ConfigMultiStunTest, FromJson_EmptyHostFiltered) {
     json j = {
-        {"tracker_host", "1.2.3.4"},
-        {"tracker_port", 9988},
-        {"tasks", json::array()},
-        {"extra_stun_servers", json::array({
-            {{"host", ""}, {"port", 3478}},  // 空 host，应被过滤
-            {{"host", "valid.stun.com"}, {"port", 3478}}
-        })}
+        {"network", {
+            {"tracker_host", "1.2.3.4"},
+            {"tracker_port", 9988},
+            {"extra_stun_servers", json::array({
+                {{"host", ""}, {"port", 3478}},  // 空 host，应被过滤
+                {{"host", "valid.stun.com"}, {"port", 3478}}
+            })}
+        }},
+        {"tasks", json::array()}
     };
 
     Config cfg = j.get<Config>();
-    ASSERT_EQ(cfg.extra_stun_servers.size(), 1u);
-    EXPECT_EQ(cfg.extra_stun_servers[0].host, "valid.stun.com");
+    ASSERT_EQ(cfg.network.extra_stun_servers.size(), 1u);
+    EXPECT_EQ(cfg.network.extra_stun_servers[0].host, "valid.stun.com");
 }
 
 TEST_F(ConfigMultiStunTest, Validation_InvalidExtraStunServer) {
     Config cfg;
     cfg.device_id = "test-uuid";
-    cfg.tracker_host = "1.2.3.4";
-    cfg.stun_host = "stun.l.google.com";
+    cfg.network.tracker_host = "1.2.3.4";
+    cfg.network.stun_host = "stun.l.google.com";
 
     // 添加一个空 host 的服务器（应该在 from_json 时过滤掉，但如果手动构造则验证应报错）
-    cfg.extra_stun_servers.push_back({"", 3478});
+    cfg.network.extra_stun_servers.push_back({"", 3478});
 
     auto errors = validate_config(cfg);
     bool found = false;
