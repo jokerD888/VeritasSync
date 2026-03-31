@@ -267,7 +267,7 @@ SyncActions SyncManager::compare_states_and_get_requests(const std::vector<FileI
  * - 单向模式：递归删除
  */
 DirSyncActions SyncManager::compare_dir_states(const std::set<std::string>& local_dirs,
-                                               const std::set<std::string>& remote_dirs, SyncMode mode) {
+                                               const std::set<std::string>& remote_dirs, [[maybe_unused]] SyncMode mode) {
     DirSyncActions actions;
 
     // 🌍 构建归一化的查找集合（大小写不敏感）
@@ -341,7 +341,7 @@ DirSyncActions SyncManager::compare_dir_states(const std::set<std::string>& loca
  */
 bool SyncManager::detect_conflict(
     const std::string& local_hash,
-    const std::string& remote_hash,
+    [[maybe_unused]] const std::string& remote_hash,
     const std::optional<SyncHistory>& history
 ) {
     // 场景1: 无历史记录 → 离线新建冲突

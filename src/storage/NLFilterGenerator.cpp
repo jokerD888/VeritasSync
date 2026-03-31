@@ -461,7 +461,7 @@ std::string NLFilterGenerator::build_directory_summary(const std::string& root_p
                 auto depth = [](const std::string& s) {
                     return std::count(s.begin(), s.end(), '/');
                 };
-                int da = depth(a.first), db = depth(b.first);
+                int da = static_cast<int>(depth(a.first)), db = static_cast<int>(depth(b.first));
                 if (da != db) return da < db;  // 浅层优先
                 return a.second.file_count > b.second.file_count;  // 同深度按文件数降序
             });

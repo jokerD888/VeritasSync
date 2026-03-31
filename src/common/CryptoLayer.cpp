@@ -90,7 +90,7 @@ void CryptoLayer::set_key(const std::string& key_string) {
     ok = ok && (EVP_PKEY_CTX_set1_hkdf_salt(ctx, salt, sizeof(salt) - 1) == 1);
     ok = ok && (EVP_PKEY_CTX_set1_hkdf_key(ctx,
             reinterpret_cast<const unsigned char*>(key_string.c_str()),
-            key_string.length()) == 1);
+            static_cast<int>(key_string.length())) == 1);
     ok = ok && (EVP_PKEY_CTX_add1_hkdf_info(ctx, info, sizeof(info) - 1) == 1);
 
     size_t outlen = AES256_KEY_SIZE;

@@ -311,10 +311,10 @@ TEST_F(KcpSessionTest, SendOversizedMessageFails) {
     // 实际上无法分配这么大的内存，所以我们测试边界值
     
     // 测试接近 INT_MAX 的值
-    size_t huge_size = static_cast<size_t>(INT_MAX) + 1;
-    
+    [[maybe_unused]] size_t huge_size = static_cast<size_t>(INT_MAX) + 1;
+
     // 创建一个小数组，但传递一个巨大的 size
-    char dummy_data[100] = {};
+    [[maybe_unused]] char dummy_data[100] = {};
     
     // 注意：这里不能真的传递 INT_MAX+1 的数据，因为会内存溢出
     // 我们只能验证代码逻辑存在检查

@@ -13,7 +13,7 @@ REGISTER_VERITAS_TEST_ENV();
 
 // 【关键修改】Mock 回调：始终返回“无历史记录”
 // 旧代码可能是返回 string，现在必须返回 optional<SyncHistory>
-auto dummy_no_history = [](const std::string& path) -> std::optional<SyncHistory> { return std::nullopt; };
+auto dummy_no_history = []([[maybe_unused]] const std::string& path) -> std::optional<SyncHistory> { return std::nullopt; };
 
 TEST(SyncLogicTest, OneWay_NewRemoteFile_ShouldRequest) {
     std::vector<FileInfo> local;
@@ -56,7 +56,7 @@ TEST(SyncLogicTest, BiDi_RemoteDelete_HistoryMatches_ShouldDelete) {
     std::vector<FileInfo> remote;
 
     // 【关键修改】Mock 回调：返回匹配的历史记录
-    auto history_match = [](const std::string& path) -> std::optional<SyncHistory> {
+    auto history_match = []([[maybe_unused]] const std::string& path) -> std::optional<SyncHistory> {
         return SyncHistory{"hash_old", 0};  // 返回匹配的 Hash
     };
 
@@ -73,7 +73,7 @@ TEST(SyncLogicTest, BiDi_Conflict_HistoryMismatch_ShouldKeep) {
     std::vector<FileInfo> remote;
 
     // 【关键修改】Mock 回调：返回旧的历史记录
-    auto history_mismatch = [](const std::string& path) -> std::optional<SyncHistory> {
+    auto history_mismatch = []([[maybe_unused]] const std::string& path) -> std::optional<SyncHistory> {
         return SyncHistory{"hash_original", 0};  // Hash 不匹配
     };
 
@@ -98,7 +98,7 @@ TEST(SyncLogicTest, BiDi_FreshHistory_ShouldKeep) {
     // 所以 SyncManager 只负责：如果 get_history 返回 nullopt，就保留。
 
     // 模拟 P2PManager 的行为：因为记录太新，所以返回 nullopt
-    auto history_func_intercepted = [](const std::string& path) -> std::optional<SyncHistory> { return std::nullopt; };
+    auto history_func_intercepted = []([[maybe_unused]] const std::string& path) -> std::optional<SyncHistory> { return std::nullopt; };
 
     auto actions =
         SyncManager::compare_states_and_get_requests(local, remote, history_func_intercepted, SyncMode::BiDirectional);

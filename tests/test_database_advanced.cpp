@@ -84,8 +84,9 @@ TEST_F(DatabaseAdvancedTest, RollbackOnError) {
         
         // 模拟异常发生
         throw std::runtime_error("simulated failure");
-        
-        guard.commit();
+
+        // intentionally unreachable — demonstrates that commit() is skipped on exception
+        // guard.commit();  // (注释掉以消除 C4702 unreachable code 警告)
     } catch (...) {
         // 异常被捕获，guard 被自动销毁并回滚
     }

@@ -37,7 +37,7 @@ protected:
     std::shared_ptr<TransferManager> tm;
 
     SendCallback make_send_cb(int return_val = 0) {
-        return [this, return_val](const std::string& peer_id, const std::string& data) -> int {
+        return [this, return_val]([[maybe_unused]] const std::string& peer_id, const std::string& data) -> int {
             send_count++;
             std::lock_guard<std::mutex> lock(send_mutex);
             sent_data.push_back(data);

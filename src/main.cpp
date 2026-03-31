@@ -58,6 +58,7 @@ static std::filesystem::path get_exe_directory() {
 static std::filesystem::path get_system_config_dir() {
 #if defined(_WIN32)
     // %APPDATA%\VeritasSync (e.g. C:\Users\xxx\AppData\Roaming\VeritasSync)
+    #pragma warning(suppress: 4996)  // getenv is safe in this context
     const char* appdata = std::getenv("APPDATA");
     if (appdata) return std::filesystem::path(appdata) / "VeritasSync";
     return get_exe_directory();
@@ -144,7 +145,7 @@ bool relaunch_current_process() {
 #endif
 }
 
-int main(int argc, char* argv[]) {
+int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #if defined(_WIN32)
     HANDLE hMutex = nullptr;
 
@@ -419,7 +420,7 @@ int main(int argc, char* argv[]) {
     auto webui_ready_future = webui_ready_promise.get_future();
     bool webui_started = false;
 
-    std::jthread ui_thread([&web_ui, &webui_ready_promise](std::stop_token stop_token) {
+    std::jthread ui_thread([&web_ui, &webui_ready_promise]([[maybe_unused]] std::stop_token stop_token) {
         // 辅助：安全地设置 promise 值（忽略重复 set_value 异常）
         auto safe_set = [&webui_ready_promise](bool val) {
             try { webui_ready_promise.set_value(val); } catch (...) {}

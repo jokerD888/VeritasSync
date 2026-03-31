@@ -15,6 +15,10 @@
 #include <atomic>
 #include <juice/juice.h>
 
+#ifdef _MSC_VER
+#pragma warning(disable: 4459)  // 回调参数 'agent' 隐藏全局声明（demo 代码，可接受）
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <conio.h>
@@ -68,7 +72,7 @@ const char* state_to_string(juice_state_t state) {
 }
 
 // 回调：状态变化
-void on_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr) {
+void on_state_changed([[maybe_unused]] juice_agent_t* agent, juice_state_t state, [[maybe_unused]] void* user_ptr) {
     cout << "\n========================================" << endl;
     cout << "📡 ICE状态变化: " << state_to_string(state) << endl;
     cout << "========================================" << endl;
@@ -90,7 +94,7 @@ void on_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr)
 }
 
 // 回调：候选地址收集
-void on_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr) {
+void on_candidate([[maybe_unused]] juice_agent_t* agent, const char* sdp, [[maybe_unused]] void* user_ptr) {
     candidate_count++;
     
     cout << "[DEBUG] 候选地址回调被触发 #" << candidate_count.load() << endl;
@@ -113,7 +117,7 @@ void on_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr) {
 }
 
 // 回调：候选地址收集完成
-void on_gathering_done(juice_agent_t* agent, void* user_ptr) {
+void on_gathering_done([[maybe_unused]] juice_agent_t* agent, [[maybe_unused]] void* user_ptr) {
     cout << "[DEBUG] gathering_done 回调被触发" << endl;
     gathering_done = true;
     
@@ -124,7 +128,7 @@ void on_gathering_done(juice_agent_t* agent, void* user_ptr) {
 }
 
 // 回调：接收数据
-void on_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr) {
+void on_recv([[maybe_unused]] juice_agent_t* agent, const char* data, size_t size, [[maybe_unused]] void* user_ptr) {
     string msg(data, size);
     cout << "\n📩 收到消息: " << msg << endl;
 }
@@ -173,7 +177,7 @@ void detect_nat_type(const char* stun_server, int stun_port) {
     memset(&config, 0, sizeof(config));
     
     config.stun_server_host = stun_server;
-    config.stun_server_port = stun_port;
+    config.stun_server_port = static_cast<uint16_t>(stun_port);
     config.cb_state_changed = nullptr;
     config.cb_candidate = nullptr;
     config.cb_gathering_done = nullptr;
@@ -281,7 +285,7 @@ int main() {
     
     stun_server_static = stun_server;
     config.stun_server_host = stun_server_static.c_str();
-    config.stun_server_port = stun_port;
+    config.stun_server_port = static_cast<uint16_t>(stun_port);
     
     if (!turn_server.empty()) {
         turn_server_static = turn_server;
