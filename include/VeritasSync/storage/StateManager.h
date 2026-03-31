@@ -110,6 +110,27 @@ namespace VeritasSync {
         void notify_change_detected(const std::string& full_path);
         void process_debounced_changes();
 
+        // --- Phase 1/2/3 拆分（Phase 1 在独立线程，Phase 2+3 在 io_context）---
+        // Phase 1 中间结果类型（跨方法共享）
+        struct Phase1FileResult {
+            FileInfo info;
+            bool is_echo = false;
+        };
+        struct Phase1DeleteResult {
+            std::string rel_path;
+            enum Type { Unknown, FileDelete, DirDelete } type = Unknown;
+        };
+        struct Phase1DirResult {
+            std::string rel_path;
+        };
+
+        void process_changes_phase1(const std::unordered_set<std::string>& changes);
+        void process_changes_phase2_and_3(
+            std::vector<Phase1FileResult>& file_update_results,
+            std::vector<Phase1DeleteResult>& delete_check_results,
+            const std::vector<Phase1DirResult>& dir_create_results,
+            const std::unordered_set<std::string>& failed_changes);
+
         // 统一调度重试任务 (线程安全，内部使用 post)
         void schedule_retry(int delay_seconds);
 

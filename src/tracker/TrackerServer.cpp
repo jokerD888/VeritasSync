@@ -31,6 +31,21 @@ void TrackerServer::join(std::shared_ptr<Session> session, const std::string& sy
         auto old_session = old_session_it->second;
         if (old_session != session) {
             g_logger->info("[Tracker] 检测到相同 ID 的旧连接，移除旧 session: {}", new_peer_id);
+
+            // 【修复】先广播 PEER_LEAVE 通知其他对等点清理旧连接状态，
+            // 再广播 PEER_JOIN 让它们重新建立连接。
+            // 缺少这一步会导致 B 端保留着指向已失效 ICE 连接的旧 PeerController。
+            json leave_payload;
+            leave_payload["peer_id"] = new_peer_id;
+            json leave_msg;
+            leave_msg[SignalProto::MSG_TYPE] = SignalProto::TYPE_PEER_LEAVE;
+            leave_msg[SignalProto::MSG_PAYLOAD] = leave_payload;
+            for (const auto& peer : peer_set) {
+                if (peer->get_id() != new_peer_id) {
+                    peer->send(leave_msg);
+                }
+            }
+
             peer_set.erase(old_session);
             m_peers_by_id.erase(old_session_it);
         }
