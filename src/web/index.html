@@ -690,7 +690,7 @@
                     <h3 style="color:var(--secondary); margin-bottom:1.5rem; border-bottom:1px solid var(--border); padding-bottom:10px;">🤖 AI 智能忽略规则 (LLM API)</h3>
                     <div class="form-group">
                         <label>API 地址</label>
-                        <input id="cfgLlmApiUrl" class="form-input" placeholder="https://dashscope.aliyuncs.com/compatible-mode" style="font-family:var(--font-mono);font-size:0.85rem;">
+                        <input id="cfgLlmApiUrl" class="form-input" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" style="font-family:var(--font-mono);font-size:0.85rem;">
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
                         <div class="form-group">
@@ -703,7 +703,7 @@
                         </div>
                     </div>
                     <div class="text-sm-sub" style="margin-top:8px;">
-                        * 用于 AI 智能生成忽略规则。支持 OpenAI 兼容 API 格式 (通义千问、DeepSeek、OpenAI 等)。API Key 不会明文显示。
+                        * 用于 AI 智能生成忽略规则。支持 OpenAI 兼容 API 格式 (通义千问、DeepSeek、OpenAI 等)。API 地址需填写完整路径（含 /v1/chat/completions）。API Key 不会明文显示。
                     </div>
                 </div>
             </div>
@@ -1067,19 +1067,38 @@
             b.disabled = false; b.innerText = "💾 保存设置"; 
         }
 
-        async function restartApp() { 
-            if (!confirm("确定要重启吗?")) return; 
-            id('restart-overlay').classList.add('active'); 
-            try { fetch('/api/restart', { method: 'POST' }); } catch (e) { } 
-            let c = 0; 
-            const t = setInterval(async () => { 
-                c++; 
-                try { 
-                    const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2000); 
-                    const r = await fetch('/api/config', { signal: ctl.signal }); 
-                    if (r.ok) { clearInterval(t); safeReload(); } 
-                } catch (e) { if (c > 30) { clearInterval(t); safeReload(); } } 
-            }, 2000); 
+        async function restartApp() {
+            if (!confirm("确定要重启吗?")) return;
+            id('restart-overlay').classList.add('active');
+            try { await fetch('/api/restart', { method: 'POST' }); } catch (e) { }
+            // 重启后新进程会生成新的 auth token，旧 token 失效
+            // 策略：先等几秒让旧进程退出，再轮询检测新进程是否启动
+            const MAX_RETRIES = 30;
+            let c = 0;
+            const t = setInterval(async () => {
+                c++;
+                let tid;
+                try {
+                    const ctl = new AbortController();
+                    tid = setTimeout(() => ctl.abort(), 2000);
+                    const r = await fetch('/api/status', { signal: ctl.signal });
+                    clearTimeout(tid);
+                    if (r.ok) {
+                        clearInterval(t); safeReload();
+                    } else if (r.status === 401) {
+                        // 服务已重启成功，但 token 已更新，需要重新认证
+                        clearInterval(t);
+                        sessionStorage.removeItem('vs_auth_token');
+                        id('restart-overlay').querySelector('h2').textContent = '重启成功！';
+                        id('restart-overlay').querySelector('p').textContent = '服务已重新启动，请通过系统托盘重新打开控制台。';
+                        id('restart-overlay').querySelector('.spinner').style.display = 'none';
+                        setTimeout(() => { window.location.href = '/'; }, 5000);
+                    }
+                } catch (e) {
+                    clearTimeout(tid);
+                    if (c > MAX_RETRIES) { clearInterval(t); safeReload(); }
+                }
+            }, 2000);
         }
 
         function genKey() { 

@@ -125,7 +125,7 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
                 path = rest.substr(path_start);
             } else {
                 host_port = rest;
-                path = "/v1/chat/completions";  // 默认路径
+                path = "/";  // 裸域名，path 留 /
             }
 
             // 解析 port
@@ -148,9 +148,9 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
             base_url += ":" + std::to_string(port);
         }
 
-        // 确保 path 以 /v1/chat/completions 结尾（如果用户只给了域名）
-        if (path.empty() || path == "/") {
-            path = "/v1/chat/completions";
+        // 完全信任用户提供的路径，不做任何补全（默认值在 Config.h）
+        if (path == "/" && g_logger) {
+            g_logger->warn("[NLFilter] API URL 未包含路径（仅裸域名），请检查 config.json 中的 llm.api_url");
         }
 
         // 创建 HTTP 客户端
@@ -168,12 +168,14 @@ NLFilterGenerator::Result NLFilterGenerator::generate_from_llm(
                 {"content", prompt}
             }}},
             {"temperature", config.temperature},
-            {"max_tokens", config.max_tokens},
             {"response_format", {{"type", "json_object"}}}
         };
 
+        // 注意：使用 json_object 模式时不设置 max_tokens，
+        // 因为 DashScope 文档指出设置 max_tokens 可能导致 JSON 不完整被截断
+
         if (g_logger) {
-            g_logger->info("[NLFilter] 调用 LLM API: {} {}", base_url, path);
+            g_logger->info("[NLFilter] 调用 LLM API: {}{}", base_url, path);
         }
 
         auto res = cli.Post(path, request_body.dump(), "application/json");

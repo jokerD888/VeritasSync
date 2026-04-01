@@ -122,7 +122,7 @@ struct Config {
 
     // --- LLM API 配置 ---
     struct LLM {
-        std::string api_url = "https://dashscope.aliyuncs.com/compatible-mode";
+        std::string api_url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
         std::string api_key;
         std::string model = "qwen-turbo";
         double temperature = 0.3;

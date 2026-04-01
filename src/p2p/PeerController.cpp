@@ -477,16 +477,24 @@ void PeerController::on_kcp_message_received(const std::string& message) {
 void PeerController::enable_relay_mode(
     std::function<void(const std::string& peer_id, const uint8_t* data, size_t len)> send_func) {
 
+    // 快速路径：已关闭则跳过（正确性由 setup_kcp_session 内的锁内检查保证）
+    if (!is_valid()) {
+        if (g_logger) g_logger->warn("[PeerController] enable_relay_mode 跳过: {} 已关闭", m_peer_id);
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_relay_send = std::move(send_func);
+        m_relay_mode.store(true);  // 与 m_relay_send 在同一把锁内，保证 on_kcp_output 看到一致状态
     }
-    m_relay_mode.store(true);
 
     // 初始化 KCP（ICE 可能从未到达 Connected 状态，KCP 尚未创建）
+    // 【修复致命死锁】不在此处加锁，setup_kcp_session() 内部会自行加锁
+    // 原代码在此处持有 m_mutex 后调用 setup_kcp_session()，而后者也会加 m_mutex，
+    // std::mutex 不可递归加锁（UB），Windows 上导致死锁/崩溃
     bool expected = false;
     if (m_kcp_initialized.compare_exchange_strong(expected, true)) {
-        std::lock_guard<std::mutex> lock(m_mutex);
         setup_kcp_session();
     }
 
@@ -520,9 +528,9 @@ void PeerController::feed_relay_data(const uint8_t* data, size_t len) {
 
 void PeerController::setup_kcp_session() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
-    // 防止重复创建
-    if (m_kcp) return;
+
+    // 防止重复创建，或在已关闭的 controller 上创建
+    if (m_kcp || !is_valid()) return;
     
     uint32_t conv = calculate_conv();
     
