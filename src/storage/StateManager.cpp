@@ -703,6 +703,7 @@ namespace VeritasSync {
         
         // 筛选需要计算哈希的文件
         std::vector<size_t> files_to_hash;
+        files_to_hash.reserve(pending_files.size());  // 最多全部需要哈希
         for (size_t i = 0; i < pending_files.size(); ++i) {
             if (pending_files[i].need_calc) {
                 files_to_hash.push_back(i);
@@ -768,22 +769,23 @@ namespace VeritasSync {
         // B-2 锁粒度优化：数据库事务移到锁外执行
         // 【修复 #6】先在锁外构建临时 map，再原子替换，避免 clear() 后其他线程读到空 map
         std::vector<FileInfo> db_dirty_entries;
+        db_dirty_entries.reserve(pending_files.size());
         {
             // 在锁外预先构建新的 map
             std::unordered_map<std::string, FileInfo> new_file_map;
+            new_file_map.reserve(pending_files.size());
             for (auto& pf : pending_files) {
                 if (!pf.cached_hash.empty()) {
                     FileInfo info;
-                    info.path = pf.rel_path_str;
-                    info.hash = pf.cached_hash;
+                    info.path = std::move(pf.rel_path_str);
+                    info.hash = std::move(pf.cached_hash);
                     info.modified_time = pf.modified_time;
-                    info.size = pf.file_size;  // 【断点续传】添加 size
-                    
-                    new_file_map[info.path] = info;
-                    
+                    info.size = pf.file_size;
+
                     if (pf.is_dirty) {
-                        db_dirty_entries.push_back(info);
+                        db_dirty_entries.push_back(info);  // copy（dirty 条目需保留给 DB 写入）
                     }
+                    new_file_map[info.path] = std::move(info);  // move 进 map
                 }
             }
 

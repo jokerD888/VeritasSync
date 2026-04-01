@@ -157,6 +157,11 @@ void Database::prepare_statements() {
     sqlite3_stmt* stmt_get_all_files = nullptr;
     sqlite3_prepare_v2(m_db, sql_get_all_files, -1, &stmt_get_all_files, nullptr);
     m_stmt_get_all_files.reset(stmt_get_all_files);
+
+    const char* sql_count_files = "SELECT COUNT(*) FROM files;";
+    sqlite3_stmt* stmt_count_files = nullptr;
+    sqlite3_prepare_v2(m_db, sql_count_files, -1, &stmt_count_files, nullptr);
+    m_stmt_count_files.reset(stmt_count_files);
 }
 std::optional<SyncHistory> Database::get_sync_history(const std::string& peer_id, const std::string& path) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -274,6 +279,15 @@ std::vector<FileMetadata> Database::get_all_files() const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<FileMetadata> files;
     if (!m_db || !m_stmt_get_all_files) return files;
+
+    // 先查 COUNT 预分配容量，避免 vector 反复扩容
+    if (m_stmt_count_files) {
+        sqlite3_reset(m_stmt_count_files.get());
+        if (sqlite3_step(m_stmt_count_files.get()) == SQLITE_ROW) {
+            int count = sqlite3_column_int(m_stmt_count_files.get(), 0);
+            if (count > 0) files.reserve(static_cast<size_t>(count));
+        }
+    }
 
     sqlite3_reset(m_stmt_get_all_files.get());
     while (sqlite3_step(m_stmt_get_all_files.get()) == SQLITE_ROW) {

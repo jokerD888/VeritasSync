@@ -83,6 +83,7 @@ private:
     ScopedStmt m_stmt_hist_delete;
     ScopedStmt m_stmt_get_all_paths;
     ScopedStmt m_stmt_get_all_files;
+    ScopedStmt m_stmt_count_files;  // SELECT COUNT(*) FROM files
     
     mutable std::recursive_mutex m_mutex; 
 };

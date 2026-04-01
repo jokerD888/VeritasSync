@@ -539,7 +539,9 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
             g_logger->error("[KCP] file_update_batch 缺少 files 字段");
             return;
         }
-        for (const auto& file_json : payload["files"]) {
+        const auto& files_arr = payload["files"];
+        files.reserve(files_arr.size());
+        for (const auto& file_json : files_arr) {
             FileInfo fi;
             fi.path = file_json.value("path", "");
             fi.modified_time = file_json.value("mtime", static_cast<uint64_t>(0));
@@ -626,7 +628,9 @@ void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerCo
             g_logger->error("[KCP] file_delete_batch 缺少 paths 字段");
             return;
         }
-        for (const auto& path : payload["paths"]) {
+        const auto& paths_arr = payload["paths"];
+        paths.reserve(paths_arr.size());
+        for (const auto& path : paths_arr) {
             paths.push_back(path.get<std::string>());
         }
     } catch (const std::exception& e) {
@@ -683,12 +687,16 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
     
     try {
         if (payload.contains("creates")) {
-            for (const auto& dir : payload["creates"]) {
+            const auto& creates_arr = payload["creates"];
+            creates.reserve(creates_arr.size());
+            for (const auto& dir : creates_arr) {
                 creates.push_back(dir.get<std::string>());
             }
         }
         if (payload.contains("deletes")) {
-            for (const auto& dir : payload["deletes"]) {
+            const auto& deletes_arr = payload["deletes"];
+            deletes.reserve(deletes_arr.size());
+            for (const auto& dir : deletes_arr) {
                 deletes.push_back(dir.get<std::string>());
             }
         }

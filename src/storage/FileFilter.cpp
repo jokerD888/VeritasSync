@@ -177,7 +177,7 @@ bool FileFilter::should_ignore(std::string_view path) const {
 
     // Tier 3: 默认复杂规则
     for (const auto& re : m_default_complex) {
-        if (std::regex_match(std::string(path), re)) return true;
+        if (std::regex_match(path.begin(), path.end(), re)) return true;
     }
 
     // === 阶段 2: 用户规则 ===
@@ -197,17 +197,35 @@ bool FileFilter::should_ignore(std::string_view path) const {
         }
         // 复杂正则
         for (const auto& rule : m_user_rules) {
-            if (std::regex_match(std::string(path), rule.regex)) return true;
+            if (std::regex_match(path.begin(), path.end(), rule.regex)) return true;
         }
         return false;
     }
 
     // 有取反规则：必须按顺序逐条评估，最后一条匹配的规则决定结果
     // gitignore 语义：最后匹配的规则胜出
+    // 优化：先用快速路径建立基准值，再用正则规则（含取反）覆盖
     bool ignored = false;
+
+    // 快速路径基准：扩展名匹配
+    if (dot_pos != std::string_view::npos) {
+        std::string_view ext = path.substr(dot_pos);
+        if (m_user_fast.exts.count(ext)) ignored = true;
+    }
+    // 快速路径基准：目录前缀匹配
+    if (!ignored) {
+        for (const auto& dir : m_user_fast.dirs) {
+            if (path == dir) { ignored = true; break; }
+            if (path.size() > dir.size() && path.starts_with(dir) && path[dir.size()] == '/') {
+                ignored = true; break;
+            }
+        }
+    }
+
+    // 正则规则可覆盖快速路径结果（含取反规则）
     for (const auto& rule : m_user_rules) {
-        if (std::regex_match(std::string(path), rule.regex)) {
-            ignored = !rule.negated;  // 普通规则 → 忽略；取反规则 → 不忽略
+        if (std::regex_match(path.begin(), path.end(), rule.regex)) {
+            ignored = !rule.negated;
         }
     }
 
