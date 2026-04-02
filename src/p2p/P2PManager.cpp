@@ -185,85 +185,141 @@ void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
 static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;  // 每批最多 50 个文件更新
 static constexpr size_t FILE_DELETE_BATCH_SIZE = 100; // 每批最多 100 个文件删除
 
+// 【P1 修复】广播流控配置
+// 与 SyncSession::perform_flood_sync 保持一致的阈值
+static constexpr int    BROADCAST_FLOW_CONTROL_THRESHOLD = 1024;  // KCP 积压量阈值
+static constexpr int    BROADCAST_FLOW_CONTROL_SLEEP_MS  = 20;    // 积压时等待间隔
+static constexpr int    BROADCAST_FLOW_CONTROL_MAX_WAIT  = 250;   // 单次最大等待轮次（防无限阻塞）
+
+bool P2PManager::send_to_peers_with_flow_control(
+    const std::vector<std::shared_ptr<PeerController>>& peers,
+    const std::string& packet) {
+    bool all_ok = true;
+    for (auto& controller : peers) {
+        // 【流控】发送前检查 KCP 积压量，必要时等待
+        int wait_count = 0;
+        int pending = controller->get_kcp_wait_send();
+        while (pending > BROADCAST_FLOW_CONTROL_THRESHOLD &&
+               controller->is_valid() &&
+               wait_count < BROADCAST_FLOW_CONTROL_MAX_WAIT) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(BROADCAST_FLOW_CONTROL_SLEEP_MS));
+            pending = controller->get_kcp_wait_send();
+            wait_count++;
+        }
+
+        if (controller->send_message(packet) < 0) {
+            all_ok = false;
+        }
+    }
+
+    if (!peers.empty()) {
+        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)",
+                      peers.size(), packet.length());
+    }
+    return all_ok;
+}
+
 void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) {
     if (!can_broadcast(m_role, m_mode)) return;
     if (files.empty()) return;
-    
-    g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
-    
-    // 分批发送
-    bool any_failed = false;
-    for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
-        size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
-        
-        nlohmann::json msg;
-        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
-        msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
-        
-        for (size_t j = i; j < end; ++j) {
-            msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
+
+    // 【P1 修复】投递到 worker 线程执行，避免阻塞 io_context
+    // 流控逻辑需要 sleep 等待 KCP 消化，不能在事件循环线程做
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), files]() {
+        g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
+
+        bool any_failed = false;
+        for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
+            size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
+
+            nlohmann::json msg;
+            msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
+            msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
+
+            for (size_t j = i; j < end; ++j) {
+                msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
+            }
+
+            std::string json_packet;
+            json_packet.push_back(MSG_TYPE_JSON);
+            json_packet.append(msg.dump());
+
+            auto peers = collect_connected_peers();
+            if (!send_to_peers_with_flow_control(peers, json_packet)) {
+                any_failed = true;
+            }
+
+            g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)",
+                           (i / FILE_UPDATE_BATCH_SIZE) + 1,
+                           (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
+                           end - i);
         }
-        
-        if (!send_over_kcp(msg.dump())) {
-            any_failed = true;
+
+        if (any_failed) {
+            g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
         }
-        
-        g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)", 
-                       (i / FILE_UPDATE_BATCH_SIZE) + 1,
-                       (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
-                       end - i);
-    }
-    
-    if (any_failed) {
-        g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
-    }
+    });
 }
 
 void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& paths) {
     if (!can_broadcast(m_role, m_mode)) return;
     if (paths.empty()) return;
-    
-    g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
-    
-    // 分批发送
-    bool any_failed = false;
-    for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
-        size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
-        
-        nlohmann::json msg;
-        msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE_BATCH;
-        msg[Protocol::MSG_PAYLOAD]["paths"] = nlohmann::json::array();
-        
-        for (size_t j = i; j < end; ++j) {
-            msg[Protocol::MSG_PAYLOAD]["paths"].push_back(paths[j]);
+
+    // 【P1 修复】投递到 worker 线程执行，加入流控
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), paths]() {
+        g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
+
+        bool any_failed = false;
+        for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
+            size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
+
+            nlohmann::json msg;
+            msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE_BATCH;
+            msg[Protocol::MSG_PAYLOAD]["paths"] = nlohmann::json::array();
+
+            for (size_t j = i; j < end; ++j) {
+                msg[Protocol::MSG_PAYLOAD]["paths"].push_back(paths[j]);
+            }
+
+            std::string json_packet;
+            json_packet.push_back(MSG_TYPE_JSON);
+            json_packet.append(msg.dump());
+
+            auto peers = collect_connected_peers();
+            if (!send_to_peers_with_flow_control(peers, json_packet)) {
+                any_failed = true;
+            }
         }
-        
-        if (!send_over_kcp(msg.dump())) {
-            any_failed = true;
+
+        if (any_failed) {
+            g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
         }
-    }
-    
-    if (any_failed) {
-        g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
-    }
+    });
 }
 
-void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& creates, 
+void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& creates,
                                               const std::vector<std::string>& deletes) {
     if (!can_broadcast(m_role, m_mode)) return;
     if (creates.empty() && deletes.empty()) return;
-    
-    g_logger->info("[P2P] (Source) 批量广播目录变更: {} 创建, {} 删除", 
-                   creates.size(), deletes.size());
-    
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
-    msg[Protocol::MSG_PAYLOAD]["creates"] = creates;
-    msg[Protocol::MSG_PAYLOAD]["deletes"] = deletes;
-    
-    if (!send_over_kcp(msg.dump())) {
-        g_logger->warn("[P2P] 广播目录变更失败（无可用对等点）");
-    }
+
+    // 【P1 修复】投递到 worker 线程执行，加入流控
+    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), creates, deletes]() {
+        g_logger->info("[P2P] (Source) 批量广播目录变更: {} 创建, {} 删除",
+                       creates.size(), deletes.size());
+
+        nlohmann::json msg;
+        msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
+        msg[Protocol::MSG_PAYLOAD]["creates"] = creates;
+        msg[Protocol::MSG_PAYLOAD]["deletes"] = deletes;
+
+        std::string json_packet;
+        json_packet.push_back(MSG_TYPE_JSON);
+        json_packet.append(msg.dump());
+
+        auto peers = collect_connected_peers();
+        send_to_peers_with_flow_control(peers, json_packet);
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -648,12 +704,22 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
     
     if (state == PeerState::Connected) {
         g_logger->info("[ICE] ✅ 与 {} 建立连接成功！", peer_id);
-        
+
         // 如果是 Source 或双向模式，触发可靠同步会话
         if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
             auto controller = find_peer(peer_id);
-            
+
             if (controller) {
+                // 【P3 修复】检查是否有未完成的传输（连接恢复场景）
+                if (m_transfer_manager) {
+                    auto pending = m_transfer_manager->get_pending_receives_for_peer(peer_id);
+                    if (!pending.empty()) {
+                        g_logger->info("[P2P] 连接恢复，发现 {} 个未完成的接收任务 (peer: {})，"
+                                       "将通过 flood sync 重新评估",
+                                       pending.size(), peer_id);
+                    }
+                }
+
                 g_logger->info("[P2P] 连接激活，准备向对等点 {} 推送文件状态...", peer_id);
                 
                 // 生成新的同步会话 ID

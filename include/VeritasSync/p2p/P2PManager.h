@@ -132,6 +132,13 @@ protected:
     // --- Peer 访问辅助方法（A-3: 消除重复的锁+遍历/查找模式）---
     // 收集所有已连接的 PeerController（在读锁内拷贝，锁外安全使用）
     std::vector<std::shared_ptr<PeerController>> collect_connected_peers() const;
+
+    /// 向多个 peer 发送消息，带 KCP 流控背压（在 worker 线程中调用）
+    /// @return 是否全部发送成功
+    bool send_to_peers_with_flow_control(
+        const std::vector<std::shared_ptr<PeerController>>& peers,
+        const std::string& packet);
+
     // 按 peer_id 查找 PeerController（读锁内拷贝 shared_ptr）
     std::shared_ptr<PeerController> find_peer(const std::string& peer_id) const;
 

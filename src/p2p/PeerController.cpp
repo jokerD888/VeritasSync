@@ -146,18 +146,6 @@ void PeerController::bind_callbacks() {
         });
     };
 
-    // Multi-STUN Probing: 额外候选地址发现回调
-    ice_callbacks.on_extra_candidate = [self_weak, &io](const std::string& candidate_sdp) {
-        boost::asio::post(io, [self_weak, candidate_sdp]() {
-            auto self = self_weak.lock();
-            if (!self) return;
-            // 通过信令通道发送额外候选给对端
-            if (self->m_callbacks.on_signal_needed) {
-                self->m_callbacks.on_signal_needed("ice_candidate", candidate_sdp);
-            }
-        });
-    };
-    
     m_ice->set_callbacks(std::move(ice_callbacks));
     
     if (g_logger) {
@@ -330,37 +318,53 @@ void PeerController::flush_kcp() {
 
 void PeerController::on_ice_state_changed(IceState state) {
     // 此方法通过 weak_ptr + post 调用，到达这里说明对象仍存活
-    
+
+    // 【P0-a 修复】已切换到中继模式后，忽略所有后续 ICE 状态变化
+    // 防止 libjuice completed↔failed 循环不断触发回调（日志刷屏+重复 flood sync）
+    if (m_relay_mode.load()) {
+        if (g_logger) {
+            g_logger->debug("[PeerController] {} 已在中继模式，忽略 ICE 状态变化: {}",
+                           m_peer_id, static_cast<int>(state));
+        }
+        return;
+    }
+
     if (g_logger) {
-        g_logger->info("[PeerController] {} ICE state changed to {}", 
+        g_logger->info("[PeerController] {} ICE state changed to {}",
                        m_peer_id, static_cast<int>(state));
     }
-    
+
     if (state == IceState::Connected || state == IceState::Completed) {
         // ICE 连接成功，设置 KCP
         // 使用原子标志防止重复初始化
         bool expected = false;
         if (m_kcp_initialized.compare_exchange_strong(expected, true)) {
             setup_kcp_session();
-            
+
             // 记录连接时间
             auto now = std::chrono::system_clock::now();
             m_connected_at_ts.store(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     now.time_since_epoch()).count());
         }
-        
-        m_state.store(PeerState::Connected);
-        if (m_callbacks.on_state_changed) {
-            m_callbacks.on_state_changed(PeerState::Connected);
+
+        // 【P0-b 修复】仅在首次到达 Connected/Completed 时通知上层
+        // 使用 compare_exchange 确保 Connecting→Connected 转换只发生一次
+        // 防止 ICE Connected(3) 和 Completed(4) 重复触发 perform_flood_sync
+        PeerState prev = PeerState::Connecting;
+        if (m_state.compare_exchange_strong(prev, PeerState::Connected)) {
+            if (m_callbacks.on_state_changed) {
+                m_callbacks.on_state_changed(PeerState::Connected);
+            }
         }
-        
+        // else: 已经是 Connected 状态（Completed 重复触发），静默跳过
+
     } else if (state == IceState::Failed) {
         m_state.store(PeerState::Failed);
         if (m_callbacks.on_state_changed) {
             m_callbacks.on_state_changed(PeerState::Failed);
         }
-        
+
     } else if (state == IceState::Disconnected) {
         m_state.store(PeerState::Disconnected);
         if (m_callbacks.on_state_changed) {
@@ -487,6 +491,15 @@ void PeerController::enable_relay_mode(
         std::lock_guard<std::mutex> lock(m_mutex);
         m_relay_send = std::move(send_func);
         m_relay_mode.store(true);  // 与 m_relay_send 在同一把锁内，保证 on_kcp_output 看到一致状态
+
+        // 【P0-a 修复】销毁 ICE agent，终止 libjuice 的 completed↔failed 状态循环
+        // relay 模式下数据走 Tracker 中转，ICE 通道不再需要
+        // 注意：m_relay_mode 已设为 true，on_ice_state_changed 会忽略后续回调
+        // 即使有已 post 到 io_context 的回调也会被 relay 检查拦截
+        if (m_ice) {
+            g_logger->info("[PeerController] {} 切换到中继模式，销毁 ICE agent", m_peer_id);
+            m_ice.reset();  // → ~IceTransport() → juice_destroy()
+        }
     }
 
     // 初始化 KCP（ICE 可能从未到达 Connected 状态，KCP 尚未创建）

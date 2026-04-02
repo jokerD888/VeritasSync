@@ -141,6 +141,16 @@ public:
         const std::string& hash,
         uint64_t size);
 
+    /**
+     * @brief 获取指定 peer 的未完成接收任务路径列表
+     *
+     * 用于连接恢复后的诊断日志，了解哪些文件可能需要重传。
+     *
+     * @param peer_id 对端 ID
+     * @return 未完成接收的文件路径列表
+     */
+    std::vector<std::string> get_pending_receives_for_peer(const std::string& peer_id) const;
+
 private:
     StateManager* m_state_manager;
     boost::asio::io_context& m_io_context;
@@ -233,7 +243,7 @@ private:
     // 正在接收的文件映射 (Path -> State)
     // C-2: 使用 shared_ptr 因为 ReceivingFile 含 std::mutex 不可移动
     std::unordered_map<std::string, std::shared_ptr<ReceivingFile>> m_receiving_files;
-    std::mutex m_transfer_mutex;  // 全局锁：保护 map 结构（insert/erase/遍历）
+    mutable std::mutex m_transfer_mutex;  // 全局锁：保护 map 结构（insert/erase/遍历）
     // 【健壮性修复 H6】以 "peer_id\0path" 为 key，防止多 peer 同时请求同一文件时进度覆盖
     std::unordered_map<std::string, SendingFile> m_sending_files;  // 追踪上传
     static std::string make_sending_key(const std::string& peer_id, const std::string& path) {

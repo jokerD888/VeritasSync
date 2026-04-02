@@ -11,8 +11,13 @@
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <chrono>
 
 namespace VeritasSync {
+
+// 前向声明
+struct StunResult;
 
 /**
  * @brief ICE 连接状态
@@ -68,6 +73,10 @@ struct IceConfig {
     // 每个服务器使用独立 socket 探测，发现不同的 reflexive candidate
     std::vector<std::pair<std::string, uint16_t>> extra_stun_servers;
     bool enable_multi_stun_probing = false;
+
+    // SDP 等待 Multi-STUN 探测结果的最大延迟 (ms)
+    // libjuice gathering 完成后，最多再等这么久让 Multi-STUN 结果到达
+    int multi_stun_hold_timeout_ms = 1000;
 };
 
 /**
@@ -93,10 +102,6 @@ struct IceTransportCallbacks {
 
     // 收到数据 (ICE 连接上的原始字节数据)
     std::function<void(const char* data, size_t size)> on_data_received;
-
-    // 额外候选地址发现（Multi-STUN Probing 结果）
-    // 需要通过信令发送给对端
-    std::function<void(const std::string& candidate_sdp)> on_extra_candidate;
 };
 
 /**
@@ -227,6 +232,9 @@ private:
     void handle_state_changed(juice_state_t state);
     void update_connection_type();
     void start_multi_stun_probing();
+    void try_finalize_gathering();
+    void emit_sdp_with_extra_candidates();
+    static uint16_t parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos);
 
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
@@ -241,6 +249,13 @@ private:
     // Multi-STUN Probing 配置
     std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
     bool m_enable_multi_stun_probing = false;
+
+    // Multi-STUN 并行探测汇合状态
+    std::atomic<bool> m_juice_gathering_done{false};
+    std::atomic<bool> m_multi_stun_done{false};
+    std::vector<StunResult> m_multi_stun_results;  // 探测结果缓存（受 m_mutex 保护）
+    std::shared_ptr<boost::asio::steady_timer> m_stun_hold_timer;  // hold 超时定时器
+    std::chrono::milliseconds m_multi_stun_hold_timeout{1000};     // 可配置的 hold 超时
     
     // 【关键修复】TURN服务器配置必须使用成员变量，不能是局部变量
     // 因为jconfig.turn_servers会保存指向它的指针，局部变量会导致悬空指针

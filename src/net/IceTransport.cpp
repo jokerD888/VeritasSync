@@ -4,6 +4,7 @@
 
 #include <juice/juice.h>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <cstring>
 #include <mutex>
 
@@ -89,6 +90,7 @@ bool IceTransport::initialize(const IceConfig& config) {
     // 保存 Multi-STUN 配置
     m_extra_stun_servers = config.extra_stun_servers;
     m_enable_multi_stun_probing = config.enable_multi_stun_probing;
+    m_multi_stun_hold_timeout = std::chrono::milliseconds(config.multi_stun_hold_timeout_ms);
     
     // 配置 STUN
     if (!m_stun_host.empty()) {
@@ -149,10 +151,24 @@ bool IceTransport::initialize(const IceConfig& config) {
 */
 // --- 公共接口 ---
 void IceTransport::gather_candidates() {
-    if (m_agent) {
-        m_state.store(IceState::Gathering);
-        juice_gather_candidates(m_agent);
+    if (!m_agent) return;
+
+    m_state.store(IceState::Gathering);
+    m_juice_gathering_done.store(false);
+    m_multi_stun_done.store(false);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_multi_stun_results.clear();
     }
+
+    // ★ 关键变更：与 libjuice gathering 同时启动 Multi-STUN
+    if (m_enable_multi_stun_probing && !m_extra_stun_servers.empty() && m_io_context) {
+        start_multi_stun_probing();  // 非阻塞，结果通过回调到达
+    } else {
+        m_multi_stun_done.store(true);  // 不需要探测，标记完成
+    }
+
+    juice_gather_candidates(m_agent);  // libjuice 开始自己的 gathering
 }
 
 void IceTransport::set_remote_description(const std::string& remote_sdp) {
@@ -238,39 +254,16 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (!self) return;
 
-    // 1. 通知上层 SDP 已就绪（上层会发送 sdp_offer/sdp_answer）
-    if (self->m_callbacks.on_gathering_done) {
-        std::string local_desc = self->get_local_description();
+    self->m_juice_gathering_done.store(true);
 
-        // 【诊断】记录 SDP 中的候选者类型，帮助排查 NAT 穿透问题
-        if (g_logger) {
-            bool has_host = local_desc.find("typ host") != std::string::npos;
-            bool has_srflx = local_desc.find("typ srflx") != std::string::npos;
-            bool has_relay = local_desc.find("typ relay") != std::string::npos;
-            g_logger->info("[ICE] Gathering 完成。候选者类型: host={} srflx={} relay={}",
-                           has_host ? "✓" : "✗", has_srflx ? "✓" : "✗", has_relay ? "✓" : "✗");
-            if (!has_srflx && !has_relay) {
-                g_logger->warn("[ICE] ⚠️ 无 srflx/relay 候选者！STUN 服务器可能不可达，NAT 穿透将失败");
-            }
-        }
-
-        self->m_callbacks.on_gathering_done(local_desc);
-    }
-
-    // 2. 如果启用了 Multi-STUN Probing，延迟发送 ice_gathering_done
-    //    探测完成后由 start_multi_stun_probing 的回调触发 on_all_candidates_done
-    bool will_probe = self->m_enable_multi_stun_probing
-                      && !self->m_extra_stun_servers.empty()
-                      && self->m_io_context;
-    if (will_probe) {
+    // ★ 尝试汇合：如果 Multi-STUN 也完成了就立即发 SDP
+    if (self->m_io_context) {
         boost::asio::post(*self->m_io_context, [self]() {
-            self->start_multi_stun_probing();
+            self->try_finalize_gathering();
         });
     } else {
-        // 没有 Multi-STUN，立即通知所有候选收集完成
-        if (self->m_callbacks.on_all_candidates_done) {
-            self->m_callbacks.on_all_candidates_done();
-        }
+        // 无 io_context，同步调用
+        self->try_finalize_gathering();
     }
 }
 
@@ -334,6 +327,7 @@ void IceTransport::update_connection_type() {
 
 void IceTransport::start_multi_stun_probing() {
     if (!m_enable_multi_stun_probing || m_extra_stun_servers.empty() || !m_io_context) {
+        m_multi_stun_done.store(true);
         return;
     }
 
@@ -342,47 +336,176 @@ void IceTransport::start_multi_stun_probing() {
                        m_extra_stun_servers.size());
     }
 
-    // 安全地读取回调（m_callbacks 受 m_mutex 保护）
-    std::function<void(const std::string&)> on_extra;
-    std::function<void()> on_all_done;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        on_extra = m_callbacks.on_extra_candidate;
-        on_all_done = m_callbacks.on_all_candidates_done;
-    }
-
     auto servers = m_extra_stun_servers;  // 拷贝，避免在异步回调中引用 this
 
     // 使用调用方的 io_context（由 PeerController 传入），无需创建临时线程
     auto prober = std::make_shared<StunProber>(*m_io_context);
 
     prober->probe(servers, std::chrono::milliseconds(3000),
-        [on_extra, on_all_done, prober](std::vector<StunResult> results) {
+        [self_weak = weak_from_this(), prober](std::vector<StunResult> results) {
+            auto self = self_weak.lock();
+            if (!self) return;
+
             if (g_logger) {
                 g_logger->info("[IceTransport] Multi-STUN 探测完成，发现 {} 个 reflexive 地址",
                                results.size());
             }
-            for (const auto& r : results) {
-                // 构造 SDP candidate 字符串
-                // priority 设较低值（1694498815），确保低于 libjuice 原生发现的候选
-                std::string sdp = "candidate:multi 1 UDP 1694498815 " +
-                                  r.reflexive_ip + " " + std::to_string(r.reflexive_port) +
-                                  " typ srflx";
 
-                if (g_logger) {
-                    g_logger->info("[IceTransport] Multi-STUN 额外候选: {}", sdp);
-                }
-
-                if (on_extra) {
-                    on_extra(sdp);
-                }
+            {
+                std::lock_guard<std::mutex> lock(self->m_mutex);
+                self->m_multi_stun_results = std::move(results);
             }
+            self->m_multi_stun_done.store(true);
 
-            // 所有额外候选已发送，现在通知上层发送 ice_gathering_done
-            if (on_all_done) {
-                on_all_done();
+            // 触发汇合
+            if (self->m_io_context) {
+                boost::asio::post(*self->m_io_context, [self]() {
+                    self->try_finalize_gathering();
+                });
             }
         });
+}
+
+// --- 汇合逻辑 ---
+
+void IceTransport::try_finalize_gathering() {
+    if (!m_juice_gathering_done.load()) return;  // libjuice 还没完成
+
+    if (m_multi_stun_done.load()) {
+        // 两者都完成 → 取消 hold timer，发送 SDP
+        if (m_stun_hold_timer) {
+            m_stun_hold_timer->cancel();
+            m_stun_hold_timer.reset();
+        }
+        emit_sdp_with_extra_candidates();
+        return;
+    }
+
+    // libjuice 完成但 Multi-STUN 未完成 → 启动 hold timer（仅一次）
+    if (!m_stun_hold_timer) {
+        m_stun_hold_timer = std::make_shared<boost::asio::steady_timer>(*m_io_context);
+        m_stun_hold_timer->expires_after(m_multi_stun_hold_timeout);
+        m_stun_hold_timer->async_wait([self_weak = weak_from_this()](const boost::system::error_code& ec) {
+            if (ec) return;
+            auto self = self_weak.lock();
+            if (!self) return;
+
+            size_t result_count;
+            {
+                std::lock_guard<std::mutex> lock(self->m_mutex);
+                result_count = self->m_multi_stun_results.size();
+            }
+
+            if (g_logger) {
+                g_logger->info("[IceTransport] Multi-STUN hold 超时 ({}ms)，使用已有 {} 个结果",
+                              self->m_multi_stun_hold_timeout.count(), result_count);
+            }
+            self->m_multi_stun_done.store(true);
+            self->emit_sdp_with_extra_candidates();
+        });
+    }
+}
+
+// --- SDP 嵌入额外候选 ---
+
+uint16_t IceTransport::parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos) {
+    // 从 "typ srflx" 位置向前找到候选行的端口字段
+    // SDP candidate 格式: a=candidate:... IP PORT typ srflx ...
+    // 需要从 "typ srflx" 往前找 PORT 和 IP
+
+    // 向前搜索找到 "typ" 前面的 "PORT typ" 部分
+    // 先找到 "typ" 前面的空格
+    if (srflx_pos < 5) return 0;  // "typ " 至少 4 字符
+    size_t typ_pos = sdp.rfind("typ", srflx_pos);
+    if (typ_pos == std::string::npos || typ_pos == 0) return 0;
+
+    // typ 前面应该是 "PORT "
+    size_t space_before_typ = sdp.rfind(' ', typ_pos - 1);
+    if (space_before_typ == std::string::npos) return 0;
+
+    // 从 space_before_typ+1 到 typ_pos-1 是端口号
+    std::string port_str = sdp.substr(space_before_typ + 1, typ_pos - space_before_typ - 2);
+
+    // 去除可能的前后空格
+    while (!port_str.empty() && port_str.back() == ' ') port_str.pop_back();
+    while (!port_str.empty() && port_str.front() == ' ') port_str.erase(port_str.begin());
+
+    try {
+        return static_cast<uint16_t>(std::stoi(port_str));
+    } catch (...) {
+        return 0;
+    }
+}
+
+void IceTransport::emit_sdp_with_extra_candidates() {
+    std::string sdp = get_local_description();  // libjuice 原生 SDP
+
+    // 【诊断】记录 SDP 中的候选者类型，帮助排查 NAT 穿透问题
+    if (g_logger) {
+        bool has_host = sdp.find("typ host") != std::string::npos;
+        bool has_srflx = sdp.find("typ srflx") != std::string::npos;
+        bool has_relay = sdp.find("typ relay") != std::string::npos;
+        g_logger->info("[ICE] Gathering 完成。候选者类型: host={} srflx={} relay={}",
+                       has_host ? "✓" : "✗", has_srflx ? "✓" : "✗", has_relay ? "✓" : "✗");
+        if (!has_srflx && !has_relay) {
+            g_logger->warn("[ICE] ⚠️ 无 srflx/relay 候选者！STUN 服务器可能不可达，NAT 穿透将失败");
+        }
+    }
+
+    // 从 libjuice SDP 中提取主 STUN 发现的端口（用于构造替代候选）
+    uint16_t juice_port = 0;
+    auto srflx_pos = sdp.find("typ srflx");
+    if (srflx_pos != std::string::npos) {
+        juice_port = parse_port_from_candidate_line(sdp, srflx_pos);
+    }
+
+    // 构造额外候选行并追加到 SDP
+    std::vector<StunResult> results;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        results = std::move(m_multi_stun_results);  // move 而非 copy
+    }
+
+    std::string extra_lines;
+    extra_lines.reserve(results.size() * 200);  // 预分配，每个结果约 2 行 × ~100 字节
+    for (const auto& r : results) {
+        // 候选1：原始 IP:port（StunProber 的 socket 端口）
+        extra_lines += "a=candidate:multi1 1 UDP 16777215 ";
+        extra_lines += r.reflexive_ip;
+        extra_lines += " ";
+        extra_lines += std::to_string(r.reflexive_port);
+        extra_lines += " typ srflx\r\n";
+
+        // 候选2：探测 IP + libjuice 主端口（适配按IP分流的双WAN）
+        if (juice_port > 0 && juice_port != r.reflexive_port) {
+            extra_lines += "a=candidate:multi2 1 UDP 16777214 ";
+            extra_lines += r.reflexive_ip;
+            extra_lines += " ";
+            extra_lines += std::to_string(juice_port);
+            extra_lines += " typ srflx\r\n";
+        }
+
+        if (g_logger) {
+            g_logger->info("[IceTransport] SDP 嵌入 Multi-STUN 候选: {}:{} (+ port {})",
+                          r.reflexive_ip, r.reflexive_port, juice_port);
+        }
+    }
+
+    if (!extra_lines.empty()) {
+        sdp += extra_lines;  // 追加到 SDP 末尾
+    }
+
+    // 触发上层回调（PeerController → 发送 sdp_offer/sdp_answer）
+    std::function<void(const std::string&)> cb_gathering;
+    std::function<void()> cb_all_done;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cb_gathering = m_callbacks.on_gathering_done;
+        cb_all_done = m_callbacks.on_all_candidates_done;
+    }
+
+    if (cb_gathering) cb_gathering(sdp);
+    if (cb_all_done) cb_all_done();  // 立即发 ice_gathering_done（候选已在 SDP 中）
 }
 
 } // namespace VeritasSync

@@ -852,6 +852,18 @@ void TransferManager::cancel_receives_for_peer(const std::string& peer_id) {
     }
 }
 
+std::vector<std::string> TransferManager::get_pending_receives_for_peer(const std::string& peer_id) const {
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    std::vector<std::string> result;
+    for (const auto& [path, recv_ptr] : m_receiving_files) {
+        if (recv_ptr->peer_id == peer_id &&
+            recv_ptr->received_chunks < recv_ptr->total_chunks) {
+            result.push_back(path);
+        }
+    }
+    return result;
+}
+
 std::optional<TransferManager::ResumeInfo> TransferManager::check_resume_eligibility(
     const std::string& path,
     const std::string& remote_hash,
