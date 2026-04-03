@@ -156,6 +156,7 @@ void IceTransport::gather_candidates() {
     m_state.store(IceState::Gathering);
     m_juice_gathering_done.store(false);
     m_multi_stun_done.store(false);
+    m_gathering_emitted.store(false);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_multi_stun_results.clear();
@@ -409,35 +410,53 @@ void IceTransport::try_finalize_gathering() {
 // --- SDP 嵌入额外候选 ---
 
 uint16_t IceTransport::parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos) {
-    // 从 "typ srflx" 位置向前找到候选行的端口字段
-    // SDP candidate 格式: a=candidate:... IP PORT typ srflx ...
-    // 需要从 "typ srflx" 往前找 PORT 和 IP
+    // SDP candidate 格式: a=candidate:foundation component protocol priority IP PORT typ type ...
+    // PORT 是第 6 个空格分隔字段（0-indexed = 5）
+    // 先回到包含 "typ srflx" 的这一行的起始位置
 
-    // 向前搜索找到 "typ" 前面的 "PORT typ" 部分
-    // 先找到 "typ" 前面的空格
-    if (srflx_pos < 5) return 0;  // "typ " 至少 4 字符
-    size_t typ_pos = sdp.rfind("typ", srflx_pos);
-    if (typ_pos == std::string::npos || typ_pos == 0) return 0;
+    size_t line_start = sdp.rfind('\n', srflx_pos);
+    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
 
-    // typ 前面应该是 "PORT "
-    size_t space_before_typ = sdp.rfind(' ', typ_pos - 1);
-    if (space_before_typ == std::string::npos) return 0;
-
-    // 从 space_before_typ+1 到 typ_pos-1 是端口号
-    std::string port_str = sdp.substr(space_before_typ + 1, typ_pos - space_before_typ - 2);
-
-    // 去除可能的前后空格
-    while (!port_str.empty() && port_str.back() == ' ') port_str.pop_back();
-    while (!port_str.empty() && port_str.front() == ' ') port_str.erase(port_str.begin());
-
-    try {
-        return static_cast<uint16_t>(std::stoi(port_str));
-    } catch (...) {
-        return 0;
+    // 跳过 "a=" 前缀（如果有）
+    size_t pos = line_start;
+    if (sdp.compare(pos, 2, "a=") == 0) {
+        pos += 2;
     }
+
+    // 按空格分割，找到第 6 个字段（index 5 = port）
+    int field_index = 0;
+    while (pos < sdp.size() && field_index < 5) {
+        // 跳过当前字段
+        while (pos < sdp.size() && sdp[pos] != ' ' && sdp[pos] != '\r' && sdp[pos] != '\n') ++pos;
+        // 跳过空格
+        while (pos < sdp.size() && sdp[pos] == ' ') ++pos;
+        ++field_index;
+    }
+
+    if (field_index != 5 || pos >= sdp.size()) return 0;
+
+    // 提取 port 字段
+    size_t port_start = pos;
+    while (pos < sdp.size() && sdp[pos] != ' ' && sdp[pos] != '\r' && sdp[pos] != '\n') ++pos;
+
+    std::string port_str = sdp.substr(port_start, pos - port_start);
+    try {
+        int port = std::stoi(port_str);
+        if (port > 0 && port <= 65535) return static_cast<uint16_t>(port);
+    } catch (...) {}
+    return 0;
 }
 
 void IceTransport::emit_sdp_with_extra_candidates() {
+    // 防重入：hold timer 超时和 Multi-STUN 完成可能都触发此函数
+    bool expected = false;
+    if (!m_gathering_emitted.compare_exchange_strong(expected, true)) {
+        if (g_logger) {
+            g_logger->debug("[IceTransport] emit_sdp_with_extra_candidates 已执行过，跳过重复调用");
+        }
+        return;
+    }
+
     std::string sdp = get_local_description();  // libjuice 原生 SDP
 
     // 【诊断】记录 SDP 中的候选者类型，帮助排查 NAT 穿透问题

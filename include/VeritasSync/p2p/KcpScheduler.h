@@ -50,6 +50,7 @@ public:
     static constexpr uint32_t INTERVAL_RECENT_MS  = 10;   // 近期活跃更新间隔
     static constexpr uint32_t INTERVAL_IDLE_MS    = 100;  // 空闲时更新间隔
     static constexpr int      IDLE_THRESHOLD_SECONDS = 5; // 空闲判定阈值（秒）
+    static constexpr int      KEEPALIVE_INTERVAL_SECONDS = 15; // 心跳间隔（秒）
 
 private:
     void schedule_update();
@@ -61,6 +62,7 @@ private:
 
     uint32_t m_interval_ms = 20;  // 默认 20ms，动态调整
     std::chrono::steady_clock::time_point m_last_data_time;
+    std::chrono::steady_clock::time_point m_last_keepalive_time;
     bool m_running = false;
 };
 

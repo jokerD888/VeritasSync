@@ -253,6 +253,7 @@ private:
     // Multi-STUN 并行探测汇合状态
     std::atomic<bool> m_juice_gathering_done{false};
     std::atomic<bool> m_multi_stun_done{false};
+    std::atomic<bool> m_gathering_emitted{false};  // 防止 emit_sdp 双重触发
     std::vector<StunResult> m_multi_stun_results;  // 探测结果缓存（受 m_mutex 保护）
     std::shared_ptr<boost::asio::steady_timer> m_stun_hold_timer;  // hold 超时定时器
     std::chrono::milliseconds m_multi_stun_hold_timeout{1000};     // 可配置的 hold 超时

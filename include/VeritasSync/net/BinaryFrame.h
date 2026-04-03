@@ -177,6 +177,7 @@ public:
 // ═══════════════════════════════════════════════════════════════
 static const uint8_t MSG_TYPE_JSON = 0x01;
 static const uint8_t MSG_TYPE_BINARY_CHUNK = 0x02;
+static const uint8_t MSG_TYPE_PING = 0x03;  // 心跳包：保持 NAT 映射存活
 
 // ═══════════════════════════════════════════════════════════════
 // 统一的二进制序列化/反序列化工具函数

@@ -1,6 +1,7 @@
 #include "VeritasSync/p2p/KcpScheduler.h"
 
 #include "VeritasSync/common/Logger.h"
+#include "VeritasSync/net/BinaryFrame.h"
 #include "VeritasSync/p2p/PeerController.h"
 
 namespace VeritasSync {
@@ -12,7 +13,8 @@ KcpScheduler::KcpScheduler(boost::asio::io_context& io_context,
       m_timer(io_context),
       m_collect_peers(std::move(collect_peers)),
       m_interval_ms(initial_interval_ms),
-      m_last_data_time(std::chrono::steady_clock::now()) {
+      m_last_data_time(std::chrono::steady_clock::now()),
+      m_last_keepalive_time(std::chrono::steady_clock::now()) {
 }
 
 void KcpScheduler::start() {
@@ -66,11 +68,26 @@ void KcpScheduler::update_all_kcps() {
     // 自适应更新频率
     if (has_activity) {
         m_last_data_time = std::chrono::steady_clock::now();
+        m_last_keepalive_time = std::chrono::steady_clock::now();  // 有数据活动就重置心跳计时
         m_interval_ms = INTERVAL_ACTIVE_MS;
     } else {
-        auto idle_duration = std::chrono::steady_clock::now() - m_last_data_time;
+        auto now = std::chrono::steady_clock::now();
+        auto idle_duration = now - m_last_data_time;
         if (idle_duration > std::chrono::seconds(IDLE_THRESHOLD_SECONDS)) {
             m_interval_ms = INTERVAL_IDLE_MS;
+
+            // 【心跳保活】空闲超过 KEEPALIVE_INTERVAL_SECONDS 秒时，
+            // 发送 1 字节 ping 包保持 NAT 映射存活
+            auto since_last_keepalive = now - m_last_keepalive_time;
+            if (since_last_keepalive >= std::chrono::seconds(KEEPALIVE_INTERVAL_SECONDS)) {
+                m_last_keepalive_time = now;
+                std::string ping_msg(1, static_cast<char>(MSG_TYPE_PING));
+                for (auto& controller : controllers_to_update) {
+                    if (controller->is_valid() && controller->is_connected()) {
+                        controller->send_message(ping_msg);
+                    }
+                }
+            }
         } else {
             m_interval_ms = INTERVAL_RECENT_MS;
         }

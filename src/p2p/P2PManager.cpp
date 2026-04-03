@@ -965,6 +965,8 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
             // 二进制文件块，交给 TransferManager 处理（move 避免 ~16KB 拷贝）
             m_transfer_manager->handle_chunk(std::move(payload), sender_id);
         }
+    } else if (msg_type == MSG_TYPE_PING) {
+        // 心跳包，用于保持 NAT 映射存活，不做任何处理
     } else {
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);
     }
