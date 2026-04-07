@@ -78,24 +78,15 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         g_logger->info("[Sync] 收到同步开始: session={}, files={}, dirs={}",
                        session_id, file_count, dir_count);
 
-        // 【冲突仲裁】如果我们正在进行自己的 flood sync（session_id != 0），
-        // 且我们是 offer_side（self_id < peer_id），则我方优先。
-        // 推迟处理对方的 sync_begin，等我们的 sync 完成后再处理。
+        // 【冲突仲裁】双向 flood sync 时，两端的 sync_begin 会互相覆盖 session_id。
+        // 解决方案：offer_side（self_id < peer_id）优先执行，answer_side 让步。
+        // 让步方直接清除自己的 session_id，接受对方的 sync_begin，不做延迟重试。
         uint64_t my_session = from_peer->get_sync_session_id();
         if (my_session != 0 && from_peer->is_offer_side()) {
-            g_logger->info("[Sync] 双向同步冲突：我方是 offer_side，当前 session={} 优先。"
-                           "延迟处理对方 session={}", my_session, session_id);
-
-            // 延迟 2 秒后重新处理（此时我方 flood sync 应已完成或接近完成）
-            std::string peer_id = from_peer->get_peer_id();
-            auto timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
-            timer->expires_after(std::chrono::seconds(2));
-            timer->async_wait([this, timer, payload, peer_id](const boost::system::error_code& ec) {
-                if (ec) return;
-                m_with_peer(peer_id, [this, &payload](PeerController* peer) {
-                    handle_sync_begin(payload, peer);
-                });
-            });
+            g_logger->info("[Sync] 双向同步冲突：我方是 offer_side (session={})，"
+                           "忽略对方的 sync_begin (session={})", my_session, session_id);
+            // 对方的 sync_begin 被丢弃，我方继续自己的 flood sync。
+            // 我方的 session_id 保持不变，对方稍后会收到我方的 sync_begin。
             return;
         }
 

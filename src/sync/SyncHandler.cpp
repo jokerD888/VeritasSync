@@ -592,12 +592,18 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
             }
         }
         
-        // 3. 批量发送文件请求（带流控，防止 KCP 拥塞）
+        // 3. 批量发送文件请求（KCP 背压流控）
+        // 利用 ikcp_waitsnd() 检测 KCP 积压，积压过高时等待再发，
+        // 避免一次性将所有 request_file 塞入 KCP 发送队列导致双向拥塞。
         if (!files_to_request.empty()) {
             g_logger->info("[Sync] 批量请求 {} 个文件", files_to_request.size());
 
-            // 在 worker 线程中发送，带 KCP 背压检查
-            // 不能在 io_context 线程中 sleep 等待
+            // 流控参数：与 P2PManager::send_to_peers_with_flow_control 对齐
+            static constexpr int BACKPRESSURE_THRESHOLD = 128;  // waitsnd 阈值
+            static constexpr int BACKPRESSURE_SLEEP_MS  = 20;   // 积压时等待间隔
+            static constexpr int PACE_EVERY_N           = 10;   // 每 N 个请求做一次背压检查
+            static constexpr int MAX_BACKOFF_MS         = 200;  // 最大退避等待
+
             for (size_t i = 0; i < files_to_request.size(); ++i) {
                 const auto& remote_info = files_to_request[i];
                 std::string msg = build_file_request(
@@ -614,11 +620,23 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
                     }
                 });
 
-                // 每发 10 个请求检查一次 KCP 背压
-                if ((i + 1) % 10 == 0) {
-                    // 需要通过 m_with_peer 获取 controller 来检查积压
-                    // 简单策略：每 10 个请求暂停一小段时间让 KCP 消化
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                // 每 PACE_EVERY_N 个请求检查一次 KCP 积压量
+                if ((i + 1) % PACE_EVERY_N == 0) {
+                    // 通过 m_with_peer 读取对端的 waitsnd
+                    const int threshold = BACKPRESSURE_THRESHOLD;
+                    const int sleep_ms = BACKPRESSURE_SLEEP_MS;
+                    const int max_backoff = MAX_BACKOFF_MS;
+                    m_with_peer(peer_id, [threshold, sleep_ms, max_backoff](
+                            PeerController* peer_ctrl) {
+                        if (!peer_ctrl) return;
+                        int waited_ms = 0;
+                        while (peer_ctrl->get_kcp_wait_send() > threshold &&
+                               waited_ms < max_backoff) {
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(sleep_ms));
+                            waited_ms += sleep_ms;
+                        }
+                    });
                 }
             }
         }
