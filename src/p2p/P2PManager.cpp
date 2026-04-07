@@ -259,6 +259,9 @@ void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files
         if (any_failed) {
             g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
         }
+
+        // Anti-Entropy: 增量广播完成，重置对账定时器
+        schedule_reconciliation();
     });
 }
 
@@ -295,6 +298,9 @@ void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& pa
         if (any_failed) {
             g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
         }
+
+        // Anti-Entropy: 增量广播完成，重置对账定时器
+        schedule_reconciliation();
     });
 }
 
@@ -319,6 +325,9 @@ void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& cre
 
         auto peers = collect_connected_peers();
         send_to_peers_with_flow_control(peers, json_packet);
+
+        // Anti-Entropy: 增量广播完成，重置对账定时器
+        schedule_reconciliation();
     });
 }
 
@@ -503,12 +512,16 @@ void P2PManager::init() {
 
     m_kcp_scheduler = std::make_unique<KcpScheduler>(m_io_context, collect_peers_cb, m_kcp_update_interval_ms);
 
+    // Anti-Entropy: 创建对账定时器
+    m_reconciliation_timer = std::make_unique<boost::asio::steady_timer>(m_io_context);
+
     start_background_services();
 }
 
 P2PManager::~P2PManager() {
     // A-1: 先停止子组件的定时器
     if (m_kcp_scheduler) m_kcp_scheduler->stop();
+    if (m_reconciliation_timer) m_reconciliation_timer->cancel();
 
     // 【修复】先关闭所有 PeerController（此时 io_context 仍在运行，
     // close() 触发的定时器取消等操作可以正常执行）
@@ -735,6 +748,50 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
     } else if (state == PeerState::Failed) {
         g_logger->warn("[ICE] ❌ 与 {} 连接失败，尝试中继回退...", peer_id);
         attempt_relay_fallback(peer_id);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Anti-Entropy 对账机制
+// 增量广播是 Gossip（快但不保证可靠），对账是 Anti-Entropy（保证最终一致）。
+// 每次增量广播后重置定时器，静默 N 秒后自动触发 flood sync 补全。
+// ═══════════════════════════════════════════════════════════════
+
+void P2PManager::schedule_reconciliation() {
+    if (!m_reconciliation_timer) return;
+    if (!(m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional)) return;
+
+    // 必须在 io_context 线程中操作 timer（steady_timer 非线程安全），
+    // 而此函数可能从 worker_pool 线程调用。
+    boost::asio::post(m_io_context, [this, self = shared_from_this()]() {
+        // 重置定时器（每次增量广播都会调用，只有最后一次生效）
+        m_reconciliation_timer->cancel();
+        m_reconciliation_timer->expires_after(std::chrono::seconds(RECONCILIATION_DELAY_SECONDS));
+        m_reconciliation_timer->async_wait([this, self](const boost::system::error_code& ec) {
+            if (!ec) {
+                trigger_reconciliation();
+            }
+        });
+    });
+}
+
+void P2PManager::trigger_reconciliation() {
+    auto peers = collect_connected_peers();
+    if (peers.empty()) return;
+
+    g_logger->info("[Anti-Entropy] 静默期 {}s 已过，开始对账 (flood sync) 覆盖 {} 个对等点",
+                   RECONCILIATION_DELAY_SECONDS, peers.size());
+
+    for (auto& controller : peers) {
+        uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
+        controller->set_sync_session_id(session_id);
+
+        std::string peer_id = controller->get_peer_id();
+        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), controller, session_id, peer_id]() {
+            g_logger->info("[Anti-Entropy] 开始向 {} 执行对账 flood sync (session={})", peer_id, session_id);
+            m_sync_session->perform_flood_sync(controller, session_id);
+            g_logger->info("[Anti-Entropy] 对账 flood sync 完成 (peer={}, session={})", peer_id, session_id);
+        });
     }
 }
 

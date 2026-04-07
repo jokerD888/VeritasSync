@@ -250,6 +250,15 @@ protected:
     std::unique_ptr<KcpScheduler> m_kcp_scheduler;          // KCP 自适应更新调度
     // --------------------------
 
+    // --- Anti-Entropy 对账机制 ---
+    // 增量广播是"尽力而为"的 Gossip，对账是保证最终一致性的 Anti-Entropy。
+    // 每次增量广播后重置定时器，静默 RECONCILIATION_DELAY 秒后自动触发 flood sync 对账。
+    static constexpr int RECONCILIATION_DELAY_SECONDS = 30;  // 静默期阈值
+    std::unique_ptr<boost::asio::steady_timer> m_reconciliation_timer;
+    void schedule_reconciliation();   // 重置/启动对账定时器
+    void trigger_reconciliation();    // 执行对账（flood sync）
+    // --------------------------
+
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作
     boost::asio::thread_pool m_worker_pool;
