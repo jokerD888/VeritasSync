@@ -147,6 +147,34 @@ bool relaunch_current_process() {
 
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #if defined(_WIN32)
+    // ===== 高 DPI 感知声明（必须在创建任何窗口之前调用）=====
+    // 防止 IFileDialog 等 Shell 对话框在 2K/4K 屏幕上被 DPI 虚拟化缩放
+    {
+        HMODULE hUser32 = LoadLibraryW(L"user32.dll");
+        if (hUser32) {
+            // 优先使用 Win10 1703+ 的 Per-Monitor V2
+            using SetDpiAwarenessContextFunc = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            auto pSetDpiAwarenessContext = reinterpret_cast<SetDpiAwarenessContextFunc>(
+                GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
+            if (pSetDpiAwarenessContext) {
+                pSetDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            } else {
+                // 回退到 Win8.1+ 的 SetProcessDpiAwareness
+                HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+                if (hShcore) {
+                    using SetDpiAwarenessFunc = HRESULT(WINAPI*)(int);
+                    auto pSetDpiAwareness = reinterpret_cast<SetDpiAwarenessFunc>(
+                        GetProcAddress(hShcore, "SetProcessDpiAwareness"));
+                    if (pSetDpiAwareness) {
+                        pSetDpiAwareness(2);  // PROCESS_PER_MONITOR_DPI_AWARE
+                    }
+                    FreeLibrary(hShcore);
+                }
+            }
+            FreeLibrary(hUser32);
+        }
+    }
+
     HANDLE hMutex = nullptr;
 
     // ===== 单实例检查 =====

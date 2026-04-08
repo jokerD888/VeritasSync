@@ -245,15 +245,29 @@ std::string WebUIServer::pick_folder_dialog() {
         // 如果已经初始化过，也是 OK 的
     }
 
+    // 【DPI 修复】确保对话框线程使用 Per-Monitor DPI 上下文，
+    // 防止右键菜单中的 Shell 扩展触发 DPI 虚拟化导致窗口缩放。
+    DPI_AWARENESS_CONTEXT prevDpiCtx = nullptr;
+    {
+        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        if (hUser32) {
+            using SetThreadDpiFunc = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            auto pSetThreadDpiAwarenessContext = reinterpret_cast<SetThreadDpiFunc>(
+                GetProcAddress(hUser32, "SetThreadDpiAwarenessContext"));
+            if (pSetThreadDpiAwarenessContext) {
+                prevDpiCtx = pSetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            }
+        }
+    }
+
     IFileDialog* pfd = NULL;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd)))) {
         DWORD dwOptions;
         if (SUCCEEDED(pfd->GetOptions(&dwOptions)))
             pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
 
-        HWND hParent = GetConsoleWindow();
-
-        if (SUCCEEDED(pfd->Show(hParent))) {
+        // 使用 NULL 父窗口：程序以 /subsystem:windows 运行，无控制台窗口
+        if (SUCCEEDED(pfd->Show(NULL))) {
             IShellItem* psi;
             if (SUCCEEDED(pfd->GetResult(&psi))) {
                 PWSTR pszPath;
@@ -267,6 +281,20 @@ std::string WebUIServer::pick_folder_dialog() {
         }
         pfd->Release();
     }
+
+    // 恢复线程 DPI 上下文
+    if (prevDpiCtx) {
+        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        if (hUser32) {
+            using SetThreadDpiFunc = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            auto pSetThreadDpiAwarenessContext = reinterpret_cast<SetThreadDpiFunc>(
+                GetProcAddress(hUser32, "SetThreadDpiAwarenessContext"));
+            if (pSetThreadDpiAwarenessContext) {
+                pSetThreadDpiAwarenessContext(prevDpiCtx);
+            }
+        }
+    }
+
     CoUninitialize();
     return path;
 #else
