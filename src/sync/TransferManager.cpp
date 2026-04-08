@@ -593,8 +593,12 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
             auto now = std::chrono::steady_clock::now();
 
             // 僵尸复活检测
+            // 【性能修复】从未收到过任何 chunk 的文件（received_chunks==0）不参与僵尸检测。
+            // 原因：大批量预注册时，后面的文件从"预注册"到"收到第一个chunk"可能远超阈值，
+            // 但这只是排队等待，不是"僵尸复活"。真正的僵尸是：之前已收到过数据、然后长期中断。
+            bool has_ever_received = (recv_ptr->received_chunks > 0);
             auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - recv_ptr->last_active).count();
-            if (duration_sec > self->m_transfer_config.zombie_threshold_seconds) {
+            if (has_ever_received && duration_sec > self->m_transfer_config.zombie_threshold_seconds) {
                 if (hdr.chunk_index == 0) {
                     g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", hdr.file_path);
                     recv_ptr->received_chunks = 0;

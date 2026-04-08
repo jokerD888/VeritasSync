@@ -82,6 +82,19 @@ SyncHandler::ConflictResult SyncHandler::resolve_conflict(
     }
 
     std::string remote_hash = remote_info.hash;
+    
+    // 【性能优化】先尝试用 StateManager 缓存的哈希值做快速"相等"判定，
+    // 避免对内容一致的文件做无用的全量 SHA256 计算。
+    // 注意：缓存可能过时，所以只用于 "相等 → Skip" 的快速路径；
+    // 不相等时必须回退到全量 SHA256 确保精确的冲突检测。
+    std::string cached_hash = m_state_manager->get_file_hash(remote_info.path);
+    if (!cached_hash.empty() && cached_hash == remote_hash) {
+        g_logger->debug("[Sync] 内容一致（缓存命中），无需更新: {}", remote_info.path);
+        m_state_manager->record_sync_success(peer_id, remote_info.path, cached_hash);
+        return ConflictResult::Skip;
+    }
+    
+    // 缓存 miss 或不一致，回退到全量 SHA256 确保精确冲突检测
     std::string local_hash = Hashing::CalculateSHA256(full_path);
     std::string base_hash = m_state_manager->get_base_hash(peer_id, remote_info.path);
 

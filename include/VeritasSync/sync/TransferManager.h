@@ -47,7 +47,7 @@ public:
         int file_open_max_retries       = 5;
         int file_open_retry_delay_ms    = 200;
         int stall_threshold_ms          = 5000;
-        int zombie_threshold_seconds    = 10;
+        int zombie_threshold_seconds    = 60;
         int receive_timeout_minutes     = 10;
         int congestion_wait_high_ms     = 200;
         int congestion_wait_low_ms      = 100;

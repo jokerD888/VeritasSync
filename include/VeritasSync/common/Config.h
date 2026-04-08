@@ -69,7 +69,7 @@ struct Config {
     struct Transfer {
         size_t chunk_size = 16384;
         int stall_threshold_ms = 5000;
-        int zombie_threshold_seconds = 10;
+        int zombie_threshold_seconds = 60;
         int receive_timeout_minutes = 10;
         int congestion_wait_high_ms = 200;
         int congestion_wait_low_ms = 100;
