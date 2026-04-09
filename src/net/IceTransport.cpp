@@ -378,7 +378,14 @@ void IceTransport::try_finalize_gathering() {
             m_stun_hold_timer->cancel();
             m_stun_hold_timer.reset();
         }
-        emit_sdp_with_extra_candidates();
+
+        // ★ 关键修复：如果 SDP 已经发出（hold timer 超时先触发了），
+        // 将迟到的 Multi-STUN 结果作为 trickle ICE candidate 补发
+        if (m_gathering_emitted.load()) {
+            send_late_multi_stun_candidates();
+        } else {
+            emit_sdp_with_extra_candidates();
+        }
         return;
     }
 
@@ -525,6 +532,60 @@ void IceTransport::emit_sdp_with_extra_candidates() {
 
     if (cb_gathering) cb_gathering(sdp);
     if (cb_all_done) cb_all_done();  // 立即发 ice_gathering_done（候选已在 SDP 中）
+}
+
+void IceTransport::send_late_multi_stun_candidates() {
+    // ★ SDP 已经发出，但 Multi-STUN 结果迟到了
+    // 将迟到的结果作为独立的 ice_candidate 信令补发给对端
+    // 对端通过 add_remote_candidate() 添加后仍可参与 ICE 连接性检查
+
+    std::vector<StunResult> results;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        results = std::move(m_multi_stun_results);
+    }
+
+    if (results.empty()) return;
+
+    // 获取 libjuice 主 SDP 中 srflx 的端口（用于构造替代候选）
+    uint16_t juice_port = 0;
+    std::string sdp = get_local_description();
+    auto srflx_pos = sdp.find("typ srflx");
+    if (srflx_pos != std::string::npos) {
+        juice_port = parse_port_from_candidate_line(sdp, srflx_pos);
+    }
+
+    std::function<void(const std::string&)> cb_candidate;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        cb_candidate = m_callbacks.on_local_candidate;
+    }
+
+    if (!cb_candidate) return;
+
+    if (g_logger) {
+        g_logger->info("[IceTransport] SDP 已发出，补发 {} 个迟到的 Multi-STUN 候选",
+                       results.size());
+    }
+
+    for (const auto& r : results) {
+        // 候选1：Multi-STUN 探测 IP:port（StunProber 的 socket 映射端口）
+        std::string candidate1 = "a=candidate:multi1 1 UDP 16777215 " +
+            r.reflexive_ip + " " + std::to_string(r.reflexive_port) + " typ srflx";
+        cb_candidate(candidate1);
+
+        // 候选2：Multi-STUN IP + libjuice 主端口（适配按 IP 分流的双 WAN）
+        if (juice_port > 0 && juice_port != r.reflexive_port) {
+            std::string candidate2 = "a=candidate:multi2 1 UDP 16777214 " +
+                r.reflexive_ip + " " + std::to_string(juice_port) + " typ srflx";
+            cb_candidate(candidate2);
+        }
+
+        if (g_logger) {
+            g_logger->info("[IceTransport] 补发 Multi-STUN 候选: {}:{} (+ port {})",
+                          r.reflexive_ip, r.reflexive_port, juice_port);
+        }
+    }
 }
 
 } // namespace VeritasSync

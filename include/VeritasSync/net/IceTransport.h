@@ -76,7 +76,8 @@ struct IceConfig {
 
     // SDP 等待 Multi-STUN 探测结果的最大延迟 (ms)
     // libjuice gathering 完成后，最多再等这么久让 Multi-STUN 结果到达
-    int multi_stun_hold_timeout_ms = 1000;
+    // 注意：StunProber 超时为 3000ms，此值应尽量接近但不超过它
+    int multi_stun_hold_timeout_ms = 2500;
 };
 
 /**
@@ -234,6 +235,7 @@ private:
     void start_multi_stun_probing();
     void try_finalize_gathering();
     void emit_sdp_with_extra_candidates();
+    void send_late_multi_stun_candidates();
     static uint16_t parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos);
 
     juice_agent_t* m_agent = nullptr;
@@ -256,7 +258,7 @@ private:
     std::atomic<bool> m_gathering_emitted{false};  // 防止 emit_sdp 双重触发
     std::vector<StunResult> m_multi_stun_results;  // 探测结果缓存（受 m_mutex 保护）
     std::shared_ptr<boost::asio::steady_timer> m_stun_hold_timer;  // hold 超时定时器
-    std::chrono::milliseconds m_multi_stun_hold_timeout{1000};     // 可配置的 hold 超时
+    std::chrono::milliseconds m_multi_stun_hold_timeout{2500};     // 可配置的 hold 超时
     
     // 【关键修复】TURN服务器配置必须使用成员变量，不能是局部变量
     // 因为jconfig.turn_servers会保存指向它的指针，局部变量会导致悬空指针
