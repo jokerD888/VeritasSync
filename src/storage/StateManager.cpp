@@ -92,7 +92,7 @@ namespace VeritasSync {
 
     StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                                StateManagerCallbacks callbacks, bool enable_watcher,
-                               const std::string& sync_key, SyncConfig sync_config)
+                               const std::string& sync_key, StateManager::SyncConfig sync_config)
         : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
           m_io_context(io_context),
           m_callbacks(std::move(callbacks)),

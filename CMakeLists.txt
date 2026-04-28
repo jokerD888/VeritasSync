@@ -76,6 +76,9 @@ add_executable(veritas_sync WIN32
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
+    src/p2p/PeerRegistry.cpp
+    src/p2p/MessageRouter.cpp
+    src/p2p/BroadcastManager.cpp
     src/p2p/KcpScheduler.cpp
     src/p2p/WebUI.cpp
     src/storage/StateManager.cpp
@@ -303,6 +306,9 @@ add_executable(unit_tests
     src/net/UpnpManager.cpp
     src/net/StunProber.cpp
     src/p2p/PeerController.cpp
+    src/p2p/PeerRegistry.cpp
+    src/p2p/MessageRouter.cpp
+    src/p2p/BroadcastManager.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/KcpScheduler.cpp

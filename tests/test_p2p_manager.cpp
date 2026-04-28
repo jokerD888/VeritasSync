@@ -90,18 +90,26 @@ TEST_F(P2PManagerTest, SetEncryptionKey) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 3. ICE 配置测试
+// 3. ICE 配置测试（已迁移到 P2PManagerConfig，不再通过 setter）
 // ═══════════════════════════════════════════════════════════════
 
-TEST_F(P2PManagerTest, SetStunConfig) {
-    m_manager->set_stun_config("stun.l.google.com", 19302);
-    m_manager->set_stun_config("stun1.l.google.com", 19302);
-    m_manager->set_stun_config("", 0);  // 空服务器
+TEST_F(P2PManagerTest, StunConfigViaP2PManagerConfig) {
+    P2PManagerConfig config;
+    config.stun_host = "stun.l.google.com";
+    config.stun_port = 19302;
+    // 配置通过 create() 注入，验证不崩溃即可
+    auto manager = P2PManager::create(config);
+    EXPECT_NE(manager, nullptr);
 }
 
-TEST_F(P2PManagerTest, SetTurnConfig) {
-    m_manager->set_turn_config("turn.example.com", 3478, "user", "pass");
-    m_manager->set_turn_config("", 0, "", "");  // 空配置
+TEST_F(P2PManagerTest, TurnConfigViaP2PManagerConfig) {
+    P2PManagerConfig config;
+    config.turn_host = "turn.example.com";
+    config.turn_port = 3478;
+    config.turn_username = "user";
+    config.turn_password = "pass";
+    auto manager = P2PManager::create(config);
+    EXPECT_NE(manager, nullptr);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -347,7 +355,6 @@ TEST_F(P2PManagerTest, CreateUseAndDestroy) {
         
         manager->set_role(SyncRole::Source);
         manager->set_mode(SyncMode::OneWay);
-        manager->set_stun_config("stun.l.google.com", 19302);
         manager->broadcast_current_state();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -419,15 +426,13 @@ TEST(SyncEnumsTest, SyncModeValues) {
 // ═══════════════════════════════════════════════════════════════
 
 TEST_F(P2PManagerTest, ChainedConfiguration) {
-    // 连续配置不应崩溃
+    // 连续配置不应崩溃（STUN/TURN 已迁移到 P2PManagerConfig）
     m_manager->set_role(SyncRole::Source);
     m_manager->set_mode(SyncMode::BiDirectional);
-    m_manager->set_stun_config("stun.l.google.com", 19302);
-    m_manager->set_turn_config("turn.example.com", 3478, "user", "pass");
     m_manager->set_encryption_key("my_secret_key");
     m_manager->set_state_manager(nullptr);
     m_manager->set_tracker_client(nullptr);
-    
+
     // 重复配置也不应崩溃
     m_manager->set_role(SyncRole::Destination);
     m_manager->set_mode(SyncMode::OneWay);

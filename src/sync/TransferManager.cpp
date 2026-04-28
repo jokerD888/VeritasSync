@@ -167,7 +167,7 @@ TransferManager::SessionStats TransferManager::get_session_stats() const {
 }
 TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
                                  boost::asio::thread_pool& pool, SendCallback send_cb,
-                                 size_t chunk_size, TransferConfig config)
+                                 size_t chunk_size, TransferManager::TransferConfig config)
     : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)),
       CHUNK_DATA_SIZE(chunk_size), m_transfer_config(std::move(config)) {}
 

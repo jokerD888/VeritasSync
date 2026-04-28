@@ -7,9 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 // === 第三方库（成员变量为值类型，需完整定义）===
@@ -23,8 +21,11 @@
 #include "VeritasSync/sync/TransferManager.h"  // TransferManager::SessionStats（返回值类型）
 #include "VeritasSync/net/UpnpManager.h"       // UpnpManager（成员变量值类型）
 
-// === A-1 提取的子组件 ===
-#include "VeritasSync/p2p/KcpScheduler.h"      // KcpScheduler（unique_ptr）
+// === 子组件 ===
+#include "VeritasSync/p2p/KcpScheduler.h"       // KcpScheduler（unique_ptr）
+#include "VeritasSync/p2p/PeerRegistry.h"       // PeerRegistry（成员变量值类型）
+#include "VeritasSync/p2p/MessageRouter.h"      // MessageRouter（成员变量值类型）
+#include "VeritasSync/p2p/BroadcastManager.h"   // BroadcastManager（unique_ptr）
 
 // === 前向声明（替代 #include，减少编译依赖）===
 // 以下类型在头文件中仅以指针/引用/智能指针形式出现，无需完整定义
@@ -51,11 +52,22 @@ class SyncSession;
 struct IceConfig;
 enum class PeerState;
 
-/// P2P 性能参数配置（传入 P2PManager::create()）
+/// P2P 性能参数与网络配置（传入 P2PManager::create()）
 struct P2PManagerConfig {
+    // 性能参数
     size_t   chunk_size              = 16384;   // 文件分块大小
     uint32_t kcp_window_size         = 256;     // KCP 窗口大小
     uint32_t kcp_update_interval_ms  = 20;      // KCP 更新间隔（毫秒）
+
+    // STUN/TURN 配置（原 5 个 setter 合并）
+    std::string stun_host            = "stun.l.google.com";
+    uint16_t    stun_port            = 19302;
+    std::string turn_host;
+    uint16_t    turn_port            = 3478;
+    std::string turn_username;
+    std::string turn_password;
+    std::vector<std::pair<std::string, uint16_t>> extra_stun_servers;
+    bool        enable_multi_stun_probing = false;
 };
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
@@ -70,9 +82,6 @@ public:
     void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
     void set_mode(SyncMode mode);
-    void set_stun_config(std::string host, uint16_t port);
-    void set_turn_config(std::string host, uint16_t port, std::string username, std::string password);
-    void set_extra_stun_servers(std::vector<std::pair<std::string, uint16_t>> servers, bool enable);
 
     virtual ~P2PManager();
 
@@ -83,17 +92,17 @@ public:
      */
     virtual void connect_to_peers(const std::vector<std::string>& peer_addresses, bool force = false);
 
-    // --- 广播方法 ---
+    // --- 广播方法（委托给 BroadcastManager）---
     virtual void broadcast_current_state();
     virtual void broadcast_file_update(const FileInfo& file_info);
     virtual void broadcast_file_delete(const std::string& relative_path);
     virtual void broadcast_dir_create(const std::string& relative_path);
     virtual void broadcast_dir_delete(const std::string& relative_path);
-    
-    // --- 批量广播方法 (阶段1优化) ---
+
+    // --- 批量广播方法（委托给 BroadcastManager）---
     virtual void broadcast_file_updates_batch(const std::vector<FileInfo>& files);
     virtual void broadcast_file_deletes_batch(const std::vector<std::string>& paths);
-    virtual void broadcast_dir_changes_batch(const std::vector<std::string>& creates, 
+    virtual void broadcast_dir_changes_batch(const std::vector<std::string>& creates,
                                              const std::vector<std::string>& deletes);
 
     // --- 由 TrackerClient 调用 ---
@@ -129,29 +138,16 @@ protected:
 
     // --- KCP 集成（已提取到 KcpScheduler）---
 
-    // --- Peer 访问辅助方法（A-3: 消除重复的锁+遍历/查找模式）---
-    // 收集所有已连接的 PeerController（在读锁内拷贝，锁外安全使用）
-    std::vector<std::shared_ptr<PeerController>> collect_connected_peers() const;
-
-    /// 向多个 peer 发送消息，带 KCP 流控背压（在 worker 线程中调用）
-    /// @return 是否全部发送成功
-    bool send_to_peers_with_flow_control(
-        const std::vector<std::shared_ptr<PeerController>>& peers,
-        const std::string& packet);
-
-    // 按 peer_id 查找 PeerController（读锁内拷贝 shared_ptr）
-    std::shared_ptr<PeerController> find_peer(const std::string& peer_id) const;
+    // --- Peer 访问委托给 PeerRegistry ---
 
     // --- 上层应用逻辑（使用 PeerController）---
-    // LOGIC-003: send_over_kcp 返回bool表示是否至少有一个对等点成功接收
+    // send_over_kcp 返回bool表示是否至少有一个对等点成功接收
     bool send_over_kcp(const std::string& msg);
     void send_over_kcp_peer(const std::string& msg, PeerController* peer);
     void send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id);
     void handle_kcp_message(const std::string& msg, PeerController* from_peer);
 
-    // --- A-2: connect_to_peers 拆分子方法 ---
-    // 检查已存在的 peer 是否可复用，返回 true 表示应跳过该 peer
-    bool try_reuse_existing_peer(const std::string& peer_id, bool force);
+    // --- 连接管理子方法 ---
     // 创建 PeerController 及其回调
     std::shared_ptr<PeerController> create_peer_controller(const std::string& self_id,
                                                            const std::string& peer_id);
@@ -159,41 +155,36 @@ protected:
     void setup_answer_timeout(std::shared_ptr<PeerController> controller,
                               const std::string& peer_id);
 
-    // --- A-2: init 拆分子方法 ---
+    // --- 初始化子方法 ---
     void create_transfer_manager();     // 创建 TransferManager 及其回调
     void create_sync_components();      // 创建 SyncHandler 和 SyncSession
     void start_background_services();   // 启动 IO 线程、定时器、UPnP
+    void register_message_handlers();   // 注册所有消息路由（MessageRouter）
 
-    // --- A-2: handle_kcp_message 拆分子方法 ---
-    // JSON 消息分发路由
-    void dispatch_json_message(const std::string& json_msg_type,
-                               nlohmann::json& json_payload,
-                               PeerController* from_peer,
-                               bool can_receive);
+    // --- 消息路由（见 register_message_handlers()）---
 
-    // --- 消息处理器（已迁移到 SyncHandler）---
+    // --- 消息处理器（见 SyncHandler）---
 
-    // --- 同步会话管理（已迁移到 SyncSession）---
+    // --- 同步会话管理（见 SyncSession）---
 
-    // 【重构】新增：PeerController 回调处理
+    // PeerController 回调处理
     void handle_peer_state_changed(const std::string& peer_id, PeerState state);
     void handle_peer_message(const std::string& peer_id, const std::string& message);
 
-    // 【中继回退】ICE 失败时通过 Tracker 中继数据
+    // 中继回退：ICE 失败时通过 Tracker 中继数据
     void attempt_relay_fallback(const std::string& peer_id);
     void handle_relay_data(const std::string& from_peer_id, const uint8_t* data, size_t len);
     
-    // 【重构】新增：创建 ICE 配置
+    // 创建 ICE 配置
     IceConfig create_ice_config() const;
     
     // --- 断点续传相关 ---
-    void broadcast_goodbye();
     static constexpr int GRACEFUL_SHUTDOWN_TIMEOUT_MS = 500;  // 优雅关闭等待超时
     void wait_for_kcp_flush(int timeout_ms = GRACEFUL_SHUTDOWN_TIMEOUT_MS);
     void handle_goodbye(PeerController* from_peer);
 
 
-    // --- UPnP 辅助函数（已迁移到 UpnpManager）---
+    // --- UPnP 管理器 ---
 
     // --- 成员变量 ---
     // m_io_context 所有网络事件的事件循环
@@ -205,10 +196,8 @@ protected:
     SyncRole m_role = SyncRole::Source;
     SyncMode m_mode = SyncMode::OneWay;
 
-    // 【重构】新的 Peer 管理方式
-    // 使用 shared_mutex: 读操作(查找)可并行，写操作(增删)互斥
-    std::unordered_map<std::string, std::shared_ptr<PeerController>> m_peers;
-    mutable std::shared_mutex m_peers_mutex;
+    // Peer 管理（委托给 PeerRegistry）
+    PeerRegistry m_peer_registry;
 
     CryptoLayer m_crypto;
 
@@ -221,17 +210,13 @@ protected:
     // --- 同步会话管理器 ---
     std::unique_ptr<SyncSession> m_sync_session;
 
-    // --- STUN 服务器配置 ---
-    std::string m_stun_host = "stun.l.google.com";  // 默认公共STUN
+    // --- STUN/TURN 配置（从 P2PManagerConfig 初始化）---
+    std::string m_stun_host;
     uint16_t m_stun_port = 19302;
-    // --------------------------
-
     std::string m_turn_host;
     uint16_t m_turn_port = 3478;
     std::string m_turn_username;
     std::string m_turn_password;
-
-    // --- Multi-STUN Probing 配置 ---
     std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
     bool m_enable_multi_stun_probing = false;
     // --------------------------
@@ -246,24 +231,17 @@ protected:
     UpnpManager m_upnp;
     // --------------------------
 
-    // --- A-1: 提取的子组件 ---
+    // --- 子组件 ---
     std::unique_ptr<KcpScheduler> m_kcp_scheduler;          // KCP 自适应更新调度
-    // --------------------------
-
-    // --- Anti-Entropy 对账机制 ---
-    // 增量广播是"尽力而为"的 Gossip，对账是保证最终一致性的 Anti-Entropy。
-    // 每次增量广播后重置定时器，静默 RECONCILIATION_DELAY 秒后自动触发 flood sync 对账。
-    static constexpr int RECONCILIATION_DELAY_SECONDS = 30;  // 静默期阈值
-    std::unique_ptr<boost::asio::steady_timer> m_reconciliation_timer;
-    void schedule_reconciliation();   // 重置/启动对账定时器
-    void trigger_reconciliation();    // 执行对账（flood sync）
+    MessageRouter m_message_router;                          // 消息类型路由表
+    std::unique_ptr<BroadcastManager> m_broadcast_manager;   // 广播与对账
     // --------------------------
 
     // --- 线程池 ---
     // 用于执行 Hash 计算、文件 IO、压缩加密等耗时操作
     boost::asio::thread_pool m_worker_pool;
     
-    // 【修复 #7】可配置性能参数
+    // 可配置性能参数
     size_t m_chunk_size = 16384;             // 文件分块大小
     uint32_t m_kcp_window_size = 256;        // KCP 窗口大小
     uint32_t m_kcp_update_interval_ms = 20;  // KCP 更新间隔（毫秒）

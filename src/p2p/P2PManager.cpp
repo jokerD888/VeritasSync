@@ -1,10 +1,5 @@
 #include "VeritasSync/p2p/P2PManager.h"
 
-// ============================================================
-// 【重构完成】从 PeerContext 迁移到 PeerController
-// 日期：2026-01-01
-// ============================================================
-
 #include <algorithm>
 #include <boost/asio/ip/udp.hpp>
 #include <boost/asio/post.hpp>
@@ -20,56 +15,26 @@
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/p2p/TrackerClient.h"
 
-// A-4: 前向声明优化后需要在 .cpp 中显式 include
+// 前向声明对应的完整定义
 #include "VeritasSync/p2p/PeerController.h"
 #include "VeritasSync/sync/SyncHandler.h"
 #include "VeritasSync/sync/SyncSession.h"
 
-// A-1: 提取的子组件
+// 子组件
 #include "VeritasSync/p2p/KcpScheduler.h"
+#include "VeritasSync/p2p/BroadcastManager.h"
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量
-// KCP 间隔常量已提取到 KcpScheduler
-static constexpr int      ANSWER_WAIT_TIMEOUT_SECONDS= 30;   // Answer 方等待 Offer 超时（秒）
-static constexpr int      CLEANUP_INTERVAL_MINUTES   = 5;    // 清理任务定时器间隔（分钟）
-static constexpr int      KCP_FLUSH_POLL_MS          = 20;   // KCP flush 轮询间隔（毫秒）
+// 命名常量
+static constexpr int      ANSWER_WAIT_TIMEOUT_SECONDS= 30;
+static constexpr int      CLEANUP_INTERVAL_MINUTES   = 5;
+static constexpr int      KCP_FLUSH_POLL_MS          = 20;
 
 // ═══════════════════════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════════════════════
 
-bool can_broadcast(SyncRole role, SyncMode mode) {
-    if (role == SyncRole::Source) return true;
-    if (mode == SyncMode::BiDirectional) return true;
-    return false;
-}
-
-// --- A-3: Peer 访问辅助方法（消除重复的 锁+遍历/查找 模式）---
-
-std::vector<std::shared_ptr<PeerController>> P2PManager::collect_connected_peers() const {
-    std::vector<std::shared_ptr<PeerController>> result;
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    for (auto& [peer_id, controller] : m_peers) {
-        if (controller->is_connected()) {
-            result.push_back(controller);
-        }
-    }
-    return result;
-}
-
-std::shared_ptr<PeerController> P2PManager::find_peer(const std::string& peer_id) const {
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    auto it = m_peers.find(peer_id);
-    if (it != m_peers.end()) {
-        return it->second;
-    }
-    return nullptr;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 新增辅助函数
 // ═══════════════════════════════════════════════════════════════
 
 IceConfig P2PManager::create_ice_config() const {
@@ -82,7 +47,6 @@ IceConfig P2PManager::create_ice_config() const {
         config.turn_username = m_turn_username;
         config.turn_password = m_turn_password;
     }
-    // Multi-STUN Probing 配置
     config.extra_stun_servers = m_extra_stun_servers;
     config.enable_multi_stun_probing = m_enable_multi_stun_probing;
     return config;
@@ -92,243 +56,26 @@ IceConfig P2PManager::create_ice_config() const {
 // 基础设置
 // ═══════════════════════════════════════════════════════════════
 
-void P2PManager::set_encryption_key(const std::string& key_string) { 
-    m_crypto.set_key(key_string); 
+void P2PManager::set_encryption_key(const std::string& key_string) {
+    m_crypto.set_key(key_string);
 }
-
-// GCM_IV_LEN 和 GCM_TAG_LEN 已统一定义在 CryptoLayer.h 中
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 
 // ═══════════════════════════════════════════════════════════════
-// 广播方法
+// 广播方法（委托给 BroadcastManager）
 // ═══════════════════════════════════════════════════════════════
 
-void P2PManager::broadcast_current_state() {
-    if (!can_broadcast(m_role, m_mode)) return;
-    if (!m_state_manager) return;
-
-    boost::asio::post(m_worker_pool, [self = shared_from_this()]() {
-        // 【修复 Bug C】二次检查：post 之后 StateManager 可能已被 stop() 置空
-        if (!self->m_state_manager) return;
-        
-        self->m_state_manager->scan_directory();
-        std::string json_state = self->m_state_manager->get_state_as_json_string();
-
-        std::string json_packet;
-        json_packet.push_back(MSG_TYPE_JSON);
-        json_packet.append(json_state);
-
-        // 使用 collect_connected_peers 替代手动加锁遍历
-        boost::asio::post(self->m_io_context, [self, json_packet = std::move(json_packet)]() {
-            auto peers = self->collect_connected_peers();
-            for (auto& controller : peers) {
-                controller->send_message(json_packet);
-            }
-            if (!peers.empty()) {
-                g_logger->info("[P2P] (Source) 广播状态完成 (发送给 {} 个对等点)", peers.size());
-            }
-        });
-    });
-}
-
-void P2PManager::broadcast_file_update(const FileInfo& file_info) {
-    if (!can_broadcast(m_role, m_mode)) return;
-    g_logger->info("[P2P] (Source) 广播增量更新: {}", file_info.path);
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
-    msg[Protocol::MSG_PAYLOAD] = file_info;
-    if (!send_over_kcp(msg.dump())) {
-        g_logger->warn("[P2P] 广播文件更新失败（无可用对等点）: {}", file_info.path);
-    }
-}
-
-// --- A-3: 通用路径广播辅助（消除 3 个函数的重复结构）---
-// LOGIC-003: 返回bool表示是否成功发送
-static bool broadcast_path_event(SyncRole role, SyncMode mode,
-                                 const std::string& msg_type,
-                                 const std::string& log_label,
-                                 const std::string& relative_path,
-                                 std::function<bool(const std::string&)> send_fn) {
-    if (!can_broadcast(role, mode)) return false;
-    g_logger->info("[P2P] (Source) 广播增量{}: {}", log_label, relative_path);
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = msg_type;
-    msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
-    bool ok = send_fn(msg.dump());
-    if (!ok) {
-        g_logger->warn("[P2P] 广播{}失败（无可用对等点）: {}", log_label, relative_path);
-    }
-    return ok;
-}
-
-void P2PManager::broadcast_file_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); });
-}
-
-void P2PManager::broadcast_dir_create(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); });
-}
-
-void P2PManager::broadcast_dir_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
-                         [this](const std::string& s){ return send_over_kcp(s); });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 批量广播方法 (阶段1优化)
-// ═══════════════════════════════════════════════════════════════
-
-// 批量大小配置
-static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;  // 每批最多 50 个文件更新
-static constexpr size_t FILE_DELETE_BATCH_SIZE = 100; // 每批最多 100 个文件删除
-
-// 【P1 修复】广播流控配置
-// 与 SyncSession::perform_flood_sync 保持一致的阈值
-static constexpr int    BROADCAST_FLOW_CONTROL_THRESHOLD = 1024;  // KCP 积压量阈值
-static constexpr int    BROADCAST_FLOW_CONTROL_SLEEP_MS  = 20;    // 积压时等待间隔
-static constexpr int    BROADCAST_FLOW_CONTROL_MAX_WAIT  = 250;   // 单次最大等待轮次（防无限阻塞）
-
-bool P2PManager::send_to_peers_with_flow_control(
-    const std::vector<std::shared_ptr<PeerController>>& peers,
-    const std::string& packet) {
-    bool all_ok = true;
-    for (auto& controller : peers) {
-        // 【流控】发送前检查 KCP 积压量，必要时等待
-        int wait_count = 0;
-        int pending = controller->get_kcp_wait_send();
-        while (pending > BROADCAST_FLOW_CONTROL_THRESHOLD &&
-               controller->is_valid() &&
-               wait_count < BROADCAST_FLOW_CONTROL_MAX_WAIT) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(BROADCAST_FLOW_CONTROL_SLEEP_MS));
-            pending = controller->get_kcp_wait_send();
-            wait_count++;
-        }
-
-        if (controller->send_message(packet) < 0) {
-            all_ok = false;
-        }
-    }
-
-    if (!peers.empty()) {
-        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)",
-                      peers.size(), packet.length());
-    }
-    return all_ok;
-}
-
-void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) {
-    if (!can_broadcast(m_role, m_mode)) return;
-    if (files.empty()) return;
-
-    // 【P1 修复】投递到 worker 线程执行，避免阻塞 io_context
-    // 流控逻辑需要 sleep 等待 KCP 消化，不能在事件循环线程做
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), files]() {
-        g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
-
-        bool any_failed = false;
-        for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
-            size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
-
-            nlohmann::json msg;
-            msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
-            msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
-
-            for (size_t j = i; j < end; ++j) {
-                msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
-            }
-
-            std::string json_packet;
-            json_packet.push_back(MSG_TYPE_JSON);
-            json_packet.append(msg.dump());
-
-            auto peers = collect_connected_peers();
-            if (!send_to_peers_with_flow_control(peers, json_packet)) {
-                any_failed = true;
-            }
-
-            g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)",
-                           (i / FILE_UPDATE_BATCH_SIZE) + 1,
-                           (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
-                           end - i);
-        }
-
-        if (any_failed) {
-            g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
-        }
-
-        // Anti-Entropy: 增量广播完成，重置对账定时器
-        schedule_reconciliation();
-    });
-}
-
-void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& paths) {
-    if (!can_broadcast(m_role, m_mode)) return;
-    if (paths.empty()) return;
-
-    // 【P1 修复】投递到 worker 线程执行，加入流控
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), paths]() {
-        g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
-
-        bool any_failed = false;
-        for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
-            size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
-
-            nlohmann::json msg;
-            msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_DELETE_BATCH;
-            msg[Protocol::MSG_PAYLOAD]["paths"] = nlohmann::json::array();
-
-            for (size_t j = i; j < end; ++j) {
-                msg[Protocol::MSG_PAYLOAD]["paths"].push_back(paths[j]);
-            }
-
-            std::string json_packet;
-            json_packet.push_back(MSG_TYPE_JSON);
-            json_packet.append(msg.dump());
-
-            auto peers = collect_connected_peers();
-            if (!send_to_peers_with_flow_control(peers, json_packet)) {
-                any_failed = true;
-            }
-        }
-
-        if (any_failed) {
-            g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
-        }
-
-        // Anti-Entropy: 增量广播完成，重置对账定时器
-        schedule_reconciliation();
-    });
-}
-
+void P2PManager::broadcast_current_state()       { m_broadcast_manager->broadcast_current_state(); }
+void P2PManager::broadcast_file_update(const FileInfo& file_info) { m_broadcast_manager->broadcast_file_update(file_info); }
+void P2PManager::broadcast_file_delete(const std::string& relative_path) { m_broadcast_manager->broadcast_file_delete(relative_path); }
+void P2PManager::broadcast_dir_create(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_create(relative_path); }
+void P2PManager::broadcast_dir_delete(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_delete(relative_path); }
+void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) { m_broadcast_manager->broadcast_file_updates_batch(files); }
+void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& paths) { m_broadcast_manager->broadcast_file_deletes_batch(paths); }
 void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& creates,
-                                              const std::vector<std::string>& deletes) {
-    if (!can_broadcast(m_role, m_mode)) return;
-    if (creates.empty() && deletes.empty()) return;
-
-    // 【P1 修复】投递到 worker 线程执行，加入流控
-    boost::asio::post(m_worker_pool, [this, self = shared_from_this(), creates, deletes]() {
-        g_logger->info("[P2P] (Source) 批量广播目录变更: {} 创建, {} 删除",
-                       creates.size(), deletes.size());
-
-        nlohmann::json msg;
-        msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
-        msg[Protocol::MSG_PAYLOAD]["creates"] = creates;
-        msg[Protocol::MSG_PAYLOAD]["deletes"] = deletes;
-
-        std::string json_packet;
-        json_packet.push_back(MSG_TYPE_JSON);
-        json_packet.append(msg.dump());
-
-        auto peers = collect_connected_peers();
-        send_to_peers_with_flow_control(peers, json_packet);
-
-        // Anti-Entropy: 增量广播完成，重置对账定时器
-        schedule_reconciliation();
-    });
+                                             const std::vector<std::string>& deletes) {
+    m_broadcast_manager->broadcast_dir_changes_batch(creates, deletes);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -340,9 +87,30 @@ std::shared_ptr<P2PManager> P2PManager::create(const P2PManagerConfig& config) {
         P2PManagerMaker() : P2PManager() {}
     };
     auto manager = std::make_shared<P2PManagerMaker>();
+    // 从 config 初始化所有参数（含 STUN/TURN）
     manager->m_chunk_size = config.chunk_size;
     manager->m_kcp_window_size = config.kcp_window_size;
     manager->m_kcp_update_interval_ms = config.kcp_update_interval_ms;
+    manager->m_stun_host = config.stun_host;
+    manager->m_stun_port = config.stun_port;
+    manager->m_turn_host = config.turn_host;
+    manager->m_turn_port = config.turn_port;
+    manager->m_turn_username = config.turn_username;
+    manager->m_turn_password = config.turn_password;
+    manager->m_extra_stun_servers = config.extra_stun_servers;
+    manager->m_enable_multi_stun_probing = config.enable_multi_stun_probing;
+
+    if (!config.stun_host.empty()) {
+        g_logger->info("[Config] STUN 服务器设置为: {}:{}", config.stun_host, config.stun_port);
+    }
+    if (!config.turn_host.empty()) {
+        g_logger->info("[Config] TURN 服务器设置为: {}:{}", config.turn_host, config.turn_port);
+    }
+    if (config.enable_multi_stun_probing) {
+        g_logger->info("[Config] Multi-STUN Probing: 启用 ({} 个额外服务器)",
+                       config.extra_stun_servers.size());
+    }
+
     manager->init();
     return manager;
 }
@@ -369,10 +137,8 @@ void P2PManager::set_state_manager(StateManager* sm) {
 void P2PManager::set_tracker_client(TrackerClient* tc) {
     m_tracker_client = tc;
     if (tc) {
-        // 注册中继数据回调：收到 RELAY_DATA 时分发给对应的 PeerController
         tc->set_relay_callback(
             [this](const std::string& from, const uint8_t* data, size_t len) {
-                // post 到 io_context 确保线程安全（回调可能来自 TCP 读取线程）
                 boost::asio::post(m_io_context,
                     [this, self = shared_from_this(), from,
                      d = std::vector<uint8_t>(data, data + len)]() {
@@ -385,104 +151,68 @@ void P2PManager::set_role(SyncRole role) {
     m_role = role;
     if (m_sync_handler) m_sync_handler->set_role(role);
     if (m_sync_session) m_sync_session->set_role(role);
+    if (m_broadcast_manager) m_broadcast_manager->set_role(role);
 }
 
 void P2PManager::set_mode(SyncMode mode) {
     m_mode = mode;
     if (m_sync_handler) m_sync_handler->set_mode(mode);
     if (m_sync_session) m_sync_session->set_mode(mode);
+    if (m_broadcast_manager) m_broadcast_manager->set_mode(mode);
 }
 
-void P2PManager::set_stun_config(std::string host, uint16_t port) {
-    m_stun_host = std::move(host);
-    m_stun_port = port;
-    g_logger->info("[Config] STUN 服务器设置为: {}:{}", m_stun_host, m_stun_port);
-}
-
-void P2PManager::set_turn_config(std::string host, uint16_t port, std::string username, std::string password) {
-    m_turn_host = std::move(host);
-    m_turn_port = port;
-    m_turn_username = std::move(username);
-    m_turn_password = std::move(password);
-}
-
-void P2PManager::set_extra_stun_servers(std::vector<std::pair<std::string, uint16_t>> servers, bool enable) {
-    m_extra_stun_servers = std::move(servers);
-    m_enable_multi_stun_probing = enable;
-    if (g_logger) {
-        g_logger->info("[Config] Multi-STUN Probing: {} ({} 个额外服务器)",
-                       m_enable_multi_stun_probing ? "启用" : "禁用",
-                       m_extra_stun_servers.size());
-    }
-}
-
-// --- A-2: init 拆分子方法 ---
+// --- 初始化子方法 ---
 
 void P2PManager::create_transfer_manager() {
-    // TransferManager 回调使用 PeerController
-    // 【修复】使用 find_peer 在锁内拷贝 controller，锁外发送，避免锁竞争
     auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id,
                                                   const std::string& encrypted_data) -> int {
         auto self = weak_self.lock();
         if (!self) return 0;
 
-        auto controller = self->find_peer(peer_id);
-        
-        // 锁外发送
+        auto controller = self->m_peer_registry.find(peer_id);
+
         if (controller && controller->is_connected() && controller->is_valid()) {
-            // TransferManager 发来的是明文
-            return controller->send_message(encrypted_data); 
-            
+            return controller->send_message(encrypted_data);
         }
-        return -1;  // 【断点续传】连接已断开，返回 -1 通知发送方提前终止
+        return -1;
     };
-    // 创建 TransferManager 传输管理器（传入配置的 chunk_size）
     m_transfer_manager = std::make_shared<TransferManager>(m_state_manager, m_io_context, m_worker_pool, send_cb, m_chunk_size);
 }
 
 void P2PManager::create_sync_components() {
-    // --- A-3: 提取共用的 with_peer 回调（消除 SyncHandler 和 SyncSession 中的重复 lambda）---
     auto with_peer_cb = [this](const std::string& peer_id, std::function<void(PeerController*)> action) {
-        auto controller = find_peer(peer_id);
+        auto controller = m_peer_registry.find(peer_id);
         if (controller && controller->is_connected()) {
             action(controller.get());
         }
     };
 
-    // 创建 SyncHandler 同步消息处理器
     m_sync_handler = std::make_unique<SyncHandler>(
         m_state_manager,
         m_transfer_manager,
         m_worker_pool,
         m_io_context,
-        // send_to_peer 回调
         [this](const std::string& msg, PeerController* peer) {
             send_over_kcp_peer(msg, peer);
         },
-        // send_to_peer_safe 回调
         [this](const std::string& msg, const std::string& peer_id) {
             send_over_kcp_peer_safe(msg, peer_id);
         },
-        // with_peer 回调：查找 peer 并执行操作
         with_peer_cb
     );
     m_sync_handler->set_role(m_role);
     m_sync_handler->set_mode(m_mode);
-    
-    // 创建 SyncSession 同步会话管理器
+
     m_sync_session = std::make_unique<SyncSession>(
         m_state_manager,
         m_worker_pool,
         m_io_context,
-        // send_to_peer 回调
         [this](const std::string& msg, PeerController* peer) {
             send_over_kcp_peer(msg, peer);
         },
-        // with_peer 回调：查找 peer 并执行操作
         with_peer_cb,
-        // get_peer 回调：获取 PeerController shared_ptr
         [this](const std::string& peer_id) -> std::shared_ptr<PeerController> {
-            return find_peer(peer_id);
+            return m_peer_registry.find(peer_id);
         }
     );
     m_sync_session->set_role(m_role);
@@ -490,16 +220,13 @@ void P2PManager::create_sync_components() {
 }
 
 void P2PManager::start_background_services() {
-    // 启动io线程
     m_thread = std::jthread([this]() {
         g_logger->info("[P2P] IO context 在后台线程运行...");
         auto work_guard = boost::asio::make_work_guard(m_io_context);
         m_io_context.run();
     });
-    // A-1: 通过子组件启动定时器
     m_kcp_scheduler->start();
     schedule_cleanup_task();
-    // upnp发现（已迁移到 UpnpManager）
     m_upnp.init_async(m_worker_pool);
 }
 
@@ -507,98 +234,71 @@ void P2PManager::init() {
     create_transfer_manager();
     create_sync_components();
 
-    // A-1: 创建提取的子组件
-    auto collect_peers_cb = [this]() { return collect_connected_peers(); };
-
+    auto collect_peers_cb = [this]() { return m_peer_registry.collect_connected(); };
     m_kcp_scheduler = std::make_unique<KcpScheduler>(m_io_context, collect_peers_cb, m_kcp_update_interval_ms);
 
-    // Anti-Entropy: 创建对账定时器
-    m_reconciliation_timer = std::make_unique<boost::asio::steady_timer>(m_io_context);
+    // 创建 BroadcastManager
+    m_broadcast_manager = std::make_unique<BroadcastManager>(
+        m_io_context,
+        m_worker_pool,
+        m_peer_registry,
+        // send_fn: 广播消息给所有已连接对等点
+        [this](const std::string& msg) -> bool { return send_over_kcp(msg); },
+        // flood_sync_fn: 对账时调用 SyncSession::perform_flood_sync
+        [this](std::shared_ptr<PeerController> peer, uint64_t session_id) {
+            m_sync_session->perform_flood_sync(peer, session_id);
+        },
+        // state_provider: 获取当前目录状态 JSON
+        [this]() -> std::string {
+            if (!m_state_manager) return "";
+            m_state_manager->scan_directory();
+            return m_state_manager->get_state_as_json_string();
+        }
+    );
+    m_broadcast_manager->set_role(m_role);
+    m_broadcast_manager->set_mode(m_mode);
+
+    // 注册消息路由
+    register_message_handlers();
 
     start_background_services();
 }
 
 P2PManager::~P2PManager() {
-    // A-1: 先停止子组件的定时器
     if (m_kcp_scheduler) m_kcp_scheduler->stop();
-    if (m_reconciliation_timer) m_reconciliation_timer->cancel();
+    if (m_broadcast_manager) m_broadcast_manager->stop();
 
-    // 【修复】先关闭所有 PeerController（此时 io_context 仍在运行，
-    // close() 触发的定时器取消等操作可以正常执行）
-    {
-        std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：清空
-        for (auto& [peer_id, controller] : m_peers) {
-            controller->close();
-        }
-        m_peers.clear();
-    }
+    m_peer_registry.close_all();
 
-    // 然后停止事件循环和线程池
-    m_io_context.stop();    // 停止事件循环
-    m_worker_pool.join();   // 等待所有工作线程完成
+    m_io_context.stop();
+    m_worker_pool.join();
     if (m_thread.joinable()) {
-        m_thread.join();    // 等待IO线程退出
+        m_thread.join();
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-// KCP 更新（已提取到 KcpScheduler）
-// ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
 // 连接管理 - 使用 PeerController
 // ═══════════════════════════════════════════════════════════════
 
-// --- A-2: connect_to_peers 拆分子方法 ---
-
-bool P2PManager::try_reuse_existing_peer(const std::string& peer_id, bool force) {
-    // 注意：调用方已持有 m_peers_mutex 写锁
-    auto existing_it = m_peers.find(peer_id);
-    if (existing_it == m_peers.end()) {
-        return false;  // 不存在，不跳过
-    }
-
-    auto existing_state = existing_it->second->get_state();
-
-    // 【修复】如果 force=true（Tracker 重连场景），强制重新连接
-    // 因为网络可能已经变化，旧的 ICE 连接无效
-    if (!force && (existing_state == PeerState::Connected || 
-                   existing_state == PeerState::Connecting)) {
-        return true;  // 非强制模式下，已连接或正在连接的跳过
-    }
-
-    // 【修复】如果处于 Failed 或 Disconnected 状态，删除旧的并重新建立
-    // 这修复了睡眠唤醒后无法重连的问题
-    g_logger->info("[ICE] 对等点 {} 已存在但状态为 {}，重新建立连接", 
-                  peer_id, static_cast<int>(existing_state));
-    existing_it->second->close();
-    m_peers.erase(existing_it);
-
-    return false;  // 已清理旧的，不跳过，继续创建新的
-}
-
 std::shared_ptr<PeerController> P2PManager::create_peer_controller(
         const std::string& self_id, const std::string& peer_id) {
     PeerControllerCallbacks callbacks;
 
-    // 状态变化回调
     callbacks.on_state_changed = [this, peer_id](PeerState state) {
         handle_peer_state_changed(peer_id, state);
     };
 
-    // 信令回调 - 转发到 TrackerClient
     callbacks.on_signal_needed = [this, peer_id](const std::string& signal_type, const std::string& payload) {
         if (m_tracker_client) {
             m_tracker_client->send_signaling_message(peer_id, signal_type, payload);
         }
     };
 
-    // 消息接收回调
     callbacks.on_message_received = [this, peer_id](const std::string& message) {
         handle_peer_message(peer_id, message);
     };
 
-    // 构建 KCP 配置（使用用户配置的窗口大小）
     KcpConfig kcp_config;
     kcp_config.snd_wnd = static_cast<int>(m_kcp_window_size);
     kcp_config.rcv_wnd = static_cast<int>(m_kcp_window_size);
@@ -616,19 +316,16 @@ std::shared_ptr<PeerController> P2PManager::create_peer_controller(
 
 void P2PManager::setup_answer_timeout(std::shared_ptr<PeerController> controller,
                                       const std::string& peer_id) {
-    // 【修复】Answer 方添加等待超时机制
-    // 如果 30 秒内没有收到 Offer，触发 Failed 状态启动重连
     auto timeout_timer = std::make_shared<boost::asio::steady_timer>(m_io_context);
     timeout_timer->expires_after(std::chrono::seconds(ANSWER_WAIT_TIMEOUT_SECONDS));
-    timeout_timer->async_wait([weak_controller = std::weak_ptr<PeerController>(controller), 
-                               peer_id, 
+    timeout_timer->async_wait([weak_controller = std::weak_ptr<PeerController>(controller),
+                               peer_id,
                                self = shared_from_this()](const boost::system::error_code& ec) {
-        if (ec) return;  // 定时器被取消
+        if (ec) return;
 
         auto ctrl = weak_controller.lock();
         if (!ctrl) return;
 
-        // 如果仍然处于 Disconnected 状态（没收到 Offer），触发失败
         if (ctrl->get_state() == PeerState::Disconnected) {
             g_logger->warn("[ICE] Answer 方等待 Offer 超时 (30s), 对等点: {}", peer_id);
             self->handle_peer_state_changed(peer_id, PeerState::Failed);
@@ -647,25 +344,20 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
         return;
     }
 
-    // 【修复】Phase 1: 在写锁内仅做"检查+清理"，收集需要创建的 peer_id 列表
     std::vector<std::string> peers_to_create;
-    {
-        std::unique_lock<std::shared_mutex> lock(m_peers_mutex);
-        for (const auto& peer_id : peer_addresses) {
-            if (peer_id == self_id) {
-                g_logger->debug("[ICE] 跳过自己的 ID: {}", peer_id);
-                continue;
-            }
-            if (try_reuse_existing_peer(peer_id, force)) {
-                continue;
-            }
-            peers_to_create.push_back(peer_id);
+    for (const auto& peer_id : peer_addresses) {
+        if (peer_id == self_id) {
+            g_logger->debug("[ICE] 跳过自己的 ID: {}", peer_id);
+            continue;
         }
-    }  // 写锁释放
+        if (m_peer_registry.try_reuse_or_evict(peer_id, force)) {
+            continue;
+        }
+        peers_to_create.push_back(peer_id);
+    }
 
     if (peers_to_create.empty()) return;
 
-    // Phase 2: 在锁外创建所有 PeerController（涉及 ICE 初始化、内存分配等耗时操作）
     struct NewPeer {
         std::string peer_id;
         std::shared_ptr<PeerController> controller;
@@ -683,23 +375,18 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
         new_peers.push_back({peer_id, std::move(controller)});
     }
 
-    // Phase 3: 短暂写锁，仅做 map 插入
-    {
-        std::unique_lock<std::shared_mutex> lock(m_peers_mutex);
-        for (auto& np : new_peers) {
-            // 再次检查，防止并发创建
-            if (m_peers.find(np.peer_id) != m_peers.end()) {
-                g_logger->debug("[ICE] {} 已被并发创建，跳过", np.peer_id);
-                np.controller->close();
-                continue;
-            }
-            m_peers[np.peer_id] = np.controller;
-        }
-    }  // 写锁释放
-
-    // Phase 4: 在锁外发起连接（网络操作，不需要持锁）
     for (auto& np : new_peers) {
-        if (!np.controller->is_valid()) continue;  // 被 Phase 3 跳过的
+        if (m_peer_registry.find(np.peer_id)) {
+            g_logger->debug("[ICE] {} 已被并发创建，跳过", np.peer_id);
+            np.controller->close();
+            np.controller.reset();
+            continue;
+        }
+        m_peer_registry.add(np.peer_id, np.controller);
+    }
+
+    for (auto& np : new_peers) {
+        if (!np.controller || !np.controller->is_valid()) continue;
 
         if (np.controller->is_offer_side()) {
             g_logger->info("[ICE] 我们是 Offer 方，主动发起连接 (对于 {})", np.peer_id);
@@ -711,19 +398,16 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
     }
 }
 
-// 新增：处理 Peer 状态变化
 void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState state) {
     g_logger->info("[ICE] Peer {} 状态变化: {}", peer_id, static_cast<int>(state));
-    
+
     if (state == PeerState::Connected) {
         g_logger->info("[ICE] ✅ 与 {} 建立连接成功！", peer_id);
 
-        // 如果是 Source 或双向模式，触发可靠同步会话
         if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
-            auto controller = find_peer(peer_id);
+            auto controller = m_peer_registry.find(peer_id);
 
             if (controller) {
-                // 【P3 修复】检查是否有未完成的传输（连接恢复场景）
                 if (m_transfer_manager) {
                     auto pending = m_transfer_manager->get_pending_receives_for_peer(peer_id);
                     if (!pending.empty()) {
@@ -734,12 +418,10 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
                 }
 
                 g_logger->info("[P2P] 连接激活，准备向对等点 {} 推送文件状态...", peer_id);
-                
-                // 生成新的同步会话 ID
+
                 uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
                 controller->set_sync_session_id(session_id);
-                
-                // 投递到 Worker 线程执行同步
+
                 boost::asio::post(m_worker_pool, [this, self = shared_from_this(), controller, session_id]() {
                     m_sync_session->perform_flood_sync(controller, session_id);
                 });
@@ -752,51 +434,7 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Anti-Entropy 对账机制
-// 增量广播是 Gossip（快但不保证可靠），对账是 Anti-Entropy（保证最终一致）。
-// 每次增量广播后重置定时器，静默 N 秒后自动触发 flood sync 补全。
-// ═══════════════════════════════════════════════════════════════
-
-void P2PManager::schedule_reconciliation() {
-    if (!m_reconciliation_timer) return;
-    if (!(m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional)) return;
-
-    // 必须在 io_context 线程中操作 timer（steady_timer 非线程安全），
-    // 而此函数可能从 worker_pool 线程调用。
-    boost::asio::post(m_io_context, [this, self = shared_from_this()]() {
-        // 重置定时器（每次增量广播都会调用，只有最后一次生效）
-        m_reconciliation_timer->cancel();
-        m_reconciliation_timer->expires_after(std::chrono::seconds(RECONCILIATION_DELAY_SECONDS));
-        m_reconciliation_timer->async_wait([this, self](const boost::system::error_code& ec) {
-            if (!ec) {
-                trigger_reconciliation();
-            }
-        });
-    });
-}
-
-void P2PManager::trigger_reconciliation() {
-    auto peers = collect_connected_peers();
-    if (peers.empty()) return;
-
-    g_logger->info("[Anti-Entropy] 静默期 {}s 已过，开始对账 (flood sync) 覆盖 {} 个对等点",
-                   RECONCILIATION_DELAY_SECONDS, peers.size());
-
-    for (auto& controller : peers) {
-        uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
-        controller->set_sync_session_id(session_id);
-
-        std::string peer_id = controller->get_peer_id();
-        boost::asio::post(m_worker_pool, [this, self = shared_from_this(), controller, session_id, peer_id]() {
-            g_logger->info("[Anti-Entropy] 开始向 {} 执行对账 flood sync (session={})", peer_id, session_id);
-            m_sync_session->perform_flood_sync(controller, session_id);
-            g_logger->info("[Anti-Entropy] 对账 flood sync 完成 (peer={}, session={})", peer_id, session_id);
-        });
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 中继回退（ICE 失败时通过 Tracker 中继数据）
+// 中继回退
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::attempt_relay_fallback(const std::string& peer_id) {
@@ -805,13 +443,12 @@ void P2PManager::attempt_relay_fallback(const std::string& peer_id) {
         return;
     }
 
-    auto controller = find_peer(peer_id);
+    auto controller = m_peer_registry.find(peer_id);
     if (!controller || !controller->is_valid()) {
         g_logger->error("[P2PManager] 无法启用中继：未找到 PeerController ({})", peer_id);
         return;
     }
 
-    // 如果已经在中继模式，跳过
     if (controller->is_relay_mode()) return;
 
     auto tc = m_tracker_client;
@@ -825,13 +462,12 @@ void P2PManager::attempt_relay_fallback(const std::string& peer_id) {
 
 void P2PManager::handle_relay_data(const std::string& from_peer_id,
                                     const uint8_t* data, size_t len) {
-    auto controller = find_peer(from_peer_id);
+    auto controller = m_peer_registry.find(from_peer_id);
     if (!controller || !controller->is_valid()) {
         g_logger->warn("[P2PManager] 收到中继数据但未找到对应 Peer: {}", from_peer_id);
         return;
     }
 
-    // 如果对端还没有启用中继模式（我们先收到了对方的中继数据），自动启用
     if (!controller->is_relay_mode()) {
         g_logger->info("[P2PManager] 收到 {} 的中继数据，自动启用中继模式", from_peer_id);
         attempt_relay_fallback(from_peer_id);
@@ -840,16 +476,13 @@ void P2PManager::handle_relay_data(const std::string& from_peer_id,
     controller->feed_relay_data(data, len);
 }
 
-// 新增：处理 Peer 消息（来自 PeerController 的回调）
 void P2PManager::handle_peer_message(const std::string& peer_id, const std::string& encrypted_msg) {
-    // 查找对应的 PeerController
-    auto controller = find_peer(peer_id);
+    auto controller = m_peer_registry.find(peer_id);
     if (!controller) {
         g_logger->warn("[KCP] 收到来自未知对等点 {} 的消息", peer_id);
         return;
     }
-    
-    // 处理消息
+
     handle_kcp_message(encrypted_msg, controller.get());
 }
 
@@ -857,22 +490,21 @@ void P2PManager::handle_peer_message(const std::string& peer_id, const std::stri
 // 信令处理
 // ═══════════════════════════════════════════════════════════════
 
-void P2PManager::handle_signaling_message(const std::string& from_peer_id, 
+void P2PManager::handle_signaling_message(const std::string& from_peer_id,
                                           const std::string& message_type,
                                           const std::string& payload) {
-    auto controller = find_peer(from_peer_id);
+    auto controller = m_peer_registry.find(from_peer_id);
     if (!controller) {
         g_logger->warn("[ICE] 收到来自未知对等点 {} 的信令消息。", from_peer_id);
         return;
     }
-    
+
     if (message_type == "ice_candidate") {
         g_logger->debug("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
     } else {
         g_logger->info("[ICE] 收到来自 {} 的信令: {}", from_peer_id, message_type);
     }
-    
-    // 转发到 PeerController 处理
+
     controller->handle_signaling(message_type, payload);
 }
 
@@ -881,43 +513,32 @@ void P2PManager::handle_signaling_message(const std::string& from_peer_id,
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::handle_peer_leave(const std::string& peer_id) {
-    std::unique_lock<std::shared_mutex> lock(m_peers_mutex);  // 写操作：删除peer
-    auto it = m_peers.find(peer_id);
-    
-    if (it == m_peers.end()) {
-        // 可能已经通过 goodbye 处理过
+    auto controller = m_peer_registry.find(peer_id);
+    if (!controller) {
         g_logger->debug("[P2P] peer_leave: {} 已不在连接池中", peer_id);
         return;
     }
-    
-    auto& controller = it->second;
-    
+
     if (controller->is_graceful_shutdown()) {
-        // 【情况 1】之前收到过 goodbye，是主动退出，已经处理过
         g_logger->debug("[P2P] peer_leave: {} 是主动退出（已收到 goodbye），跳过清理", peer_id);
     } else {
-        // 【情况 2】没收到 goodbye，是网络断开/崩溃，保留传输状态等待续传
         g_logger->info("[P2P] {} 掉线（未收到 goodbye），保留传输状态等待续传", peer_id);
-        // 注意：不调用 m_transfer_manager->cancel_receives_for_peer()
     }
-    
-    // 清理 PeerController（无论哪种情况都要做）
+
     controller->close();
-    m_peers.erase(it);
+    m_peer_registry.remove(peer_id);
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 消息发送
 // ═══════════════════════════════════════════════════════════════
 
-// 广播给所有连接的对等点
-// LOGIC-003: 返回bool表示是否至少有一个对等点成功接收
 bool P2PManager::send_over_kcp(const std::string& msg) {
     std::string json_packet;
     json_packet.push_back(MSG_TYPE_JSON);
     json_packet.append(msg);
 
-    auto peers = collect_connected_peers();
+    auto peers = m_peer_registry.collect_connected();
     bool any_sent = false;
     for (auto& controller : peers) {
         if (controller->send_message(json_packet) >= 0) {
@@ -929,7 +550,7 @@ bool P2PManager::send_over_kcp(const std::string& msg) {
     }
     return any_sent;
 }
-// 发给特定对等点
+
 void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer) {
     if (!peer || !peer->is_connected()) {
         g_logger->warn("[KCP] 尝试向无效或未就绪的对等点发送消息。");
@@ -941,9 +562,9 @@ void P2PManager::send_over_kcp_peer(const std::string& msg, PeerController* peer
 
     peer->send_message(json_packet);
 }
-// 通过 peer_id 安全发送（会查找 peer）
+
 void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::string& peer_id) {
-    auto controller = find_peer(peer_id);
+    auto controller = m_peer_registry.find(peer_id);
     if (controller && controller->is_connected()) {
         send_over_kcp_peer(msg, controller.get());
     }
@@ -953,46 +574,71 @@ void P2PManager::send_over_kcp_peer_safe(const std::string& msg, const std::stri
 // 消息处理 - 核心路由
 // ═══════════════════════════════════════════════════════════════
 
-// --- A-2: handle_kcp_message 拆分子方法 ---
+void P2PManager::register_message_handlers() {
+    auto& router = m_message_router;
 
-void P2PManager::dispatch_json_message(const std::string& json_msg_type,
-                                       nlohmann::json& json_payload,
-                                       PeerController* from_peer,
-                                       bool can_receive) {
-    if (json_msg_type == Protocol::TYPE_SHARE_STATE && can_receive) {
-        m_sync_handler->handle_share_state(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE && can_receive) {
-        m_sync_handler->handle_file_update(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_FILE_DELETE && can_receive) {
-        m_sync_handler->handle_file_delete(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_REQUEST_FILE) {
-        bool can_serve = (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional);
-        if (can_serve && from_peer) {
-            m_transfer_manager->queue_upload(from_peer->get_peer_id(), json_payload);
-        }
-    } else if (json_msg_type == Protocol::TYPE_DIR_CREATE && can_receive) {
-        m_sync_handler->handle_dir_create(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_DIR_DELETE && can_receive) {
-        m_sync_handler->handle_dir_delete(json_payload, from_peer);
-    // --- 批量消息路由 (阶段1优化) ---
-    } else if (json_msg_type == Protocol::TYPE_FILE_UPDATE_BATCH && can_receive) {
-        m_sync_handler->handle_file_update_batch(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_FILE_DELETE_BATCH && can_receive) {
-        m_sync_handler->handle_file_delete_batch(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_DIR_BATCH && can_receive) {
-        m_sync_handler->handle_dir_batch(json_payload, from_peer);
-    // ---------------------------------
-    } else if (json_msg_type == Protocol::TYPE_SYNC_BEGIN && can_receive) {
-        m_sync_session->handle_sync_begin(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_SYNC_ACK) {
-        m_sync_session->handle_sync_ack(json_payload, from_peer);
-    } else if (json_msg_type == Protocol::TYPE_GOODBYE) {
-        // 【断点续传】处理对端正常退出通知
-        handle_goodbye(from_peer);
-    } else {
-        g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
-                       m_role == SyncRole::Source ? "Source" : "Destination");
-    }
+    router.register_handler(Protocol::TYPE_SHARE_STATE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_share_state(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_FILE_UPDATE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_file_update(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_FILE_DELETE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_file_delete(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_REQUEST_FILE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            bool can_serve = (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional);
+            if (can_serve && peer) {
+                m_transfer_manager->queue_upload(peer->get_peer_id(), payload);
+            }
+        }, false);
+
+    router.register_handler(Protocol::TYPE_DIR_CREATE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_dir_create(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_DIR_DELETE,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_dir_delete(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_FILE_UPDATE_BATCH,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_file_update_batch(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_FILE_DELETE_BATCH,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_file_delete_batch(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_DIR_BATCH,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_handler->handle_dir_batch(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_SYNC_BEGIN,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_session->handle_sync_begin(payload, peer);
+        }, true);
+
+    router.register_handler(Protocol::TYPE_SYNC_ACK,
+        [this](nlohmann::json& payload, PeerController* peer) {
+            m_sync_session->handle_sync_ack(payload, peer);
+        }, false);
+
+    router.register_handler(Protocol::TYPE_GOODBYE,
+        [this](nlohmann::json& /*payload*/, PeerController* peer) {
+            handle_goodbye(peer);
+        }, false);
 }
 
 void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from_peer) {
@@ -1011,19 +657,20 @@ void P2PManager::handle_kcp_message(const std::string& msg, PeerController* from
             g_logger->info("[KCP] 收到 '{}' 消息 (来自: {})", json_msg_type,
                            from_peer ? from_peer->get_peer_id() : "<unknown>");
 
-            // A-2: 分发到路由子方法
-            dispatch_json_message(json_msg_type, json_payload, from_peer, can_receive);
+            if (!m_message_router.dispatch(json_msg_type, json_payload, from_peer, can_receive)) {
+                g_logger->warn("[KCP] 消息类型 '{}' 不适用于当前角色 ({})", json_msg_type,
+                               m_role == SyncRole::Source ? "Source" : "Destination");
+            }
         } catch (const std::exception& e) {
             g_logger->error("[P2P] 处理KCP JSON消息时发生错误: {}", e.what());
         }
     } else if (msg_type == MSG_TYPE_BINARY_CHUNK) {
-        if (m_role == SyncRole::Destination || m_mode == SyncMode::BiDirectional) {
+        if (can_receive) {
             std::string sender_id = from_peer ? from_peer->get_peer_id() : "";
-            // 二进制文件块，交给 TransferManager 处理（move 避免 ~16KB 拷贝）
             m_transfer_manager->handle_chunk(std::move(payload), sender_id);
         }
     } else if (msg_type == MSG_TYPE_PING) {
-        // 心跳包，用于保持 NAT 映射存活，不做任何处理
+        // 心跳包
     } else {
         g_logger->error("[KCP] 收到未知消息类型: {}", (int)msg_type);
     }
@@ -1037,62 +684,37 @@ TransferManager::SessionStats P2PManager::get_transfer_stats() {
 }
 
 std::vector<P2PManager::PeerInfo> P2PManager::get_peers_info() {
-    // 【修复 #4阶段1】锁内只拷贝controller引用，锁外构建PeerInfo
-    std::vector<std::shared_ptr<PeerController>> controllers;
-    {
-        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-        controllers.reserve(m_peers.size());
-        for (const auto& [peer_id, controller] : m_peers) {
-            controllers.push_back(controller);
-        }
-    } // 锁在此处释放
-    
-    // 锁外构建PeerInfo
+    auto controllers = m_peer_registry.collect_all();
+
     std::vector<PeerInfo> result;
     result.reserve(controllers.size());
-    
+
     for (const auto& controller : controllers) {
         PeerInfo info;
         info.peer_id = controller->get_peer_id();
         info.connected_since = controller->get_connected_at_ts();
-        
-        // 转换 PeerState 到字符串
+
         switch (controller->get_state()) {
-            case PeerState::Connected:
-                info.state = "connected";
-                break;
-            case PeerState::Connecting:
-                info.state = "connecting";
-                break;
-            case PeerState::Failed:
-                info.state = "failed";
-                break;
+            case PeerState::Connected:  info.state = "connected"; break;
+            case PeerState::Connecting: info.state = "connecting"; break;
+            case PeerState::Failed:     info.state = "failed"; break;
             case PeerState::Disconnected:
-            default:
-                info.state = "disconnected";
-                break;
+            default:                    info.state = "disconnected"; break;
         }
-        
-        // 转换 IceConnectionType 到字符串
+
         if (controller->is_relay_mode()) {
             info.connection_type = "relay (tracker)";
         } else {
             switch (controller->get_connection_type()) {
-                case IceConnectionType::Direct:
-                    info.connection_type = "direct";
-                    break;
-                case IceConnectionType::Relay:
-                    info.connection_type = "relay";
-                    break;
-                default:
-                    info.connection_type = "unknown";
-                    break;
+                case IceConnectionType::Direct: info.connection_type = "direct"; break;
+                case IceConnectionType::Relay:  info.connection_type = "relay"; break;
+                default:                        info.connection_type = "unknown"; break;
             }
         }
-        
+
         result.push_back(std::move(info));
     }
-    
+
     return result;
 }
 
@@ -1115,7 +737,6 @@ void P2PManager::schedule_cleanup_task() {
     });
 }
 
-
 std::vector<TransferStatus> P2PManager::get_active_transfers() {
     if (m_transfer_manager) {
         return m_transfer_manager->get_active_transfers();
@@ -1135,87 +756,52 @@ void P2PManager::cleanup_stale_buffers() {
 
 void P2PManager::shutdown_gracefully() {
     g_logger->info("[P2P] 正在进行优雅关闭...");
-    
-    // 1. 广播 goodbye 给所有对端
-    broadcast_goodbye();
-    
-    // 2. 等待发送完成
-    wait_for_kcp_flush();  // 使用默认超时 GRACEFUL_SHUTDOWN_TIMEOUT_MS
-    
+
+    m_broadcast_manager->broadcast_goodbye();
+    wait_for_kcp_flush();
+
     g_logger->info("[P2P] 优雅关闭完成");
 }
 
-void P2PManager::broadcast_goodbye() {
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = Protocol::TYPE_GOODBYE;
-    msg[Protocol::MSG_PAYLOAD] = nlohmann::json::object();
-    
-    // 【修复】必须加 MSG_TYPE_JSON 前缀，否则接收端 handle_kcp_message 无法正确解析
-    std::string msg_str;
-    msg_str.push_back(MSG_TYPE_JSON);
-    msg_str.append(msg.dump());
-    
-    auto peers = collect_connected_peers();
-    
-    for (auto& controller : peers) {
-        controller->send_message(msg_str);
-        controller->flush_kcp();  // 强制刷新
-        g_logger->info("[P2P] 向 {} 发送 goodbye", controller->get_peer_id());
-    }
-    
-    g_logger->info("[P2P] goodbye 已发送给 {} 个对等点", peers.size());
-}
-
 void P2PManager::wait_for_kcp_flush(int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() 
+    auto deadline = std::chrono::steady_clock::now()
                     + std::chrono::milliseconds(timeout_ms);
-    
+
     while (std::chrono::steady_clock::now() < deadline) {
         bool all_flushed = true;
-        
-        {
-            std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-            for (auto& [peer_id, controller] : m_peers) {
-                if (controller->get_kcp_wait_send() > 0) {
-                    all_flushed = false;
-                    break;
-                }
+
+        m_peer_registry.for_each([&](const std::string&, const std::shared_ptr<PeerController>& controller) {
+            if (controller->get_kcp_wait_send() > 0) {
+                all_flushed = false;
             }
-        }
-        
+        });
+
         if (all_flushed) {
             g_logger->debug("[P2P] 所有 KCP 发送队列已清空");
             return;
         }
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(KCP_FLUSH_POLL_MS));
     }
-    
+
     g_logger->warn("[P2P] KCP flush 超时，部分消息可能未送达");
 }
 
 void P2PManager::handle_goodbye(PeerController* from_peer) {
     if (!from_peer) return;
-    
+
     std::string peer_id = from_peer->get_peer_id();
     g_logger->info("[P2P] 收到来自 {} 的 goodbye（程序正常关闭）", peer_id);
-    
-    // 标记为主动退出
+
     from_peer->set_graceful_shutdown(true);
-    
-    // 清理该 peer 的所有传输状态
+
     if (m_transfer_manager) {
         m_transfer_manager->cancel_receives_for_peer(peer_id);
     }
-    
-    // 清理 PeerController
-    {
-        std::unique_lock<std::shared_mutex> lock(m_peers_mutex);
-        auto it = m_peers.find(peer_id);
-        if (it != m_peers.end()) {
-            it->second->close();
-            m_peers.erase(it);
-        }
+
+    auto controller = m_peer_registry.remove(peer_id);
+    if (controller) {
+        controller->close();
     }
 }
 
