@@ -237,12 +237,13 @@ private:
     void emit_sdp_with_extra_candidates();
     void send_late_multi_stun_candidates();
     static uint16_t parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos);
+    static std::string parse_ip_from_candidate_line(const std::string& sdp, size_t srflx_pos);
 
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
     boost::asio::io_context* m_io_context = nullptr;  // 用于 Multi-STUN Probing（不拥有）
 
-    // 【安全】保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
+    // 保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
     std::string m_stun_host;
     std::string m_turn_host;
     std::string m_turn_username;
@@ -260,8 +261,8 @@ private:
     std::shared_ptr<boost::asio::steady_timer> m_stun_hold_timer;  // hold 超时定时器
     std::chrono::milliseconds m_multi_stun_hold_timeout{2500};     // 可配置的 hold 超时
     
-    // 【关键修复】TURN服务器配置必须使用成员变量，不能是局部变量
-    // 因为jconfig.turn_servers会保存指向它的指针，局部变量会导致悬空指针
+    // TURN 服务器配置必须使用成员变量，不能是局部变量
+    // jconfig.turn_servers 会保存指向它的指针，局部变量会导致悬空指针
     juice_turn_server_t m_turn_server{};
     
     std::atomic<IceState> m_state{IceState::New};

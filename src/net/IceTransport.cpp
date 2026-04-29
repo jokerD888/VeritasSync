@@ -42,7 +42,7 @@ static void init_juice_logging() {
     });
 }
 
-// E-1: 魔数统一为命名常量
+// 命名常量
 static constexpr size_t SDP_BUFFER_SIZE       = 4096;  // SDP 描述缓冲区大小
 static constexpr size_t CANDIDATE_BUFFER_SIZE = 1024;  // ICE 候选地址缓冲区大小
 
@@ -81,7 +81,7 @@ bool IceTransport::initialize(const IceConfig& config) {
     init_juice_logging();  // 确保 libjuice 日志已初始化
     juice_config_t jconfig = {};
 
-    // 【安全】将配置字符串拷贝到成员变量，确保 c_str() 在 agent 生命周期内有效
+    // 将配置字符串拷贝到成员变量，确保 c_str() 在 agent 生命周期内有效
     m_stun_host = config.stun_host;
     m_turn_host = config.turn_host;
     m_turn_username = config.turn_username;
@@ -98,7 +98,7 @@ bool IceTransport::initialize(const IceConfig& config) {
         jconfig.stun_server_port = config.stun_port;
     }
     
-    // 【关键修复】TURN 配置使用成员变量 m_turn_server，避免局部变量导致悬空指针
+    // TURN 配置使用成员变量 m_turn_server，避免局部变量导致悬空指针
     // 原代码使用局部变量 turn_server，函数返回后jconfig.turn_servers变成悬空指针
     if (!m_turn_host.empty()) {
         m_turn_server.host = m_turn_host.c_str();
@@ -379,7 +379,7 @@ void IceTransport::try_finalize_gathering() {
             m_stun_hold_timer.reset();
         }
 
-        // ★ 关键修复：如果 SDP 已经发出（hold timer 超时先触发了），
+        // 如果 SDP 已经发出（hold timer 超时先触发了），
         // 将迟到的 Multi-STUN 结果作为 trickle ICE candidate 补发
         if (m_gathering_emitted.load()) {
             send_late_multi_stun_candidates();
@@ -454,6 +454,29 @@ uint16_t IceTransport::parse_port_from_candidate_line(const std::string& sdp, si
     return 0;
 }
 
+std::string IceTransport::parse_ip_from_candidate_line(const std::string& sdp, size_t srflx_pos) {
+    // IP 是第 5 个空格分隔字段（0-indexed = 4）
+    size_t line_start = sdp.rfind('\n', srflx_pos);
+    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+
+    size_t pos = line_start;
+    if (sdp.compare(pos, 2, "a=") == 0) pos += 2;
+
+    int field_index = 0;
+    while (pos < sdp.size() && field_index < 4) {
+        while (pos < sdp.size() && sdp[pos] != ' ' && sdp[pos] != '\r' && sdp[pos] != '\n') ++pos;
+        while (pos < sdp.size() && sdp[pos] == ' ') ++pos;
+        ++field_index;
+    }
+
+    if (field_index != 4 || pos >= sdp.size()) return "";
+
+    size_t ip_start = pos;
+    while (pos < sdp.size() && sdp[pos] != ' ' && sdp[pos] != '\r' && sdp[pos] != '\n') ++pos;
+
+    return sdp.substr(ip_start, pos - ip_start);
+}
+
 void IceTransport::emit_sdp_with_extra_candidates() {
     // 防重入：hold timer 超时和 Multi-STUN 完成可能都触发此函数
     bool expected = false;
@@ -466,7 +489,7 @@ void IceTransport::emit_sdp_with_extra_candidates() {
 
     std::string sdp = get_local_description();  // libjuice 原生 SDP
 
-    // 【诊断】记录 SDP 中的候选者类型，帮助排查 NAT 穿透问题
+    // 记录 SDP 中的候选者类型
     if (g_logger) {
         bool has_host = sdp.find("typ host") != std::string::npos;
         bool has_srflx = sdp.find("typ srflx") != std::string::npos;
@@ -478,11 +501,13 @@ void IceTransport::emit_sdp_with_extra_candidates() {
         }
     }
 
-    // 从 libjuice SDP 中提取主 STUN 发现的端口（用于构造替代候选）
+    // 从 libjuice SDP 中提取主 STUN 发现的 IP 和端口
     uint16_t juice_port = 0;
+    std::string juice_srflx_ip;
     auto srflx_pos = sdp.find("typ srflx");
     if (srflx_pos != std::string::npos) {
         juice_port = parse_port_from_candidate_line(sdp, srflx_pos);
+        juice_srflx_ip = parse_ip_from_candidate_line(sdp, srflx_pos);
     }
 
     // 构造额外候选行并追加到 SDP
@@ -495,6 +520,15 @@ void IceTransport::emit_sdp_with_extra_candidates() {
     std::string extra_lines;
     extra_lines.reserve(results.size() * 200);  // 预分配，每个结果约 2 行 × ~100 字节
     for (const auto& r : results) {
+        // 对比 libjuice srflx 和 Multi-STUN 发现的 IP
+        if (g_logger && !juice_srflx_ip.empty()) {
+            bool ip_differs = (r.reflexive_ip != juice_srflx_ip);
+            g_logger->info("[IceTransport] Multi-STUN 对比: libjuice_srflx={}:{} multi_srflx={}:{} {}",
+                          juice_srflx_ip, juice_port,
+                          r.reflexive_ip, r.reflexive_port,
+                          ip_differs ? "← 不同IP! 双WAN探测生效" : "← 相同IP");
+        }
+
         // 候选1：原始 IP:port（StunProber 的 socket 端口）
         extra_lines += "a=candidate:multi1 1 UDP 16777215 ";
         extra_lines += r.reflexive_ip;
@@ -547,12 +581,14 @@ void IceTransport::send_late_multi_stun_candidates() {
 
     if (results.empty()) return;
 
-    // 获取 libjuice 主 SDP 中 srflx 的端口（用于构造替代候选）
+    // 获取 libjuice 主 SDP 中 srflx 的 IP 和端口
     uint16_t juice_port = 0;
+    std::string juice_srflx_ip;
     std::string sdp = get_local_description();
     auto srflx_pos = sdp.find("typ srflx");
     if (srflx_pos != std::string::npos) {
         juice_port = parse_port_from_candidate_line(sdp, srflx_pos);
+        juice_srflx_ip = parse_ip_from_candidate_line(sdp, srflx_pos);
     }
 
     std::function<void(const std::string&)> cb_candidate;
@@ -569,6 +605,15 @@ void IceTransport::send_late_multi_stun_candidates() {
     }
 
     for (const auto& r : results) {
+        // 对比 libjuice srflx 和 Multi-STUN 发现的 IP
+        if (g_logger && !juice_srflx_ip.empty()) {
+            bool ip_differs = (r.reflexive_ip != juice_srflx_ip);
+            g_logger->info("[IceTransport] Multi-STUN 对比(补发): libjuice_srflx={}:{} multi_srflx={}:{} {}",
+                          juice_srflx_ip, juice_port,
+                          r.reflexive_ip, r.reflexive_port,
+                          ip_differs ? "← 不同IP! 双WAN探测生效" : "← 相同IP");
+        }
+
         // 候选1：Multi-STUN 探测 IP:port（StunProber 的 socket 映射端口）
         std::string candidate1 = "a=candidate:multi1 1 UDP 16777215 " +
             r.reflexive_ip + " " + std::to_string(r.reflexive_port) + " typ srflx";

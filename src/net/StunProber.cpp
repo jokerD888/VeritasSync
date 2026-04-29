@@ -19,7 +19,7 @@ static constexpr size_t   STUN_HEADER_SIZE      = 20;
 static constexpr size_t   STUN_RECV_BUFFER_SIZE = 1024;
 
 // --- 内部：单个 STUN 探测会话 ---
-struct StunProber::ProbeSession : public std::enable_shared_from_this<ProbeSession> {
+struct StunProber::ProbeSession {
     boost::asio::ip::udp::socket socket;
     boost::asio::ip::udp::endpoint remote_endpoint;
     std::array<uint8_t, 12> transaction_id{};
@@ -192,6 +192,16 @@ void StunProber::probe(const std::vector<std::pair<std::string, uint16_t>>& serv
             auto cb = std::move(callback);
             cb(std::move(deduped));
         }
+
+        // 一次探测完成（成功或失败），减少 pending 计数
+        // 必须在持有 mutex 的情况下调用
+        void mark_one_done() {
+            if (--pending_count == 0 && !timer_fired) {
+                timer_fired = true;
+                timer->cancel();
+                try_complete();
+            }
+        }
     };
 
     auto state = std::make_shared<SharedState>();
@@ -241,11 +251,7 @@ void StunProber::probe(const std::vector<std::pair<std::string, uint16_t>>& serv
                         g_logger->debug("[StunProber] DNS 解析失败 {}: {}", session->server_host, ec.message());
                     }
                     std::lock_guard<std::mutex> lock(state->mutex);
-                    if (--state->pending_count == 0 && !state->timer_fired) {
-                        state->timer_fired = true;
-                        state->timer->cancel();
-                        state->try_complete();
-                    }
+                    state->mark_one_done();
                     return;
                 }
 
@@ -264,11 +270,7 @@ void StunProber::probe(const std::vector<std::pair<std::string, uint16_t>>& serv
                                                session->server_host, send_ec.message());
                             }
                             std::lock_guard<std::mutex> lock(state->mutex);
-                            if (--state->pending_count == 0 && !state->timer_fired) {
-                                state->timer_fired = true;
-                                state->timer->cancel();
-                                state->try_complete();
-                            }
+                            state->mark_one_done();
                             return;
                         }
 
@@ -292,11 +294,7 @@ void StunProber::probe(const std::vector<std::pair<std::string, uint16_t>>& serv
                                 }
 
                                 std::lock_guard<std::mutex> lock(state->mutex);
-                                if (--state->pending_count == 0 && !state->timer_fired) {
-                                    state->timer_fired = true;
-                                    state->timer->cancel();
-                                    state->try_complete();
-                                }
+                                state->mark_one_done();
                             });
                     });
             });
