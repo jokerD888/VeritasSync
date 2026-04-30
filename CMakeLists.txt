@@ -72,7 +72,6 @@ add_executable(veritas_sync WIN32
     src/net/IceTransport.cpp
     src/net/KcpSession.cpp
     src/net/UpnpManager.cpp
-    src/net/StunProber.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
     src/p2p/PeerController.cpp
@@ -276,7 +275,6 @@ add_executable(unit_tests
     tests/test_transfer_manager.cpp
     tests/test_common_utils_robustness.cpp
     tests/test_config.cpp
-    tests/test_stun_prober.cpp
     tests/test_nl_filter.cpp
     tests/test_sync_handler.cpp
     tests/test_sync_session.cpp
@@ -304,7 +302,6 @@ add_executable(unit_tests
     src/net/KcpSession.cpp
     src/net/IceTransport.cpp
     src/net/UpnpManager.cpp
-    src/net/StunProber.cpp
     src/p2p/PeerController.cpp
     src/p2p/PeerRegistry.cpp
     src/p2p/MessageRouter.cpp

@@ -53,7 +53,7 @@ cd build/debug && ./unit_tests.exe
 
 | 模块 | 目录 | 职责 |
 |------|------|------|
-| net | `net/` | 网络传输层（IceTransport, KcpSession, StunProber） |
+| net | `net/` | 网络传输层（IceTransport, KcpSession, UpnpManager） |
 | p2p | `p2p/` | P2P 连接管理（PeerController, P2PManager, TrackerClient） |
 | sync | `sync/` | 文件同步（SyncNode, SyncSession, SyncHandler, TransferManager） |
 | common | `common/` | 通用工具（Logger, CryptoLayer） |

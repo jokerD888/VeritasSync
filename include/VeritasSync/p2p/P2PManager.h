@@ -66,8 +66,6 @@ struct P2PManagerConfig {
     uint16_t    turn_port            = 3478;
     std::string turn_username;
     std::string turn_password;
-    std::vector<std::pair<std::string, uint16_t>> extra_stun_servers;
-    bool        enable_multi_stun_probing = false;
 };
 
 class P2PManager : public std::enable_shared_from_this<P2PManager> {
@@ -136,9 +134,6 @@ protected:
     P2PManager();
     void init();  // 由 create() 内部调用，配置参数已就绪
 
-    // --- KCP 集成（已提取到 KcpScheduler）---
-
-    // --- Peer 访问委托给 PeerRegistry ---
 
     // --- 上层应用逻辑（使用 PeerController）---
     // send_over_kcp 返回bool表示是否至少有一个对等点成功接收
@@ -161,11 +156,6 @@ protected:
     void start_background_services();   // 启动 IO 线程、定时器、UPnP
     void register_message_handlers();   // 注册所有消息路由（MessageRouter）
 
-    // --- 消息路由（见 register_message_handlers()）---
-
-    // --- 消息处理器（见 SyncHandler）---
-
-    // --- 同步会话管理（见 SyncSession）---
 
     // PeerController 回调处理
     void handle_peer_state_changed(const std::string& peer_id, PeerState state);
@@ -217,8 +207,6 @@ protected:
     uint16_t m_turn_port = 3478;
     std::string m_turn_username;
     std::string m_turn_password;
-    std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
-    bool m_enable_multi_stun_probing = false;
     // --------------------------
 
     // --- 文件组装缓冲区清理 ---

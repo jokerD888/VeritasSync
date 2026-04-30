@@ -16,9 +16,6 @@
 
 namespace VeritasSync {
 
-// 前向声明
-struct StunResult;
-
 /**
  * @brief ICE 连接状态
  */
@@ -43,22 +40,6 @@ enum class IceConnectionType {
 
 /**
  * @brief ICE 传输配置
- *
- * TODO(feature): 多 STUN 服务器并行探测（Multi-STUN Probing）
- *
- * 问题场景：双 WAN 负载均衡路由器（Dual-WAN）环境下，同一设备的不同 UDP
- * 连接可能被路由器分配到不同的公网 IP（按源端口哈希负载均衡）。当前只配置
- * 一个 STUN 服务器，单次探测只能发现其中一条线路的 reflexive candidate。
- *
- * 方案：
- * 1. Config 增加 stun_servers 数组（替代单个 stun_host/port）
- * 2. IceTransport::initialize() 前，用独立 UDP socket 向每个 STUN 服务器
- *    发送 Binding Request（不同 socket = 不同源端口 = 可能命中不同 WAN 线路）
- * 3. 收集去重后的所有 server-reflexive address
- * 4. 通过 juice_add_remote_candidate() 将额外发现的地址注入 ICE 流程
- *
- * 注意：此方案仅对 Dual-WAN 负载均衡有效。对称 NAT 下多 STUN 探测到的
- * 地址对第三方不可用（每个目标分配不同映射），此时唯一可靠方案是 TURN relay。
  */
 struct IceConfig {
     std::string stun_host = "stun.l.google.com";
@@ -68,16 +49,6 @@ struct IceConfig {
     uint16_t turn_port = 3478;
     std::string turn_username;
     std::string turn_password;
-
-    // 额外 STUN 服务器（Multi-STUN Probing）
-    // 每个服务器使用独立 socket 探测，发现不同的 reflexive candidate
-    std::vector<std::pair<std::string, uint16_t>> extra_stun_servers;
-    bool enable_multi_stun_probing = false;
-
-    // SDP 等待 Multi-STUN 探测结果的最大延迟 (ms)
-    // libjuice gathering 完成后，最多再等这么久让 Multi-STUN 结果到达
-    // 注意：StunProber 超时为 3000ms，此值应尽量接近但不超过它
-    int multi_stun_hold_timeout_ms = 2500;
 };
 
 /**
@@ -93,13 +64,8 @@ struct IceTransportCallbacks {
     // 本地候选地址准备好 (需发送给 Signaling Server)
     std::function<void(const std::string& candidate_sdp)> on_local_candidate;
 
-    // libjuice 候选收集完成 (可发送 SDP Offer/Answer，但不要发 gathering_done 信号)
-    // 如果启用了 Multi-STUN Probing，还有后续候选需要探测
+    // 候选收集完成 (可发送 SDP Offer/Answer 以及 ice_gathering_done)
     std::function<void(const std::string& local_description)> on_gathering_done;
-
-    // 所有候选收集完成（包括 Multi-STUN Probing），可安全发送 ice_gathering_done 信号
-    // 如果未启用 Multi-STUN，会在 on_gathering_done 之后立即触发
-    std::function<void()> on_all_candidates_done;
 
     // 收到数据 (ICE 连接上的原始字节数据)
     std::function<void(const char* data, size_t size)> on_data_received;
@@ -124,7 +90,7 @@ public:
      * @brief 创建 IceTransport 实例
      * @param config ICE 配置 (STUN/TURN)
      * @param callbacks 事件回调
-     * @param io_context 用于 Multi-STUN Probing 的事件循环（可选，不提供则不执行探测）
+     * @param io_context 事件循环（保留参数以兼容上层调用，可为 nullptr）
      * @return 智能指针，创建失败返回 nullptr
      */
     static std::shared_ptr<IceTransport> create(
@@ -232,16 +198,10 @@ private:
     // 内部处理
     void handle_state_changed(juice_state_t state);
     void update_connection_type();
-    void start_multi_stun_probing();
-    void try_finalize_gathering();
-    void emit_sdp_with_extra_candidates();
-    void send_late_multi_stun_candidates();
-    static uint16_t parse_port_from_candidate_line(const std::string& sdp, size_t srflx_pos);
-    static std::string parse_ip_from_candidate_line(const std::string& sdp, size_t srflx_pos);
 
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
-    boost::asio::io_context* m_io_context = nullptr;  // 用于 Multi-STUN Probing（不拥有）
+    boost::asio::io_context* m_io_context = nullptr;  // 上层事件循环（不拥有，可为 nullptr）
 
     // 保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
     std::string m_stun_host;
@@ -249,25 +209,13 @@ private:
     std::string m_turn_username;
     std::string m_turn_password;
 
-    // Multi-STUN Probing 配置
-    std::vector<std::pair<std::string, uint16_t>> m_extra_stun_servers;
-    bool m_enable_multi_stun_probing = false;
-
-    // Multi-STUN 并行探测汇合状态
-    std::atomic<bool> m_juice_gathering_done{false};
-    std::atomic<bool> m_multi_stun_done{false};
-    std::atomic<bool> m_gathering_emitted{false};  // 防止 emit_sdp 双重触发
-    std::vector<StunResult> m_multi_stun_results;  // 探测结果缓存（受 m_mutex 保护）
-    std::shared_ptr<boost::asio::steady_timer> m_stun_hold_timer;  // hold 超时定时器
-    std::chrono::milliseconds m_multi_stun_hold_timeout{2500};     // 可配置的 hold 超时
-    
     // TURN 服务器配置必须使用成员变量，不能是局部变量
     // jconfig.turn_servers 会保存指向它的指针，局部变量会导致悬空指针
     juice_turn_server_t m_turn_server{};
-    
+
     std::atomic<IceState> m_state{IceState::New};
     std::atomic<IceConnectionType> m_connection_type{IceConnectionType::None};
-    
+
     mutable std::mutex m_mutex;
 };
 

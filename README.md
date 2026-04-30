@@ -197,7 +197,6 @@ VeritasSync/
         "stun_port": 19302,
         "turn_host": "",
         "turn_port": 3478,
-        "enable_multi_stun_probing": true,
         "ice_answer_wait_timeout_seconds": 30,
         "upnp_discover_timeout_ms": 2000
     },

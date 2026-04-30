@@ -125,17 +125,6 @@ void PeerController::bind_callbacks() {
         });
     };
 
-    // 所有候选收集完成（含 Multi-STUN Probing），发送 ice_gathering_done 信号
-    ice_callbacks.on_all_candidates_done = [self_weak, &io]() {
-        boost::asio::post(io, [self_weak]() {
-            auto self = self_weak.lock();
-            if (!self) return;
-            if (self->m_callbacks.on_signal_needed) {
-                self->m_callbacks.on_signal_needed("ice_gathering_done", "");
-            }
-        });
-    };
-    
     ice_callbacks.on_data_received = [self_weak, &io](const char* data, size_t size) {
         // 数据接收需要拷贝，因为原始指针在回调返回后可能无效
         std::string data_copy(data, size);
@@ -387,9 +376,8 @@ void PeerController::on_ice_gathering_done(const std::string& local_desc) {
         std::string signal_type = m_is_offer_side ? "sdp_offer" : "sdp_answer";
         m_callbacks.on_signal_needed(signal_type, local_desc);
 
-        // 注意：ice_gathering_done 信号由 on_all_candidates_done 回调发送
-        // 如果启用了 Multi-STUN Probing，会在探测完成后才发送
-        // 如果未启用，IceTransport 会立即触发 on_all_candidates_done
+        // SDP 发送完毕后立即通知对端候选收集结束
+        m_callbacks.on_signal_needed("ice_gathering_done", "");
     }
 }
 

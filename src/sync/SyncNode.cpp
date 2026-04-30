@@ -177,25 +177,6 @@ bool SyncNode::start() {
     p2p_config.turn_port = m_global_config.network.turn_port;
     p2p_config.turn_username = m_global_config.network.turn_username;
     p2p_config.turn_password = m_global_config.network.turn_password;
-    p2p_config.enable_multi_stun_probing = m_global_config.network.enable_multi_stun_probing;
-
-    if (m_global_config.network.enable_multi_stun_probing) {
-        if (!m_global_config.network.extra_stun_servers.empty()) {
-            p2p_config.extra_stun_servers.reserve(m_global_config.network.extra_stun_servers.size());
-            for (const auto& s : m_global_config.network.extra_stun_servers) {
-                p2p_config.extra_stun_servers.emplace_back(s.host, s.port);
-            }
-        } else {
-            // 内置默认 STUN 列表
-            p2p_config.extra_stun_servers = {
-                {"stun1.l.google.com",        19302},
-                {"stun2.l.google.com",        19302},
-                {"stun.stunprotocol.org",     3478},
-                {"stun.nextcloud.com",        443},
-                {"stun.miwifi.com",           3478},
-            };
-        }
-    }
 
     auto p2p = P2PManager::create(p2p_config);
     if (!p2p) {
@@ -239,10 +220,6 @@ bool SyncNode::start() {
     }
     if (!m_global_config.network.turn_host.empty()) {
         g_logger->info("[Config] Using TURN server at {}:{}", m_global_config.network.turn_host, m_global_config.network.turn_port);
-    }
-    if (m_global_config.network.enable_multi_stun_probing) {
-        g_logger->info("[Config] Multi-STUN Probing 启用，{} 个额外 STUN 服务器",
-                       m_global_config.network.extra_stun_servers.empty() ? 5 : m_global_config.network.extra_stun_servers.size());
     }
 
     // 7. 创建 StateManager（可能抛出异常，需要捕获）

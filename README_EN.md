@@ -28,7 +28,6 @@ Whether for fast transfer of large files within a LAN or bi-directional synchron
 * **Reliable UDP (KCP)**: Built on ARQ-based reliable UDP transmission. In weak network environments with high packet loss, it offers significantly better throughput and latency compared to traditional TCP.
 * **Smart NAT Traversal (ICE)**: Integrated with **LibJuice** (STUN/TURN), supporting traversal for various NAT types including Full Cone and Restricted Cone. Automatically detects the optimal path (prioritizing P2P direct connection, with Relay as a fallback).
 * **Resumable Transfer**: Supports automatic resumption after transfer interruption with bitmap-based chunk tracking and contiguous verification for accurate recovery.
-* **🚧 Multi-STUN Probing (Planned)**: For Dual-WAN load-balancing router scenarios — different connections from the same device may be assigned to different public IPs, so a single STUN probe only discovers one link. Planned support for configuring multiple STUN servers to probe in parallel, collecting reflexive candidates from all links, improving traversal success rates in dual-broadband environments.
 
 ### 🔄 Flexible Synchronization Logic
 * **Bi-Directional Sync**: Supports mutual synchronization between multiple devices with built-in **Source-side Echo Suppression** algorithm that prevents echo broadcasts at the source, saving bandwidth.

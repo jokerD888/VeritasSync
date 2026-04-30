@@ -52,14 +52,6 @@ struct Config {
         std::string turn_username;
         std::string turn_password;
 
-        bool enable_multi_stun_probing = true;
-        std::string stun_list_url = "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
-        struct StunServer {
-            std::string host;
-            uint16_t port = 3478;
-        };
-        std::vector<StunServer> extra_stun_servers;
-
         int ice_answer_wait_timeout_seconds = 30;
         int upnp_discover_timeout_ms = 2000;
         int peer_cleanup_interval_minutes = 5;
@@ -188,8 +180,7 @@ inline nlohmann::json config_to_json(const Config& c) {
             {"turn_host", c.network.turn_host},
             {"turn_port", c.network.turn_port},
             {"turn_username", c.network.turn_username},
-            {"turn_password", c.network.turn_password},
-            {"enable_multi_stun_probing", c.network.enable_multi_stun_probing}
+            {"turn_password", c.network.turn_password}
         }},
         {"logging", {
             {"level", c.logging.level}
@@ -204,12 +195,6 @@ inline nlohmann::json config_to_json(const Config& c) {
         }},
         {"tasks", c.tasks}
     };
-    if (!c.network.extra_stun_servers.empty()) {
-        j["network"]["extra_stun_servers"] = nlohmann::json::array();
-        for (const auto& s : c.network.extra_stun_servers) {
-            j["network"]["extra_stun_servers"].push_back({{"host", s.host}, {"port", s.port}});
-        }
-    }
     return j;
 }
 
@@ -227,16 +212,6 @@ inline void config_from_json(const nlohmann::json& j, Config& c) {
         LOAD_OPT(n, "turn_port", c.network.turn_port);
         LOAD_OPT(n, "turn_username", c.network.turn_username);
         LOAD_OPT(n, "turn_password", c.network.turn_password);
-        LOAD_OPT(n, "enable_multi_stun_probing", c.network.enable_multi_stun_probing);
-        if (n.contains("extra_stun_servers")) {
-            c.network.extra_stun_servers.clear();
-            for (const auto& s : n["extra_stun_servers"]) {
-                Config::Network::StunServer server;
-                server.host = s.value("host", "");
-                server.port = s.value("port", static_cast<uint16_t>(3478));
-                if (!server.host.empty()) c.network.extra_stun_servers.push_back(std::move(server));
-            }
-        }
     }
     if (j.contains("logging")) {
         const auto& l = j["logging"];
@@ -263,7 +238,6 @@ inline nlohmann::json advanced_to_json(const Config& c) {
         {"network", {
             {"tracker_reconnect_interval_seconds", c.network.tracker_reconnect_interval_seconds},
             {"tracker_max_packet_size_mb", c.network.tracker_max_packet_size_mb},
-            {"stun_list_url", c.network.stun_list_url},
             {"ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds},
             {"upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms},
             {"peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes}
@@ -336,7 +310,6 @@ inline void advanced_from_json(const nlohmann::json& j, Config& c) {
         const auto& n = j["network"];
         LOAD_OPT(n, "tracker_reconnect_interval_seconds", c.network.tracker_reconnect_interval_seconds);
         LOAD_OPT(n, "tracker_max_packet_size_mb", c.network.tracker_max_packet_size_mb);
-        LOAD_OPT(n, "stun_list_url", c.network.stun_list_url);
         LOAD_OPT(n, "ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds);
         LOAD_OPT(n, "upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms);
         LOAD_OPT(n, "peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes);

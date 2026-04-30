@@ -663,27 +663,6 @@
                             <input id="cfgTurnPass" class="form-input" type="password">
                         </div>
                     </div>
-
-                    <hr style="margin:2rem 0;border:0;border-top:1px solid var(--border)">
-                    
-                    <h4 style="color:var(--text-main);margin-bottom:1rem;font-size:1rem;display:flex;align-items:center;gap:8px;">
-                        <span>🌐</span> 多 WAN / 高级探测增强
-                    </h4>
-                    
-                    <div class="form-group">
-                        <label style="display:flex;align-items:center;gap:12px;cursor:pointer;color:var(--text-main);">
-                            <input type="checkbox" id="cfgEnableMultiWan" style="width:18px;height:18px;accent-color:var(--primary);">
-                            启用多 STUN 并发探测 (显著提升多宽带/NAT3 环境下的连通率)
-                        </label>
-                        <div class="text-sm-sub" style="margin-left:30px;margin-top:8px;">
-                            * 开启后将自动从下方列表获取 STUN 服务器, 探测所有可能的公网 IP 并注入 SDP。
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label>STUN 列表源 URL</label>
-                        <input id="cfgStunListUrl" class="form-input" placeholder="https://..." style="font-family:var(--font-mono);font-size:0.85rem;">
-                    </div>
                 </div>
 
                 <div class="glass-card" style="margin-top: 2rem;">
@@ -1030,10 +1009,6 @@
                 id('cfgTurnUser').value = net.turn_username || "";
                 id('cfgTurnPass').value = net.turn_password || "";
 
-                // 多 WAN 配置回填
-                id('cfgEnableMultiWan').checked = (net.enable_multi_stun_probing !== false);
-                id('cfgStunListUrl').value = net.stun_list_url || "https://raw.githubusercontent.com/pradt2/always-online-stun/master/valid_hosts.txt";
-
                 // LLM API 配置回填
                 id('cfgLlmApiUrl').value = llm.api_url || "";
                 id('cfgLlmApiKey').value = llm.api_key || "";
@@ -1050,8 +1025,6 @@
                 turn_host: id('cfgTurnHost').value,
                 turn_username: id('cfgTurnUser').value,
                 turn_password: id('cfgTurnPass').value,
-                enable_multi_stun_probing: id('cfgEnableMultiWan').checked,
-                stun_list_url: id('cfgStunListUrl').value,
                 llm_api_url: id('cfgLlmApiUrl').value,
                 llm_api_key: id('cfgLlmApiKey').value,
                 llm_model: id('cfgLlmModel').value

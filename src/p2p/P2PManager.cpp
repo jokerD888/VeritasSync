@@ -47,8 +47,6 @@ IceConfig P2PManager::create_ice_config() const {
         config.turn_username = m_turn_username;
         config.turn_password = m_turn_password;
     }
-    config.extra_stun_servers = m_extra_stun_servers;
-    config.enable_multi_stun_probing = m_enable_multi_stun_probing;
     return config;
 }
 
@@ -97,18 +95,12 @@ std::shared_ptr<P2PManager> P2PManager::create(const P2PManagerConfig& config) {
     manager->m_turn_port = config.turn_port;
     manager->m_turn_username = config.turn_username;
     manager->m_turn_password = config.turn_password;
-    manager->m_extra_stun_servers = config.extra_stun_servers;
-    manager->m_enable_multi_stun_probing = config.enable_multi_stun_probing;
 
     if (!config.stun_host.empty()) {
         g_logger->info("[Config] STUN 服务器设置为: {}:{}", config.stun_host, config.stun_port);
     }
     if (!config.turn_host.empty()) {
         g_logger->info("[Config] TURN 服务器设置为: {}:{}", config.turn_host, config.turn_port);
-    }
-    if (config.enable_multi_stun_probing) {
-        g_logger->info("[Config] Multi-STUN Probing: 启用 ({} 个额外服务器)",
-                       config.extra_stun_servers.size());
     }
 
     manager->init();

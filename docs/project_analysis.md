@@ -40,7 +40,6 @@ VeritasSync 是一个基于 C++20 的高性能**去中心化 P2P 文件同步工
 | NAT 穿透 | ICE 协议 (LibJuice) | 不同 NAT 类型设备间无法直接通信 |
 | 端到端加密 | AES-256-GCM + HKDF | 防止传输数据被窃听 |
 | 断点续传 | Bitmap + 临时文件 | 传输中断后可恢复，无需重传 |
-| 多 STUN 并行探测 | StunProber | 双 WAN 负载均衡环境发现更多反射候选 |
 | Tracker 中继回退 | TCP 信令中继 | 对称 NAT 等 ICE 失败场景仍可通信 |
 | 冲突自动解决 | 三方合并 + 重命名 | 多端同时修改同一文件不丢数据 |
 | AI 忽略规则生成 | LLM + 轻量 RAG | 自然语言生成 .veritasignore 规则 |
@@ -243,8 +242,6 @@ IceTransport.send()       ← NAT 穿透 (UDP) 或 Tracker 中继
 - **工厂模式**: `create()` 静态方法，两阶段初始化（构造 → `initialize()`），失败返回 nullptr
 - **ICE 状态机**: `New → Gathering → Connecting → Connected/Completed/Failed/Disconnected`
 - **回调接口**: `IceTransportCallbacks` — 状态变化、本地候选、候选收集完成、数据接收
-- **Multi-STUN Probing**: 当 `enable_multi_stun_probing = true` 时，libjuice gathering 完成后，额外启动 StunProber 并行探测多个 STUN 服务器，发现更多 reflexive candidate
-- **候选收集汇合**: `m_juice_gathering_done` + `m_multi_stun_done` 两个原子标志 + hold 超时定时器，确保所有候选收集完毕后才触发 `on_all_candidates_done`
 - **TURN 服务器**: 配置存储为成员变量（非局部变量），因为 `juice_turn_server_t` 保存指向它的指针
 
 #### KcpSession — KCP 可靠传输会话
@@ -260,13 +257,6 @@ IceTransport.send()       ← NAT 穿透 (UDP) 或 Tracker 中继
 - **死锁预防**: `on_output` 回调在 KCP 持锁状态下触发，**禁止**在此回调中调用 KcpSession 的任何方法；`on_message_received` 回调在锁外执行，可安全调用 `send()`
 - **KcpContextManager**: 全局单例，管理 KCP 回调上下文生命周期。使用 `weak_ptr<KcpSession>` 避免循环引用，防止回调访问已销毁的 Session
 - **自定义删除器**: `KcpDeleter` 在释放 KCP 前先注销上下文
-
-#### StunProber — STUN Binding 探测客户端
-
-- **文件**: `include/VeritasSync/net/StunProber.h`, `src/net/StunProber.cpp`
-- **用途**: Multi-STUN Probing 的执行组件，为双 WAN 负载均衡环境发现更多 reflexive candidate
-- **协议实现**: 手工构建 RFC 5389 Binding Request、解析 XOR-MAPPED-ADDRESS 响应
-- **并行探测**: 每个 STUN 服务器使用独立 UDP socket（不同源端口 → 可能命中不同 WAN 线路），所有探测并行执行，超时后回调返回去重结果
 
 #### UpnpManager — UPnP 端口映射管理
 
@@ -712,7 +702,7 @@ StateManager 检查: check_and_clear_echo("F", "H1")
 2. 创建 P2PManager (性能参数注入)
 3. 创建 TrackerClient (共享 P2PManager 的 io_context)
 4. 互相注入: tracker↔p2p
-5. 配置 P2PManager (role / encryption_key / mode / STUN / TURN / Multi-STUN)
+5. 配置 P2PManager (role / encryption_key / mode / STUN / TURN)
 6. 创建 StateManager (回调连接 P2PManager 广播)
 7. 注入 StateManager → P2PManager
 8. 初始扫描: sm.scan_directory()
@@ -791,7 +781,6 @@ StateManager 检查: check_and_clear_echo("F", "H1")
 | test_kcp_session.cpp | KcpSession (可靠传输) |
 | test_peer_controller.cpp | PeerController (单节点连接) |
 | test_p2p_manager.cpp | P2PManager (P2P 中枢) |
-| test_stun_prober.cpp | StunProber (STUN 探测) |
 | test_nl_filter.cpp | NLFilterGenerator (AI 规则生成) |
 | test_sync_handler.cpp | SyncHandler (消息处理) |
 | test_sync_session.cpp | SyncSession (会话管理) |
@@ -815,7 +804,7 @@ StateManager 检查: check_and_clear_echo("F", "H1")
 1. **common/** → Config, Logger, Hashing, EncodingUtils, PathUtils, ModernUtils
 2. **storage/** → Database, CachedFileStore, FileFilter
 3. **common/** → CryptoLayer (理解加密后再看网络层)
-4. **net/** → BinaryFrame, StunProber, IceTransport, KcpSession, UpnpManager
+4. **net/** → BinaryFrame, IceTransport, KcpSession, UpnpManager
 5. **sync/** → Protocol, SyncManager (纯算法), SyncHandler, SyncSession, TransferManager
 6. **p2p/** → TrackerClient, PeerController, KcpScheduler, P2PManager
 7. **sync/** → SyncNode (理解所有组件后看编排)

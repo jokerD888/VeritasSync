@@ -443,12 +443,6 @@ void WebUIServer::setup_config_routes() {
                 }
             }
 
-            // Multi-STUN Probing 配置
-            if (j.contains("enable_multi_stun_probing"))
-                m_config.network.enable_multi_stun_probing = j.value("enable_multi_stun_probing", m_config.network.enable_multi_stun_probing);
-            if (j.contains("stun_list_url"))
-                m_config.network.stun_list_url = j.value("stun_list_url", m_config.network.stun_list_url);
-
             // LLM API 配置
             if (j.contains("llm_api_url"))
                 m_config.llm.api_url = j.value("llm_api_url", m_config.llm.api_url);
