@@ -59,10 +59,22 @@ public:
     };
 
     // 构造函数注入所有依赖
+    //
+    // 注：拆成两个重载（而非使用 `TransferConfig config = {}` 默认实参），是为了避免
+    // clang 在解析包含本头的"外层类"成员函数声明时触发诊断
+    //   "default member initializer for 'X' needed within definition of
+    //    enclosing class 'TransferManager' outside of member functions"
+    // 嵌套类型 TransferConfig 的默认成员初始化器（DMI）在 TransferManager
+    // 自身解析未结束前是"未到位"的，将其作为默认实参会让上游头文件（如
+    // P2PManager.h）的编译诊断流被这条 error 污染。
     TransferManager(StateManager* sm, boost::asio::io_context& io_context,
                     boost::asio::thread_pool& pool, SendCallback send_cb,
-                    size_t chunk_size = DEFAULT_CHUNK_DATA_SIZE,
-                    TransferConfig config = {});
+                    size_t chunk_size = DEFAULT_CHUNK_DATA_SIZE);
+
+    TransferManager(StateManager* sm, boost::asio::io_context& io_context,
+                    boost::asio::thread_pool& pool, SendCallback send_cb,
+                    size_t chunk_size,
+                    TransferConfig config);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 

@@ -171,6 +171,13 @@ TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_c
     : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)),
       CHUNK_DATA_SIZE(chunk_size), m_transfer_config(std::move(config)) {}
 
+// 不带 TransferConfig 的便捷构造：委托给主构造函数，使用默认配置。
+// 此处 TransferConfig{} 在函数体内求值，clang 不会触发"DMI 在外层类外部"诊断。
+TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
+                                 boost::asio::thread_pool& pool, SendCallback send_cb,
+                                 size_t chunk_size)
+    : TransferManager(sm, io_context, pool, std::move(send_cb), chunk_size, TransferConfig{}) {}
+
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
 

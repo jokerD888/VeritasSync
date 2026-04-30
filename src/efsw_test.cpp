@@ -63,7 +63,7 @@ class EventPrinter : public efsw::FileWatchListener {
 public:
     void handleFileAction(efsw::WatchID, [[maybe_unused]] const std::string& dir,
         const std::string& filename, efsw::Action action,
-        std::string oldFilename = "") override {
+        const std::string& oldFilename = "") override {
         // 我们只关心文件，忽略目录本身的变化 (比如 '.')
         if (filename == "." || filename == "..") {
             return;

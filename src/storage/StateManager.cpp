@@ -35,7 +35,7 @@ namespace VeritasSync {
         void handleFileAction(
             efsw::WatchID, const std::string& dir, const std::string& filename,
             efsw::Action action,
-            std::string oldFilename) override {  // <-- 启用 oldFilename
+            const std::string& oldFilename) override {  // <-- 启用 oldFilename（efsw 新版签名为 const std::string&）
             if (filename == "." || filename == "..") {
                 return;
             }
@@ -89,6 +89,15 @@ namespace VeritasSync {
     };
 
     // --- StateManager 实现 ---
+
+    // 不带 SyncConfig 的便捷构造：委托给主构造函数，使用默认配置。
+    // 此处 SyncConfig{} 在函数体内（mem-initializer 链路）求值，clang 不会触发
+    // "DMI 在外层类外部"诊断。
+    StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
+                               StateManagerCallbacks callbacks, bool enable_watcher,
+                               const std::string& sync_key)
+        : StateManager(root_path, io_context, std::move(callbacks), enable_watcher,
+                       sync_key, SyncConfig{}) {}
 
     StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                                StateManagerCallbacks callbacks, bool enable_watcher,

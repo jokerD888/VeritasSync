@@ -1,12 +1,9 @@
 #include "VeritasSync/p2p/P2PManager.h"
 
-#include <algorithm>
 #include <boost/asio/ip/udp.hpp>
 #include <boost/asio/post.hpp>
 #include <functional>
-#include <iostream>
 #include <nlohmann/json.hpp>
-#include <random>
 #include <thread>
 
 #include "VeritasSync/common/Logger.h"

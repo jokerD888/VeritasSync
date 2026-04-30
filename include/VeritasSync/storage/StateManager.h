@@ -49,10 +49,21 @@ namespace VeritasSync {
         };
 
         // 构造函数接收 io_context 引用和回调，不再依赖 P2PManager
+        //
+        // 注：拆成两个重载（而非使用 `SyncConfig sync_config = {}` 默认实参），是为了
+        // 避免 clang 在解析包含本头的下游 .cpp 时触发诊断
+        //   "default member initializer for 'batch_trigger_threshold' needed within
+        //    definition of enclosing class 'StateManager' outside of member functions"
+        // 嵌套类型 SyncConfig 的默认成员初始化器（DMI）在 StateManager 自身解析未结束
+        // 前是"未到位"的，将其作为默认实参会让上游 .cpp 的诊断流被这条 error 污染。
         StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                      StateManagerCallbacks callbacks, bool enable_watcher,
-                     const std::string& sync_key = "unknown",
-                     SyncConfig sync_config = {});
+                     const std::string& sync_key = "unknown");
+
+        StateManager(const std::string& root_path, boost::asio::io_context& io_context,
+                     StateManagerCallbacks callbacks, bool enable_watcher,
+                     const std::string& sync_key,
+                     SyncConfig sync_config);
         ~StateManager();
 
         // 扫描同步目录，生成当前所有文件的状态快照

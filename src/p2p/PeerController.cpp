@@ -80,7 +80,7 @@ bool PeerController::initialize_ice(const IceConfig& ice_config) {
     
     IceTransportCallbacks ice_callbacks;  // 空回调，后续在 bind_callbacks 中设置
 
-    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), &m_io_context);
+    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), m_io_context);
     if (!m_ice) {
         if (g_logger) {
             g_logger->error("[PeerController] Failed to create IceTransport for {}", m_peer_id);

@@ -1,7 +1,6 @@
 #include "VeritasSync/sync/SyncNode.h"
 
 #include <filesystem>
-#include <iostream>
 // <memory> 已在头文件中包含，这里不需要重复
 
 #include "VeritasSync/common/EncodingUtils.h"

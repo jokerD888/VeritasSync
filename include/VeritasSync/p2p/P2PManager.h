@@ -3,10 +3,7 @@
 #pragma once
 
 // === 标准库（仅头文件声明所需的最小集合）===
-#include <chrono>
-#include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -173,8 +170,6 @@ protected:
     void wait_for_kcp_flush(int timeout_ms = GRACEFUL_SHUTDOWN_TIMEOUT_MS);
     void handle_goodbye(PeerController* from_peer);
 
-
-    // --- UPnP 管理器 ---
 
     // --- 成员变量 ---
     // m_io_context 所有网络事件的事件循环

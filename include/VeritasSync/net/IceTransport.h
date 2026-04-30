@@ -5,14 +5,10 @@
 #include <atomic>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <span>
 #include <string>
-#include <vector>
 
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <chrono>
 
 namespace VeritasSync {
 
@@ -40,6 +36,10 @@ enum class IceConnectionType {
 
 /**
  * @brief ICE 传输配置
+ *
+ * 注意：当前依赖的 libjuice（juice_turn_server_t 仅含 host/port/username/password
+ * 4 个字段，且 README 明确 "Only UDP is supported as transport protocol"）
+ * 不支持 TURN over TCP/TLS。如需 TLS:443 兜底，需待 libjuice 上游加字段后再扩展。
  */
 struct IceConfig {
     std::string stun_host = "stun.l.google.com";
@@ -53,9 +53,9 @@ struct IceConfig {
 
 /**
  * @brief IceTransport 回调接口
- * 
- * 这些回调将在 libjuice 内部线程触发，
- * 调用方应使用 boost::asio::post 投递到自己的 IO 线程。
+ *
+ * 这些回调由 IceTransport 内部统一 post 到构造时传入的 io_context 线程上执行。
+ * 上层无需再做线程切换，可直接安全访问业务对象（前提是回调签名遵循 weak_ptr 模式）。
  */
 struct IceTransportCallbacks {
     // ICE 状态变化回调
@@ -89,14 +89,15 @@ public:
     /**
      * @brief 创建 IceTransport 实例
      * @param config ICE 配置 (STUN/TURN)
-     * @param callbacks 事件回调
-     * @param io_context 事件循环（保留参数以兼容上层调用，可为 nullptr）
+     * @param callbacks 事件回调（将在 io_context 线程上被调用）
+     * @param io_context 事件循环（必填，所有上层回调都通过它分发，
+     *                   保证回调线程一致性、规避 libjuice polling 线程的 race）
      * @return 智能指针，创建失败返回 nullptr
      */
     static std::shared_ptr<IceTransport> create(
         const IceConfig& config,
         IceTransportCallbacks callbacks,
-        boost::asio::io_context* io_context = nullptr);
+        boost::asio::io_context& io_context);
     
     ~IceTransport();
     
@@ -173,35 +174,34 @@ public:
     
     /**
      * @brief 替换回调（用于两阶段初始化）
-     * 
-     * 在 PeerController 的 bind_callbacks() 中调用，
-     * 此时 shared_ptr 已就绪，可以用 weak_ptr 绑定回调。
-     * 
+     *
+     * 调用约束：必须在 io_context 线程上调用（与回调读取在同一线程，
+     * 因此无需加锁；后续所有回调读取也在 io_context 线程上发生）。
+     *
      * @param callbacks 新的回调接口
      */
     void set_callbacks(IceTransportCallbacks callbacks) {
-        std::lock_guard<std::mutex> lock(m_mutex);
         m_callbacks = std::move(callbacks);
     }
 
 private:
-    IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context* io_context);
+    IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context& io_context);
 
     bool initialize(const IceConfig& config);
-    
-    // libjuice 静态回调
+
+    // libjuice 静态回调（在 libjuice polling 线程触发，仅做转发）
     static void on_juice_state_changed(juice_agent_t* agent, juice_state_t state, void* user_ptr);
     static void on_juice_candidate(juice_agent_t* agent, const char* sdp, void* user_ptr);
     static void on_juice_gathering_done(juice_agent_t* agent, void* user_ptr);
     static void on_juice_recv(juice_agent_t* agent, const char* data, size_t size, void* user_ptr);
-    
-    // 内部处理
-    void handle_state_changed(juice_state_t state);
+
+    // io_context 线程上的实际处理
+    void handle_state_changed_on_loop(juice_state_t state);
     void update_connection_type();
 
     juice_agent_t* m_agent = nullptr;
     IceTransportCallbacks m_callbacks;
-    boost::asio::io_context* m_io_context = nullptr;  // 上层事件循环（不拥有，可为 nullptr）
+    boost::asio::io_context& m_io_context;  // 上层事件循环（必须长于 IceTransport 生命周期）
 
     // 保存配置字符串副本，确保 c_str() 指针在 agent 生命周期内有效
     std::string m_stun_host;
@@ -215,8 +215,6 @@ private:
 
     std::atomic<IceState> m_state{IceState::New};
     std::atomic<IceConnectionType> m_connection_type{IceConnectionType::None};
-
-    mutable std::mutex m_mutex;
 };
 
 } // namespace VeritasSync

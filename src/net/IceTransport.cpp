@@ -4,7 +4,7 @@
 #include <juice/juice.h>
 #include <boost/asio/post.hpp>
 #include <cstring>
-#include <mutex>
+#include <mutex>  // std::once_flag / std::call_once（libjuice 日志一次性初始化）
 
 namespace VeritasSync {
 
@@ -41,18 +41,18 @@ static void init_juice_logging() {
 }
 
 // 命名常量
-static constexpr size_t SDP_BUFFER_SIZE       = 4096;  // SDP 描述缓冲区大小
+static constexpr size_t SDP_BUFFER_SIZE       = 8192;  // SDP 描述缓冲区（候选多时 4KB 易截断）
 static constexpr size_t CANDIDATE_BUFFER_SIZE = 1024;  // ICE 候选地址缓冲区大小
 
 // --- 工厂方法 ---
 std::shared_ptr<IceTransport> IceTransport::create(
     const IceConfig& config,
     IceTransportCallbacks callbacks,
-    boost::asio::io_context* io_context) {
+    boost::asio::io_context& io_context) {
 
     // 使用 make_shared 的技巧：通过派生类访问私有构造函数
     struct IceTransportMaker : public IceTransport {
-        IceTransportMaker(IceTransportCallbacks cb, boost::asio::io_context* io)
+        IceTransportMaker(IceTransportCallbacks cb, boost::asio::io_context& io)
             : IceTransport(std::move(cb), io) {}
     };
 
@@ -64,11 +64,16 @@ std::shared_ptr<IceTransport> IceTransport::create(
 }
 
 // --- 构造与析构 ---
-IceTransport::IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context* io_context)
+IceTransport::IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context& io_context)
     : m_callbacks(std::move(callbacks)), m_io_context(io_context) {
 }
 
 IceTransport::~IceTransport() {
+    // 注意：juice_destroy 会同步等待 libjuice polling 线程退出，
+    // 因此在它返回之后，不会再有 on_juice_* 回调被触发。
+    // 但 polling 线程在退出前可能已经把若干 lambda post 到 m_io_context，
+    // 这些 lambda 用 weak_from_this() 锁定 self，本对象析构后 lock() 返回空，
+    // 自然安全跳过 — 这是 P0 修复的核心保证。
     if (m_agent) {
         juice_destroy(m_agent);
         m_agent = nullptr;
@@ -90,7 +95,7 @@ bool IceTransport::initialize(const IceConfig& config) {
         jconfig.stun_server_host = m_stun_host.c_str();
         jconfig.stun_server_port = config.stun_port;
     }
-    
+
     // TURN 配置使用成员变量 m_turn_server，避免局部变量导致悬空指针
     // 原代码使用局部变量 turn_server，函数返回后jconfig.turn_servers变成悬空指针
     if (!m_turn_host.empty()) {
@@ -98,26 +103,31 @@ bool IceTransport::initialize(const IceConfig& config) {
         m_turn_server.port = config.turn_port;
         m_turn_server.username = m_turn_username.c_str();
         m_turn_server.password = m_turn_password.c_str();
+
+        // 注意：当前 libjuice 仅支持 TURN over UDP（juice_turn_server_t 无 transport 字段，
+        // 且上游 README 明确 "Only UDP is supported as transport protocol"）。
+        // 若未来需要 TURN-TCP/TLS 兜底，需先升级 libjuice 并在此处补齐字段。
+
         jconfig.turn_servers = &m_turn_server;  // 指向成员变量，生命周期与IceTransport相同
         jconfig.turn_servers_count = 1;
     } else {
         jconfig.turn_servers = nullptr;
         jconfig.turn_servers_count = 0;
     }
-    
+
     // 设置回调
     jconfig.user_ptr = this;
     jconfig.cb_state_changed = &IceTransport::on_juice_state_changed;
     jconfig.cb_candidate = &IceTransport::on_juice_candidate;
     jconfig.cb_gathering_done = &IceTransport::on_juice_gathering_done;
     jconfig.cb_recv = &IceTransport::on_juice_recv;
-    
+
     m_agent = juice_create(&jconfig);
     if (!m_agent) {
         if (g_logger) g_logger->error("[IceTransport] juice_create failed");
         return false;
     }
-    
+
     return true;
 }
 
@@ -170,20 +180,32 @@ void IceTransport::set_remote_gathering_done() {
 
 std::string IceTransport::get_local_description() const {
     if (!m_agent) return "";
-    
+
     char buffer[SDP_BUFFER_SIZE];
-    if (juice_get_local_description(m_agent, buffer, sizeof(buffer)) == 0) {
-        return std::string(buffer);
+    if (juice_get_local_description(m_agent, buffer, sizeof(buffer)) != 0) {
+        return "";
     }
-    return "";
+
+    // libjuice 在缓冲不足时不报错、直接截断 → 检测末尾是否紧贴边界。
+    // 用 strnlen 限定上限，避免 buffer 未以 \0 结尾时越界。
+    size_t len = strnlen(buffer, sizeof(buffer));
+    if (len >= sizeof(buffer) - 1 && g_logger) {
+        g_logger->warn("[IceTransport] 本地 SDP 长度紧贴缓冲上限 ({} bytes)，可能已被截断；"
+                       "若对端解析失败请考虑扩大 SDP_BUFFER_SIZE", len);
+    }
+    return std::string(buffer, len);
 }
 
 bool IceTransport::get_selected_candidates(std::string& out_local, std::string& out_remote) const {
     if (!m_agent) return false;
-    
+
+    // libjuice 在 ICE 未到 Connected 之前调用 juice_get_selected_candidates 会失败，
+    // 这里前置过滤掉以避免无谓的 libjuice ERROR 日志，让调用方拿到清晰的"未连接"语义。
+    if (!is_connected()) return false;
+
     char local_buf[CANDIDATE_BUFFER_SIZE];
     char remote_buf[CANDIDATE_BUFFER_SIZE];
-    if (juice_get_selected_candidates(m_agent, local_buf, sizeof(local_buf), 
+    if (juice_get_selected_candidates(m_agent, local_buf, sizeof(local_buf),
                                        remote_buf, sizeof(remote_buf)) == 0) {
         out_local = local_buf;
         out_remote = remote_buf;
@@ -204,46 +226,56 @@ bool IceTransport::is_connected() const {
     return state == IceState::Connected || state == IceState::Completed;
 }
 
-// --- 静态回调 (libjuice 线程) ---
-// 这样的设计模式也叫 适配器模式 (Adapter Pattern)，将 libjuice 的 C 风格回调适配为 C++ 的 std::function 回调，让上层代码更加现代和安全！
+// --- 静态回调 (libjuice polling 线程) ---
+//
+// P0 修复：所有回调在 libjuice polling 线程上仅做"参数拷贝 + post 到 io_context"，
+// 真正的业务处理在 io_context 线程内完成。这带来两个保证：
+//   1. 回调线程一致性：上层 callbacks 全部在 io_context 线程上被调用，
+//      上层无需再考虑线程切换、加锁。
+//   2. 生命周期安全：post 时使用 weak_from_this()，若析构已发生，
+//      lambda 在 io_context 上 lock() 返回空指针，自然安全跳过。
+//
+// 这种适配模式即 Adapter Pattern：把 libjuice 的 C 风格回调适配为
+// std::function 风格的 C++ 接口。
 
-// 对应 IceTransportCallbacks::on_state_changed
-void IceTransport::on_juice_state_changed([[maybe_unused]] juice_agent_t* agent, juice_state_t state, void* user_ptr) {
+void IceTransport::on_juice_state_changed([[maybe_unused]] juice_agent_t* agent,
+                                          juice_state_t state, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
-    if (self) {
-        self->handle_state_changed(state);
-    }
+    if (!self) return;
+    auto weak = self->weak_from_this();
+    boost::asio::post(self->m_io_context, [weak, state]() {
+        if (auto sp = weak.lock()) {
+            sp->handle_state_changed_on_loop(state);
+        }
+    });
 }
 
-// 对应 IceTransportCallbacks::on_local_candidate
 void IceTransport::on_juice_candidate(juice_agent_t* /*agent*/, const char* sdp, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
-    if (self && self->m_callbacks.on_local_candidate && sdp) {
-        std::string candidate(sdp);
-        // 移除尾部换行
-        while (!candidate.empty() && (candidate.back() == '\r' || candidate.back() == '\n')) {
-            candidate.pop_back();
-        }
-        self->m_callbacks.on_local_candidate(candidate);
+    if (!self || !sdp) return;
+
+    // 立即拷贝 SDP（libjuice 回调返回后 sdp 指针不可信）
+    std::string candidate(sdp);
+    while (!candidate.empty() && (candidate.back() == '\r' || candidate.back() == '\n')) {
+        candidate.pop_back();
     }
+
+    auto weak = self->weak_from_this();
+    boost::asio::post(self->m_io_context,
+                      [weak, candidate = std::move(candidate)]() {
+        auto sp = weak.lock();
+        if (!sp || !sp->m_callbacks.on_local_candidate) return;
+        sp->m_callbacks.on_local_candidate(candidate);
+    });
 }
 
-// 对应 IceTransportCallbacks::on_gathering_done
 void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
     if (!self) return;
 
-    // 拷贝回调指针 + SDP，避免在持锁状态下调用上层回调
-    std::function<void(const std::string&)> cb;
-    {
-        std::lock_guard<std::mutex> lock(self->m_mutex);
-        cb = self->m_callbacks.on_gathering_done;
-    }
-    if (!cb) return;
-
+    // 在 libjuice 线程上拿 SDP 是安全的（juice_get_local_description 是只读 API）
     std::string sdp = self->get_local_description();
 
-    // 记录 SDP 中的候选者类型
     if (g_logger) {
         bool has_host  = sdp.find("typ host")  != std::string::npos;
         bool has_srflx = sdp.find("typ srflx") != std::string::npos;
@@ -257,26 +289,35 @@ void IceTransport::on_juice_gathering_done(juice_agent_t* /*agent*/, void* user_
         }
     }
 
-    // 在 io_context 上回调（如果有），否则同步触发
-    if (self->m_io_context) {
-        boost::asio::post(*self->m_io_context, [cb, sdp]() { cb(sdp); });
-    } else {
-        cb(sdp);
-    }
+    auto weak = self->weak_from_this();
+    boost::asio::post(self->m_io_context, [weak, sdp = std::move(sdp)]() {
+        auto sp = weak.lock();
+        if (!sp || !sp->m_callbacks.on_gathering_done) return;
+        sp->m_callbacks.on_gathering_done(sdp);
+    });
 }
 
-// 对应 IceTransportCallbacks::on_data_received
-void IceTransport::on_juice_recv([[maybe_unused]] juice_agent_t* agent, const char* data, size_t size, void* user_ptr) {
+void IceTransport::on_juice_recv([[maybe_unused]] juice_agent_t* agent,
+                                 const char* data, size_t size, void* user_ptr) {
     auto* self = static_cast<IceTransport*>(user_ptr);
-    if (self && self->m_callbacks.on_data_received) {
-        self->m_callbacks.on_data_received(data, size);
-    }
+    if (!self || !data || size == 0) return;
+
+    // 必须立即拷贝：data 指针在回调返回后即失效
+    std::string buffer(data, size);
+
+    auto weak = self->weak_from_this();
+    boost::asio::post(self->m_io_context, [weak, buffer = std::move(buffer)]() {
+        auto sp = weak.lock();
+        if (!sp || !sp->m_callbacks.on_data_received) return;
+        sp->m_callbacks.on_data_received(buffer.data(), buffer.size());
+    });
 }
 
-// --- 内部处理 ---
-void IceTransport::handle_state_changed(juice_state_t state) {
+// --- io_context 线程内的实际处理 ---
+void IceTransport::handle_state_changed_on_loop(juice_state_t state) {
     IceState new_state = IceState::New;
-    
+    bool need_update_type = false;
+
     switch (state) {
         case JUICE_STATE_DISCONNECTED:
             new_state = IceState::Disconnected;
@@ -289,27 +330,41 @@ void IceTransport::handle_state_changed(juice_state_t state) {
             break;
         case JUICE_STATE_CONNECTED:
             new_state = IceState::Connected;
-            update_connection_type();
+            need_update_type = true;
             break;
         case JUICE_STATE_COMPLETED:
             new_state = IceState::Completed;
-            update_connection_type();
+            need_update_type = true;
             break;
         case JUICE_STATE_FAILED:
             new_state = IceState::Failed;
             break;
         default:
-            break;
+            // 未识别的 libjuice 状态：上游升级后可能新增枚举值。
+            // 不向上抛伪 New 状态，避免上层误判 ICE 重新开始。
+            if (g_logger) {
+                g_logger->warn("[IceTransport] 收到未知 juice_state={}，已忽略（请检查 libjuice 是否升级）",
+                               static_cast<int>(state));
+            }
+            return;
     }
-    
+
+    // 必须先 store 新状态，再调 update_connection_type()——
+    // 因为后者内部的 get_selected_candidates() 现在会前置检查 is_connected()，
+    // 依赖 m_state 已经反映 Connected/Completed。
     m_state.store(new_state);
-    
+
+    if (need_update_type) {
+        update_connection_type();
+    }
+
     if (m_callbacks.on_state_changed) {
         m_callbacks.on_state_changed(new_state);
     }
 }
 
 void IceTransport::update_connection_type() {
+    // 在 io_context 线程内调用，可安全访问 libjuice 只读 API
     std::string local_candidate, remote_candidate;
     if (get_selected_candidates(local_candidate, remote_candidate)) {
         if (local_candidate.find(" typ host") != std::string::npos ||
