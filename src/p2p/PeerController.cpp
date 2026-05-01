@@ -15,24 +15,24 @@ std::shared_ptr<PeerController> PeerController::create(
     const std::string& peer_id,
     boost::asio::io_context& io_context,
     const IceConfig& ice_config,
-    CryptoLayer& crypto,
+    std::shared_ptr<CryptoLayer> crypto,
     PeerControllerCallbacks callbacks,
     const KcpConfig& kcp_config) {
     
     // 使用内部派生类绕过 private 构造函数
     struct PeerControllerMaker : public PeerController {
         PeerControllerMaker(
-            const std::string& self, 
-            const std::string& peer, 
-            boost::asio::io_context& ioc, 
-            CryptoLayer& cry,
+            const std::string& self,
+            const std::string& peer,
+            boost::asio::io_context& ioc,
+            std::shared_ptr<CryptoLayer> cry,
             PeerControllerCallbacks cb,
             const KcpConfig& kcp_cfg)
-            : PeerController(self, peer, ioc, cry, std::move(cb), kcp_cfg) {}
+            : PeerController(self, peer, ioc, std::move(cry), std::move(cb), kcp_cfg) {}
     };
-    
+
     auto controller = std::make_shared<PeerControllerMaker>(
-        self_id, peer_id, io_context, crypto, std::move(callbacks), kcp_config);
+        self_id, peer_id, io_context, std::move(crypto), std::move(callbacks), kcp_config);
     
     // 第一阶段：创建 IceTransport（但不绑定回调）
     if (!controller->initialize_ice(ice_config)) {
@@ -53,14 +53,14 @@ PeerController::PeerController(
     const std::string& self_id,
     const std::string& peer_id,
     boost::asio::io_context& io_context,
-    CryptoLayer& crypto,
+    std::shared_ptr<CryptoLayer> crypto,
     PeerControllerCallbacks callbacks,
     const KcpConfig& kcp_config)
     : m_self_id(self_id)
     , m_peer_id(peer_id)
     , m_is_offer_side(self_id < peer_id)  // 自动判断角色
     , m_io_context(io_context)
-    , m_crypto(crypto)
+    , m_crypto(std::move(crypto))
     , m_callbacks(std::move(callbacks))
     , m_kcp_config(kcp_config) {
 }
@@ -200,21 +200,21 @@ void PeerController::handle_signaling(const std::string& signal_type, const std:
 }
 
 void PeerController::close() {
-    // C-1: 标记为已关闭，is_valid() 返回 false
+    // C-1: 标记为已关闭，is_valid() 返回 false（atomic，锁外安全）
     m_closed.store(true);
-    m_state.store(PeerState::Disconnected);
-    
-    // A-6 修复：所有资源释放统一在 m_mutex 保护下进行
-    // sync_timeout_timer 是 shared_ptr（非 atomic），必须在锁内操作
-    // 防止与 io_context 线程中 SyncSession::handle_sync_begin 对 timer 的赋值产生数据竞争
+
+    // A-6 修复：状态变更与资源释放在同一把锁内完成
+    // 防止其他线程在 m_state=Disconnected 但资源尚未释放的窗口期内访问已失效的指针
     std::lock_guard<std::mutex> lock(m_mutex);
-    
+
+    m_state.store(PeerState::Disconnected);
+
     // 取消同步超时定时器
     if (m_sync_timeout_timer) {
         m_sync_timeout_timer->cancel();
         m_sync_timeout_timer.reset();
     }
-    
+
     // 释放资源
     m_kcp.reset();
     m_ice.reset();
@@ -243,18 +243,26 @@ int PeerController::send_message(const std::string& message) {
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::update_kcp(uint32_t current_ms) {
-    // 【修复】在锁内仅拷贝 KcpSession 的 shared_ptr
+    // 在锁内仅拷贝 KcpSession 的 shared_ptr
     std::shared_ptr<KcpSession> kcp;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_kcp) return;
         kcp = m_kcp;
     }
-    // 在锁外执行 update() 和 receive()
     // update() 内部会触发 on_kcp_output 回调（加密+网络I/O），不应持锁
-    // receive() 的回调可能调用 send_message()，需要获取 m_mutex
+    // update() 内部自动收取消息并触发 on_message_received 回调（锁外）
     kcp->update(current_ms);
-    kcp->receive();
+}
+
+uint32_t PeerController::check_kcp(uint32_t current_ms) const {
+    std::shared_ptr<KcpSession> kcp;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_kcp) return current_ms;
+        kcp = m_kcp;
+    }
+    return kcp->check(current_ms);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -279,25 +287,10 @@ int PeerController::get_kcp_wait_send() const {
     return 0;
 }
 
-std::shared_ptr<IceTransport> PeerController::get_ice_transport() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_ice;
-}
-
-std::shared_ptr<KcpSession> PeerController::get_kcp_session() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_kcp;
-}
-
 void PeerController::flush_kcp() {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_kcp && m_kcp->is_valid()) {
-        // 获取当前时间戳并触发 flush
-        auto now = std::chrono::steady_clock::now();
-        uint32_t current_ms = static_cast<uint32_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                now.time_since_epoch()).count() & 0xFFFFFFFF);
-        m_kcp->update(current_ms);
+        m_kcp->flush();
     }
 }
 
@@ -386,7 +379,7 @@ void PeerController::on_ice_data_received(const char* data, size_t size) {
     // 【加密层下沉】
     // 1. 尝试解密
     std::string ciphertext(data, size);
-    std::string plaintext = m_crypto.decrypt(ciphertext);
+    std::string plaintext = m_crypto->decrypt(ciphertext);
 
     // 2. 解密失败 = 丢包 (KCP 会超时重传)
     // 这种机制确保了只有合法且完整的数据包才能进入 KCP 状态机
@@ -417,7 +410,7 @@ int PeerController::on_kcp_output(const char* data, int len) {
     // 【加密层下沉】
     // 1. 加密整个 KCP 包 (Header + Content)
     std::string plaintext(data, len);
-    std::string ciphertext = m_crypto.encrypt(plaintext);
+    std::string ciphertext = m_crypto->encrypt(plaintext);
 
     if (ciphertext.empty()) {
         if (g_logger) {
@@ -455,7 +448,7 @@ int PeerController::on_kcp_output(const char* data, int len) {
 }
 
 void PeerController::on_kcp_message_received(const std::string& message) {
-    // 此回调在 KcpSession::receive() 的锁外触发，是安全的
+    // 此回调在 KcpSession::update() 的锁外触发，是安全的
 
     if (m_callbacks.on_message_received) {
         m_callbacks.on_message_received(message);
@@ -469,14 +462,15 @@ void PeerController::on_kcp_message_received(const std::string& message) {
 void PeerController::enable_relay_mode(
     std::function<void(const std::string& peer_id, const uint8_t* data, size_t len)> send_func) {
 
-    // 快速路径：已关闭则跳过（正确性由 setup_kcp_session 内的锁内检查保证）
-    if (!is_valid()) {
-        if (g_logger) g_logger->warn("[PeerController] enable_relay_mode 跳过: {} 已关闭", m_peer_id);
-        return;
-    }
-
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+
+        // TOCTOU 修复：is_valid() 检查移入锁内，防止检查与状态变更之间的竞态
+        if (m_closed.load()) {
+            if (g_logger) g_logger->warn("[PeerController] enable_relay_mode 跳过: {} 已关闭", m_peer_id);
+            return;
+        }
+
         m_relay_send = std::move(send_func);
         m_relay_mode.store(true);  // 与 m_relay_send 在同一把锁内，保证 on_kcp_output 看到一致状态
 
@@ -579,7 +573,7 @@ void PeerController::start_sync_timeout(
 bool PeerController::refresh_sync_timeout(uint64_t session_id, int timeout_seconds) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    if (m_sync_session_id.load() == session_id && m_sync_timeout_timer) {
+    if (m_sync_progress.session_id.load() == session_id && m_sync_timeout_timer) {
         m_sync_timeout_timer->expires_after(std::chrono::seconds(timeout_seconds));
         return true;
     }

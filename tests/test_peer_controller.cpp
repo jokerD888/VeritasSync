@@ -67,7 +67,7 @@ protected:
     std::unique_ptr<boost::asio::executor_work_guard<
         boost::asio::io_context::executor_type>> m_work_guard;
     std::thread m_io_thread;
-    CryptoLayer m_crypto;
+    std::shared_ptr<CryptoLayer> m_crypto = std::make_shared<CryptoLayer>();
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -277,25 +277,6 @@ TEST_F(PeerControllerTest, SendMessageWithoutConnection) {
 // ═══════════════════════════════════════════════════════════════
 // 6. 资源管理测试
 // ═══════════════════════════════════════════════════════════════
-
-TEST_F(PeerControllerTest, GetIceTransportAndKcpSession) {
-    PeerControllerCallbacks callbacks;
-    callbacks.on_state_changed = [](PeerState) {};
-    callbacks.on_signal_needed = [](const std::string&, const std::string&) {};
-    
-    auto controller = PeerController::create(
-        "self", "peer", m_io_context, create_ice_config(), m_crypto, std::move(callbacks));
-    
-    ASSERT_NE(controller, nullptr);
-    
-    // IceTransport 应该存在
-    auto ice = controller->get_ice_transport();
-    EXPECT_NE(ice, nullptr);
-    
-    // KcpSession 在连接前不存在
-    auto kcp = controller->get_kcp_session();
-    EXPECT_EQ(kcp, nullptr);
-}
 
 TEST_F(PeerControllerTest, SyncTimeoutTimerManagement) {
     PeerControllerCallbacks callbacks;

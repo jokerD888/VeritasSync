@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
-#include <vector>
 #include <optional>
 
 #include <boost/asio/detail/socket_ops.hpp>

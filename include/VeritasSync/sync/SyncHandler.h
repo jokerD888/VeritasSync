@@ -4,12 +4,9 @@
 #include <boost/asio/thread_pool.hpp>
 #include <filesystem>
 #include <functional>
-#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
-#include <shared_mutex>
 #include <string>
-#include <vector>
 
 #include "VeritasSync/common/Config.h"
 #include "VeritasSync/sync/Protocol.h"

@@ -2,6 +2,7 @@
 #include "VeritasSync/common/Logger.h"
 
 #include <filesystem>
+#include <fstream>
 
 namespace VeritasSync {
 

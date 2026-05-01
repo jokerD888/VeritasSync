@@ -52,7 +52,7 @@ IceConfig P2PManager::create_ice_config() const {
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::set_encryption_key(const std::string& key_string) {
-    m_crypto.set_key(key_string);
+    m_crypto->set_key(key_string);
 }
 
 boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
@@ -106,6 +106,7 @@ std::shared_ptr<P2PManager> P2PManager::create(const P2PManagerConfig& config) {
 
 P2PManager::P2PManager()
     : m_io_context(),
+      m_crypto(std::make_shared<CryptoLayer>()),
       m_cleanup_timer(m_io_context),
       m_worker_pool(std::thread::hardware_concurrency()) {
 }

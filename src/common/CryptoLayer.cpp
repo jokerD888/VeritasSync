@@ -27,13 +27,18 @@ CryptoLayer::~CryptoLayer() {
     }
 }
 
-CryptoLayer::CryptoLayer(CryptoLayer&& other) noexcept
-    : m_key(std::move(other.m_key)) {
+CryptoLayer::CryptoLayer(CryptoLayer&& other) noexcept {
+    std::unique_lock lock(other.m_key_mutex);
+    m_key = std::move(other.m_key);
 }
 
 CryptoLayer& CryptoLayer::operator=(CryptoLayer&& other) noexcept {
     if (this != &other) {
-        // S-4 安全修复: 先清零自己的旧密钥
+        // 同时锁住双方，避免死锁：固定按地址顺序加锁
+        std::unique_lock lock1(m_key_mutex, std::defer_lock);
+        std::unique_lock lock2(other.m_key_mutex, std::defer_lock);
+        std::lock(lock1, lock2);
+
         if (!m_key.empty()) {
             OPENSSL_cleanse(m_key.data(), m_key.size());
         }
@@ -98,7 +103,7 @@ void CryptoLayer::set_key(const std::string& key_string) {
     EVP_PKEY_CTX_free(ctx);
 
     if (!ok) {
-        g_logger->error("[Crypto] HKDF 密钥派生失败");
+        g_logger->error("[Crypto] HKDF 密钥派生失败，保留旧密钥");
         return;
     }
 
@@ -177,6 +182,8 @@ std::string CryptoLayer::encrypt(const std::string& plaintext) const {
     result.append(reinterpret_cast<const char*>(t_encrypt_buf.data()), ciphertext_len);
     result.append(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
 
+    // 清理线程局部 buffer 中的明文残留
+    OPENSSL_cleanse(t_encrypt_buf.data(), t_encrypt_buf.size());
     return result;
 }
 
@@ -221,13 +228,19 @@ std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
     int plaintext_len = out_len;
 
     // 6. 设置预期的验证标签 (Tag)
+    // const_cast: OpenSSL EVP_CIPHER_CTX_ctrl 的 tag 参数声明为 void* 而非 const void*，
+    // 这是 OpenSSL API 的历史问题，实际不会写入该参数
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN, const_cast<unsigned char*>(tag_ptr)) != 1)[[unlikely]] return "";
 
     // 7. 验证签名并完成解密 (这一步极其关键，防止数据篡改)
     if (EVP_DecryptFinal_ex(ctx, t_decrypt_buf.data() + out_len, &out_len) > 0) {
         plaintext_len += out_len;
-        return std::string(reinterpret_cast<const char*>(t_decrypt_buf.data()), plaintext_len);
+        std::string result(reinterpret_cast<const char*>(t_decrypt_buf.data()), plaintext_len);
+        // 清理线程局部 buffer 中的明文残留
+        OPENSSL_cleanse(t_decrypt_buf.data(), t_decrypt_buf.size());
+        return result;
     } else [[unlikely]]{
+        OPENSSL_cleanse(t_decrypt_buf.data(), t_decrypt_buf.size());
         g_logger->warn("[Crypto] ❌ 解密失败：认证标签不匹配。数据可能已被篡改！");
         return "";
     }

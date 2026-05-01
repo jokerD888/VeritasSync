@@ -3,7 +3,6 @@
 #include <cstdint>  // 用于 uint64_t
 #include <nlohmann/json.hpp>
 #include <string>
-#include <vector>
 
 namespace VeritasSync {
 

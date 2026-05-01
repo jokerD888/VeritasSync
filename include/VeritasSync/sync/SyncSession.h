@@ -6,10 +6,8 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <vector>
 
 #include "VeritasSync/common/Config.h"
-#include "VeritasSync/sync/Protocol.h"
 
 namespace VeritasSync {
 

@@ -184,7 +184,7 @@ protected:
     // Peer 管理（委托给 PeerRegistry）
     PeerRegistry m_peer_registry;
 
-    CryptoLayer m_crypto;
+    std::shared_ptr<CryptoLayer> m_crypto;
 
     // ---  传输管理器 ---
     std::shared_ptr<TransferManager> m_transfer_manager;

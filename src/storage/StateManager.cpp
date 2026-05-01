@@ -4,12 +4,9 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <efsw/efsw.hpp>
-#include <iostream>
 #include <thread>
 #include <algorithm>
 #include <atomic>
-#include <future>
-#include <latch>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"

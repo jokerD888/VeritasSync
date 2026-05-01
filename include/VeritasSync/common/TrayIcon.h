@@ -3,7 +3,6 @@
 #include <atomic>
 #include <functional>
 #include <string>
-#include <vector>
 
 namespace VeritasSync {
 

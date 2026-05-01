@@ -1,5 +1,7 @@
 #include "VeritasSync/p2p/TrackerClient.h"
 
+#include "VeritasSync/common/SignalProto.h"
+
 #include <boost/asio/detail/socket_ops.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>

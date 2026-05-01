@@ -398,12 +398,9 @@ TEST_F(KcpSessionTest, SendInMessageReceivedCallbackIsSafe) {
             session_b->input(pkt.data(), pkt.size());
         }
         
-        session_a->receive();
-        session_b->receive();
-        
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    
+
     // 验证：A 收到 PING 并成功回复 PONG（没有死锁）
     EXPECT_EQ(received_by_a.size(), 1);
     EXPECT_EQ(received_by_a[0], "PING");
@@ -445,11 +442,10 @@ TEST_F(KcpSessionTest, CallbackDoesNotHoldLock) {
         for (const auto& pkt : pipe.receive_all()) {
             receiver->input(pkt.data(), pkt.size());
         }
-        
-        receiver->receive();
+
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    
+
     EXPECT_TRUE(callback_executed);
     EXPECT_EQ(received.size(), 1);
 }
@@ -531,20 +527,12 @@ TEST_F(KcpSessionTest, ConcurrentReceiveAndUpdate) {
         }
     });
     
-    // 传输+接收线程
-    std::thread receive_thread([&]() {
+    // 传输+更新线程（update 内部自动收消息并触发 on_message_received）
+    std::thread update_thread([&]() {
         for (int i = 0; i < 200; ++i) {
             for (const auto& pkt : pipe.receive_all()) {
                 receiver->input(pkt.data(), pkt.size());
             }
-            receiver->receive();
-            std::this_thread::sleep_for(std::chrono::milliseconds(3));
-        }
-    });
-    
-    // 更新线程
-    std::thread update_thread([&]() {
-        for (int i = 0; i < 200; ++i) {
             sender->update(static_cast<uint32_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()
@@ -558,9 +546,8 @@ TEST_F(KcpSessionTest, ConcurrentReceiveAndUpdate) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
-    
+
     send_thread.join();
-    receive_thread.join();
     update_thread.join();
     
     // 验证收到了消息
@@ -729,11 +716,7 @@ TEST_F(KcpSessionTest, TwoWayCommunication) {
         for (const auto& pkt : pipe_b_to_a.receive_all()) {
             session_a->input(pkt.data(), pkt.size());
         }
-        
-        // 接收消息
-        session_a->receive();
-        session_b->receive();
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     
@@ -783,11 +766,10 @@ TEST_F(KcpSessionTest, MessageOrderPreserved) {
         for (const auto& pkt : pipe.receive_all()) {
             receiver->input(pkt.data(), pkt.size());
         }
-        
-        receiver->receive();
+
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    
+
     // 验证消息顺序和完整性
     ASSERT_EQ(received_messages.size(), message_count);
     for (int i = 0; i < message_count; ++i) {
@@ -834,11 +816,10 @@ TEST_F(KcpSessionTest, ReliabilityUnderPacketLoss) {
         for (const auto& pkt : pipe.receive_all()) {
             receiver->input(pkt.data(), pkt.size());
         }
-        
-        receiver->receive();
+
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    
+
     // KCP 应该通过重传保证所有消息到达
     EXPECT_EQ(received_messages.size(), message_count);
 }
@@ -883,11 +864,10 @@ TEST_F(KcpSessionTest, HighFrequencySendReceive) {
         for (const auto& pkt : pipe.receive_all()) {
             receiver->input(pkt.data(), pkt.size());
         }
-        
-        receiver->receive();
+
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    
+
     // 应该收到大部分消息（降低期望值到 50%，更宽容的测试）
     EXPECT_GT(received_count.load(), rapid_message_count * 0.5);
 }

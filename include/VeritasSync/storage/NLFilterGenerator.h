@@ -1,9 +1,7 @@
 #pragma once
 
-#include <functional>
 #include <mutex>
 #include <string>
-#include <vector>
 
 namespace VeritasSync {
 

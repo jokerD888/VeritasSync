@@ -1,9 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
@@ -14,17 +14,18 @@ namespace VeritasSync {
 class PeerController;
 
 /**
- * @brief KCP 自适应更新调度器
- * 
- * 定时调用所有已连接 Peer 的 KCP update()，
- * 并根据活跃度动态调整更新频率：
- *   - 活跃期：  5ms  （有待发送数据）
- *   - 近期活跃：10ms （5秒内有过活跃）
- *   - 空闲期：  100ms（超过 5秒无活跃）
+ * @brief KCP 精确调度器
+ *
+ * 通过 ikcp_check() 查询每个 KCP 会话下次需要 update 的精确时间，
+ * 取所有会话的最小值作为下次唤醒时间，避免盲猜频率。
+ *
+ * 空闲时 KCP 返回较远的时间戳，自然降低频率；
+ * 有重传/ACK pending 时返回精确的重传时间，不多不少。
+ *
+ * 同时负责 NAT 保活心跳。
  */
 class KcpScheduler {
 public:
-    /// 获取已连接 Peer 列表的回调
     using CollectPeersFunc = std::function<std::vector<std::shared_ptr<PeerController>>()>;
 
     /**
@@ -36,21 +37,17 @@ public:
                  CollectPeersFunc collect_peers,
                  uint32_t initial_interval_ms = 20);
 
-    /// 启动 KCP 更新定时器
     void start();
-
-    /// 停止 KCP 更新定时器
     void stop();
 
-    /// 获取当前更新间隔（毫秒）
-    uint32_t get_interval_ms() const { return m_interval_ms; }
+    uint32_t get_interval_ms() const { return m_interval_ms.load(); }
 
-    // 自适应频率参数
-    static constexpr uint32_t INTERVAL_ACTIVE_MS  = 5;    // 活跃时更新间隔
-    static constexpr uint32_t INTERVAL_RECENT_MS  = 10;   // 近期活跃更新间隔
-    static constexpr uint32_t INTERVAL_IDLE_MS    = 100;  // 空闲时更新间隔
-    static constexpr int      IDLE_THRESHOLD_SECONDS = 5; // 空闲判定阈值（秒）
-    static constexpr int      KEEPALIVE_INTERVAL_SECONDS = 15; // 心跳间隔（秒）
+    // 调度间隔上下限
+    static constexpr uint32_t INTERVAL_MIN_MS = 1;    // 最小间隔（防止过于频繁）
+    static constexpr uint32_t INTERVAL_MAX_MS = 100;  // 最大间隔（保底唤醒）
+
+    // 心跳保活
+    static constexpr int KEEPALIVE_INTERVAL_SECONDS = 15; // NAT 保活心跳间隔
 
 private:
     void schedule_update();
@@ -60,10 +57,10 @@ private:
     boost::asio::steady_timer m_timer;
     CollectPeersFunc m_collect_peers;
 
-    uint32_t m_interval_ms = 20;  // 默认 20ms，动态调整
-    std::chrono::steady_clock::time_point m_last_data_time;
+    std::atomic<uint32_t> m_interval_ms{20};
+    std::atomic<bool> m_running{false};
+
     std::chrono::steady_clock::time_point m_last_keepalive_time;
-    bool m_running = false;
 };
 
 }  // namespace VeritasSync

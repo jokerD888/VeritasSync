@@ -4,7 +4,6 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <vector>
 
 using boost::asio::ip::tcp;
 using nlohmann::json;

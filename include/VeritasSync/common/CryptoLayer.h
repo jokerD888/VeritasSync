@@ -1,10 +1,7 @@
 #pragma once
 
-#include <memory>
-#include <mutex>
 #include <shared_mutex>
 #include <string>
-#include <vector>
 
 // Forward declarations for OpenSSL types
 struct evp_cipher_ctx_st;

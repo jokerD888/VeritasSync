@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -18,6 +17,28 @@
 namespace VeritasSync {
 
 class P2PManager; // 前向声明
+
+/**
+ * @brief 同步进度追踪
+ *
+ * 从 PeerController 中提取的同步会话进度状态，
+ * 职责单一：追踪一次同步会话的文件/目录收发计数。
+ */
+struct SyncProgress {
+    std::atomic<uint64_t> session_id{0};
+    std::atomic<size_t>   expected_files{0};
+    std::atomic<size_t>   expected_dirs{0};
+    std::atomic<size_t>   received_files{0};
+    std::atomic<size_t>   received_dirs{0};
+
+    void reset() {
+        session_id.store(0);
+        expected_files.store(0);
+        expected_dirs.store(0);
+        received_files.store(0);
+        received_dirs.store(0);
+    }
+};
 
 /**
  * @brief Peer 连接状态
@@ -87,7 +108,7 @@ public:
         const std::string& peer_id,
         boost::asio::io_context& io_context,
         const IceConfig& ice_config,
-        CryptoLayer& crypto,
+        std::shared_ptr<CryptoLayer> crypto,
         PeerControllerCallbacks callbacks,
         const KcpConfig& kcp_config = KcpConfig{});
     
@@ -151,7 +172,14 @@ public:
      * @param current_ms 当前时间戳（毫秒）
      */
     void update_kcp(uint32_t current_ms);
-    
+
+    /**
+     * @brief 查询 KCP 下次需要 update 的时间戳
+     * @param current_ms 当前时间戳（毫秒）
+     * @return 下次需要 update 的时间戳（毫秒）
+     */
+    uint32_t check_kcp(uint32_t current_ms) const;
+
     // --- 状态查询 ---
     
     const std::string& get_self_id() const { return m_self_id; }
@@ -189,29 +217,33 @@ public:
     // --- 同步会话状态（封装访问，线程安全） ---
 
     /// 设置同步会话 ID
-    void set_sync_session_id(uint64_t id) { m_sync_session_id.store(id); }
+    void set_sync_session_id(uint64_t id) { m_sync_progress.session_id.store(id); }
     /// 获取同步会话 ID
-    uint64_t get_sync_session_id() const { return m_sync_session_id.load(); }
+    uint64_t get_sync_session_id() const { return m_sync_progress.session_id.load(); }
 
     /// 设置预期文件数量
-    void set_expected_file_count(size_t count) { m_expected_file_count.store(count); }
-    size_t get_expected_file_count() const { return m_expected_file_count.load(); }
+    void set_expected_file_count(size_t count) { m_sync_progress.expected_files.store(count); }
+    size_t get_expected_file_count() const { return m_sync_progress.expected_files.load(); }
 
     /// 设置预期目录数量
-    void set_expected_dir_count(size_t count) { m_expected_dir_count.store(count); }
-    size_t get_expected_dir_count() const { return m_expected_dir_count.load(); }
+    void set_expected_dir_count(size_t count) { m_sync_progress.expected_dirs.store(count); }
+    size_t get_expected_dir_count() const { return m_sync_progress.expected_dirs.load(); }
 
     /// 累加已接收文件数量
-    void add_received_file_count(size_t delta = 1) { m_received_file_count.fetch_add(delta); }
+    void add_received_file_count(size_t delta = 1) { m_sync_progress.received_files.fetch_add(delta); }
     /// 重置已接收文件数量
-    void reset_received_file_count() { m_received_file_count.store(0); }
-    size_t get_received_file_count() const { return m_received_file_count.load(); }
+    void reset_received_file_count() { m_sync_progress.received_files.store(0); }
+    size_t get_received_file_count() const { return m_sync_progress.received_files.load(); }
 
     /// 累加已接收目录数量
-    void add_received_dir_count(size_t delta = 1) { m_received_dir_count.fetch_add(delta); }
+    void add_received_dir_count(size_t delta = 1) { m_sync_progress.received_dirs.fetch_add(delta); }
     /// 重置已接收目录数量
-    void reset_received_dir_count() { m_received_dir_count.store(0); }
-    size_t get_received_dir_count() const { return m_received_dir_count.load(); }
+    void reset_received_dir_count() { m_sync_progress.received_dirs.store(0); }
+    size_t get_received_dir_count() const { return m_sync_progress.received_dirs.load(); }
+
+    /// 直接访问同步进度结构体
+    SyncProgress& sync_progress() { return m_sync_progress; }
+    const SyncProgress& sync_progress() const { return m_sync_progress; }
 
     /// 获取连接时间戳
     int64_t get_connected_at_ts() const { return m_connected_at_ts.load(); }
@@ -256,17 +288,12 @@ public:
      */
     void flush_kcp();
     
-    // --- 兼容旧代码 (后续应移除) ---
-    
-    std::shared_ptr<IceTransport> get_ice_transport() const;
-    std::shared_ptr<KcpSession> get_kcp_session() const;
-
 private:
     PeerController(
         const std::string& self_id,
         const std::string& peer_id,
         boost::asio::io_context& io_context,
-        CryptoLayer& crypto,
+        std::shared_ptr<CryptoLayer> crypto,
         PeerControllerCallbacks callbacks,
         const KcpConfig& kcp_config);
     
@@ -297,7 +324,7 @@ private:
     bool m_is_offer_side;    // 是否是 Offer 方
     
     boost::asio::io_context& m_io_context;
-    CryptoLayer& m_crypto;
+    std::shared_ptr<CryptoLayer> m_crypto;
     PeerControllerCallbacks m_callbacks;
     KcpConfig m_kcp_config;  // KCP 配置（窗口大小等）
     
@@ -312,12 +339,9 @@ private:
     
     mutable std::mutex m_mutex;  // 保护 m_ice、m_kcp 和 m_sync_timeout_timer
     
-    // --- 同步会话状态（private）---
-    std::atomic<uint64_t> m_sync_session_id{0};
-    std::atomic<size_t>   m_expected_file_count{0};
-    std::atomic<size_t>   m_expected_dir_count{0};
-    std::atomic<size_t>   m_received_file_count{0};
-    std::atomic<size_t>   m_received_dir_count{0};
+    // --- 同步进度（从 sync 状态中提取）---
+    SyncProgress m_sync_progress;
+
     std::atomic<int64_t>  m_connected_at_ts{0};
     std::atomic<bool>     m_is_graceful_shutdown{false};
     

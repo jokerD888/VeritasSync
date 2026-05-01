@@ -10,7 +10,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "VeritasSync/common/SignalProto.h"
 
 namespace VeritasSync {
 
