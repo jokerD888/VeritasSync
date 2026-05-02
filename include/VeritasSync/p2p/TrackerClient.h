@@ -42,12 +42,6 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     void send_signaling_message(const std::string& to_peer_id, const std::string& type, const std::string& sdp);
     std::string get_self_id() const { return m_self_id; }
 
-    // --- 中继数据通道（ICE 失败时的回退方案）---
-    using RelayDataCallback = std::function<void(const std::string& from_peer_id,
-                                                  const uint8_t* data, size_t len)>;
-    void send_relay_data(const std::string& to_peer_id, const uint8_t* data, size_t len);
-    void set_relay_callback(RelayDataCallback cb);
-
     bool is_connected() const { return m_state.load(std::memory_order_acquire) == State::CONNECTED; }
     bool is_stopping() const noexcept { return m_state.load(std::memory_order_acquire) == State::STOPPING; }
 
@@ -92,8 +86,6 @@ private:
     std::unordered_map<std::string, MessageHandler> m_handlers;
 
     std::atomic<State> m_state{State::DISCONNECTED};
-
-    RelayDataCallback m_relay_callback;
 };
 
 }  // namespace VeritasSync

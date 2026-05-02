@@ -1,6 +1,5 @@
 #include "VeritasSync/p2p/KcpScheduler.h"
 
-#include "VeritasSync/common/Logger.h"
 #include "VeritasSync/net/BinaryFrame.h"
 #include "VeritasSync/p2p/PeerController.h"
 
@@ -48,6 +47,13 @@ void KcpScheduler::update_all_kcps() {
     // 先在锁外收集 controller 列表（回调安全）
     auto controllers = m_collect_peers();
 
+    // 无活跃连接时使用最大间隔，跳过 KCP 驱动和保活检查
+    if (controllers.empty()) {
+        m_interval_ms.store(INTERVAL_MAX_MS);
+        schedule_update();
+        return;
+    }
+
     // 驱动所有 KCP 并查询下次唤醒时间
     uint32_t next_wakeup = current_time_ms + INTERVAL_MAX_MS;
 
@@ -66,11 +72,6 @@ void KcpScheduler::update_all_kcps() {
     uint32_t elapsed_since_now = next_wakeup > current_time_ms
         ? next_wakeup - current_time_ms : 0;
     uint32_t interval = std::clamp(elapsed_since_now, INTERVAL_MIN_MS, INTERVAL_MAX_MS);
-
-    // 如果没有活跃连接，使用最大间隔节省 CPU
-    if (controllers.empty()) {
-        interval = INTERVAL_MAX_MS;
-    }
 
     m_interval_ms.store(interval);
 

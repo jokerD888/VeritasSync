@@ -12,7 +12,6 @@
         "snappy",
         "spdlog",
         "libjuice",
-        "b64",
         "miniupnpc",
         "gtest",
         "cpp-httplib",

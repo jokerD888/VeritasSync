@@ -165,8 +165,6 @@ void Session::handle_message(const json& msg) {
             handle_register(payload);
         } else if (type == SignalProto::TYPE_SIGNAL) {
             handle_signal(msg);
-        } else if (type == SignalProto::TYPE_RELAY_DATA) {
-            handle_relay(msg);
         }
     } catch (const std::exception& e) {
         g_logger->error("[Session] {} 处理消息失败: {}", m_id, e.what());
@@ -203,20 +201,4 @@ void Session::handle_signal(const json& msg) {
     }
 
     m_server.forward(to_peer_id, msg);
-}
-
-void Session::handle_relay(const json& msg) {
-    const auto& payload = msg.at(SignalProto::MSG_PAYLOAD);
-    std::string to_peer_id = payload.at("to").get<std::string>();
-
-    if (to_peer_id.empty()) {
-        g_logger->error("[Session] {} 中继转发失败：'to' 字段为空。", m_id);
-        return;
-    }
-
-    // 【安全】用服务端验证后的 session ID 覆盖 from 字段，防止伪造
-    json relay_msg = msg;
-    relay_msg[SignalProto::MSG_PAYLOAD]["from"] = m_id;
-
-    m_server.forward(to_peer_id, relay_msg);
 }

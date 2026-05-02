@@ -192,25 +192,6 @@ public:
     /// 是否是 Offer 方（self_id < peer_id）
     bool is_offer_side() const { return m_is_offer_side; }
 
-    // --- 中继模式（ICE 失败时的回退方案）---
-
-    /**
-     * @brief 启用中继模式：ICE 失败后，通过 Tracker 服务器中继数据
-     * @param send_func 中继发送函数（由 P2PManager 注入，内部调用 TrackerClient）
-     */
-    void enable_relay_mode(
-        std::function<void(const std::string& peer_id, const uint8_t* data, size_t len)> send_func);
-
-    /**
-     * @brief 喂入中继数据（由 P2PManager 收到 RELAY_DATA 后调用）
-     * @param data 密文数据指针
-     * @param len 数据长度
-     */
-    void feed_relay_data(const uint8_t* data, size_t len);
-
-    /// 是否处于中继模式
-    bool is_relay_mode() const { return m_relay_mode.load(); }
-
     IceConnectionType get_connection_type() const;
     int get_kcp_wait_send() const;
     
@@ -334,8 +315,6 @@ private:
     std::atomic<PeerState> m_state{PeerState::Disconnected};
     std::atomic<bool> m_closed{false};             // C-1: 替代 m_is_valid，close() 后为 true
     std::atomic<bool> m_kcp_initialized{false};  // 防止重复初始化
-    std::atomic<bool> m_relay_mode{false};       // 中继模式标志
-    std::function<void(const std::string&, const uint8_t*, size_t)> m_relay_send;  // 中继发送函数
     
     mutable std::mutex m_mutex;  // 保护 m_ice、m_kcp 和 m_sync_timeout_timer
     

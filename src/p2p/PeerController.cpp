@@ -148,17 +148,11 @@ void PeerController::bind_callbacks() {
 // ═══════════════════════════════════════════════════════════════
 
 uint32_t PeerController::calculate_conv() const {
-    // 使用两个 ID 的有序组合，确保两端一致
-    std::string id_pair = m_is_offer_side 
-        ? (m_self_id + m_peer_id) 
+    // 使用两个 ID 的有序组合（min+max），确保两端一致
+    std::string id_pair = m_is_offer_side
+        ? (m_self_id + m_peer_id)
         : (m_peer_id + m_self_id);
-    
-    // 实际上应该是 min + max 的顺序，更清晰：
-    // std::string id_pair = (m_self_id < m_peer_id) 
-    //     ? (m_self_id + m_peer_id) 
-    //     : (m_peer_id + m_self_id);
-    // 但 m_is_offer_side 就是 m_self_id < m_peer_id，所以等价
-    
+
     return static_cast<uint32_t>(std::hash<std::string>{}(id_pair));
 }
 
@@ -301,16 +295,6 @@ void PeerController::flush_kcp() {
 void PeerController::on_ice_state_changed(IceState state) {
     // 此方法通过 weak_ptr + post 调用，到达这里说明对象仍存活
 
-    // 【P0-a 修复】已切换到中继模式后，忽略所有后续 ICE 状态变化
-    // 防止 libjuice completed↔failed 循环不断触发回调（日志刷屏+重复 flood sync）
-    if (m_relay_mode.load()) {
-        if (g_logger) {
-            g_logger->debug("[PeerController] {} 已在中继模式，忽略 ICE 状态变化: {}",
-                           m_peer_id, static_cast<int>(state));
-        }
-        return;
-    }
-
     if (g_logger) {
         g_logger->info("[PeerController] {} ICE state changed to {}",
                        m_peer_id, static_cast<int>(state));
@@ -419,24 +403,7 @@ int PeerController::on_kcp_output(const char* data, int len) {
         return -1;
     }
 
-    // 2. 中继模式：通过 Tracker 服务器转发密文
-    if (m_relay_mode.load()) {
-        // 在锁内拷贝 relay_send 函数对象，锁外调用，避免数据竞争
-        std::function<void(const std::string&, const uint8_t*, size_t)> relay_send;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            relay_send = m_relay_send;
-        }
-        if (relay_send) {
-            relay_send(m_peer_id,
-                reinterpret_cast<const uint8_t*>(ciphertext.data()),
-                ciphertext.size());
-            return 0;
-        }
-        return -1;
-    }
-
-    // 3. 直连模式：通过 ICE 发送密文
+    // 通过 ICE 发送密文
     // 注意：这里不能加 m_mutex 锁，因为可能在 send() 中被调用，
     // 而 send() 已经持有锁，会导致死锁。
     // 但 m_ice 是 shared_ptr，线程安全。
@@ -456,68 +423,6 @@ void PeerController::on_kcp_message_received(const std::string& message) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 中继模式（ICE 失败时的回退方案）
-// ═══════════════════════════════════════════════════════════════
-
-void PeerController::enable_relay_mode(
-    std::function<void(const std::string& peer_id, const uint8_t* data, size_t len)> send_func) {
-
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-
-        // TOCTOU 修复：is_valid() 检查移入锁内，防止检查与状态变更之间的竞态
-        if (m_closed.load()) {
-            if (g_logger) g_logger->warn("[PeerController] enable_relay_mode 跳过: {} 已关闭", m_peer_id);
-            return;
-        }
-
-        m_relay_send = std::move(send_func);
-        m_relay_mode.store(true);  // 与 m_relay_send 在同一把锁内，保证 on_kcp_output 看到一致状态
-
-        // 【P0-a 修复】销毁 ICE agent，终止 libjuice 的 completed↔failed 状态循环
-        // relay 模式下数据走 Tracker 中转，ICE 通道不再需要
-        // 注意：m_relay_mode 已设为 true，on_ice_state_changed 会忽略后续回调
-        // 即使有已 post 到 io_context 的回调也会被 relay 检查拦截
-        if (m_ice) {
-            g_logger->info("[PeerController] {} 切换到中继模式，销毁 ICE agent", m_peer_id);
-            m_ice.reset();  // → ~IceTransport() → juice_destroy()
-        }
-    }
-
-    // 初始化 KCP（ICE 可能从未到达 Connected 状态，KCP 尚未创建）
-    // 【修复致命死锁】不在此处加锁，setup_kcp_session() 内部会自行加锁
-    // 原代码在此处持有 m_mutex 后调用 setup_kcp_session()，而后者也会加 m_mutex，
-    // std::mutex 不可递归加锁（UB），Windows 上导致死锁/崩溃
-    bool expected = false;
-    if (m_kcp_initialized.compare_exchange_strong(expected, true)) {
-        setup_kcp_session();
-    }
-
-    // 记录连接时间
-    auto now = std::chrono::system_clock::now();
-    m_connected_at_ts.store(
-        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
-
-    // 切换到 Connected 状态，延迟通知上层（避免在 handle_peer_state_changed(Failed) 中重入）
-    m_state.store(PeerState::Connected);
-    if (m_callbacks.on_state_changed) {
-        auto cb = m_callbacks.on_state_changed;
-        boost::asio::post(m_io_context, [cb]() {
-            cb(PeerState::Connected);
-        });
-    }
-
-    if (g_logger) {
-        g_logger->info("[PeerController] {} 已切换到中继模式 (relay via tracker)", m_peer_id);
-    }
-}
-
-void PeerController::feed_relay_data(const uint8_t* data, size_t len) {
-    // 复用现有解密 → KCP input 路径
-    on_ice_data_received(reinterpret_cast<const char*>(data), static_cast<size_t>(len));
-}
-
-// ═══════════════════════════════════════════════════════════════
 // 设置 KCP 会话
 // ═══════════════════════════════════════════════════════════════
 
@@ -530,16 +435,15 @@ void PeerController::setup_kcp_session() {
     uint32_t conv = calculate_conv();
     
     KcpSessionCallbacks kcp_callbacks;
-    
-    // 注意：这里捕获 this 是安全的，因为：
-    // 1. on_output 在 KCP 内部调用，我们不调用 KCP 方法，不会死锁
-    // 2. m_kcp 的生命周期由 PeerController 管理
-    kcp_callbacks.on_output = [this](const char* data, int len) -> int {
-        return on_kcp_output(data, len);
+
+    // 捕获 shared_from_this() 防止 KCP 回调期间 PeerController 被析构
+    auto self = shared_from_this();
+    kcp_callbacks.on_output = [self](const char* data, int len) -> int {
+        return self->on_kcp_output(data, len);
     };
-    
-    kcp_callbacks.on_message_received = [this](const std::string& message) {
-        on_kcp_message_received(message);
+
+    kcp_callbacks.on_message_received = [self](const std::string& message) {
+        self->on_kcp_message_received(message);
     };
     
     m_kcp = KcpSession::create(conv, std::move(kcp_callbacks), m_kcp_config);

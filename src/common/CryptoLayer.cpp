@@ -14,14 +14,14 @@
 
 namespace VeritasSync {
 
-// GCM_IV_LEN 和 GCM_TAG_LEN 已统一定义在 CryptoLayer.h 中
-static constexpr size_t AES256_KEY_SIZE = 32;  // E-1: AES-256 密钥长度（字节）
+
+static constexpr size_t AES256_KEY_SIZE = 32;  // AES-256 密钥长度（字节）
 
 // --- 构造/析构 ---
 CryptoLayer::CryptoLayer() = default;
 
 CryptoLayer::~CryptoLayer() {
-    // S-4 安全修复: 析构时清零密钥内存，防止残留在堆中被取证工具提取
+    // 析构时清零密钥内存，防止残留在堆中被取证工具提取
     if (!m_key.empty()) {
         OPENSSL_cleanse(m_key.data(), m_key.size());
     }
@@ -51,7 +51,7 @@ CryptoLayer& CryptoLayer::operator=(CryptoLayer&& other) noexcept {
 // 使用 thread_local 关键字，每个操作系统线程都会独立拥有一个上下文实例。
 // 生命周期在线程退出时自动结束，彻底解决多线程并发下的“锁竞争”和“频繁分配内存”问题。
 EVP_CIPHER_CTX* CryptoLayer::get_thread_encrypt_ctx() {
-    // std::unique_ptr 的模板参数要求存储一个“删除器对象”。
+    // std::unique_ptr 的模板参数要求存储一个“删除器对象”。EVP_CIPHER_CTX_free 是一个函数（不是函数指针）
     // 如果类型推导为“函数类型”，unique_ptr 内部会尝试声明一个函数成员，这在 C++ 中是非法的（类成员只能是变量或指针）。
     // 所以，我们在模板参数里写 & 是为了辅助类型推导，确保 unique_ptr 知道它要存的是一个指针。
     // 而在构造函数参数里，编译器已经知道你要传的是指针，所以它会帮你自动完成转换
@@ -76,7 +76,7 @@ EVP_CIPHER_CTX* CryptoLayer::get_thread_decrypt_ctx() {
 }
 
 void CryptoLayer::set_key(const std::string& key_string) {
-    // S-2 安全修复: 使用 HKDF-SHA256 从 sync_key 派生 AES-256 密钥
+    // 使用 HKDF-SHA256 从 sync_key 派生 AES-256 密钥
     // Salt: 固定的应用级盐值（防止跨应用碰撞）
     // Info: 绑定用途，防止密钥被误用于其他场景
     static const unsigned char salt[] = "VeritasSync-v1-salt";
@@ -108,11 +108,11 @@ void CryptoLayer::set_key(const std::string& key_string) {
     }
 
     {
-        // 【安全修复 H8】写锁保护 m_key 更新
+        // 写锁保护 m_key 更新
         std::unique_lock lock(m_key_mutex);
         m_key.assign(reinterpret_cast<const char*>(derived_key), AES256_KEY_SIZE);
     }
-    OPENSSL_cleanse(derived_key, sizeof(derived_key));  // S-4: 清零临时密钥
+    OPENSSL_cleanse(derived_key, sizeof(derived_key));  // 清零临时密钥
 
     // 注意：由于使用了 thread_local，这里的密钥更改是全局生效的，
     // 但上下文状态会在下次 EncryptInit 时由新的密钥覆盖，无需手动重置上下文。
@@ -125,7 +125,7 @@ bool CryptoLayer::has_key() const {
 }
 
 std::string CryptoLayer::encrypt(const std::string& plaintext) const {
-    // 【安全修复 H8】读锁保护 m_key
+    // 读锁保护 m_key
     std::shared_lock lock(m_key_mutex);
     if (m_key.empty()) {
         g_logger->error("[Crypto] 加密失败：密钥未设置。");
@@ -188,7 +188,7 @@ std::string CryptoLayer::encrypt(const std::string& plaintext) const {
 }
 
 std::string CryptoLayer::decrypt(const std::string& ciphertext) const {
-    // 【安全修复 H8】读锁保护 m_key
+    // 读锁保护 m_key
     std::shared_lock lock(m_key_mutex);
     if (m_key.empty() || ciphertext.length() < GCM_IV_LEN + GCM_TAG_LEN) return "";
 

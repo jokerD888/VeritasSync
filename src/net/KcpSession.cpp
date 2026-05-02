@@ -33,7 +33,7 @@ KcpSession::KcpSession(uint32_t conv, KcpSessionCallbacks callbacks)
 KcpSession::~KcpSession() {
     std::lock_guard<std::mutex> lock(m_mutex);
     // m_kcp 先释放（ikcp_release），此后不再有回调触发
-    // m_ctx 后释放（成员逆序析构），确保回调执行期间上下文有效
+    // m_self_weak 后析构（成员逆序析构），确保回调执行期间 weak_ptr 始终有效
     m_kcp.reset();
 }
 
@@ -44,12 +44,10 @@ bool KcpSession::initialize(const KcpConfig& config) {
         return false;
     }
 
-    // 创建回调上下文，生命周期绑定到 KcpSession 成员
-    m_ctx = std::make_unique<KcpContext>();
-    m_ctx->session = shared_from_this();
-
-    // 设置回调：user 指向 m_ctx，回调中通过 weak_ptr 安全访问
-    raw_kcp->user = m_ctx.get();
+    // 保存 weak_ptr，供 KCP output 回调安全访问
+    // 生命周期安全：m_kcp 析构（ikcp_release）在 m_self_weak 之前，回调不会在之后触发
+    m_self_weak = shared_from_this();
+    raw_kcp->user = &m_self_weak;
     raw_kcp->output = &KcpSession::kcp_output_callback;
 
     // 配置 KCP
@@ -101,16 +99,19 @@ void KcpSession::update(uint32_t current_ms) {
 
         ikcp_update(m_kcp.get(), current_ms);
 
-        // 在同一把锁内收取已就绪的消息
-        std::vector<char> buffer;
+        // 快速检查：无完整消息则跳过收取，避免 messages 分配
+        if (ikcp_peeksize(m_kcp.get()) < 0) return;
+
+        // thread_local buffer 复用，避免高频分配（每 10ms 调一次）
+        thread_local std::vector<char> t_buffer;
         while (true) {
             int peek_size = ikcp_peeksize(m_kcp.get());
             if (peek_size < 0) break;
 
-            buffer.resize(peek_size);
-            int recv_len = ikcp_recv(m_kcp.get(), buffer.data(), peek_size);
+            t_buffer.resize(peek_size);
+            int recv_len = ikcp_recv(m_kcp.get(), t_buffer.data(), peek_size);
             if (recv_len > 0) {
-                messages.emplace_back(buffer.data(), recv_len);
+                messages.emplace_back(t_buffer.data(), recv_len);
             } else {
                 break;
             }
@@ -169,10 +170,10 @@ int KcpSession::get_wait_send_count() const {
 
 int KcpSession::kcp_output_callback(const char* buf, int len,
                                     [[maybe_unused]] ikcpcb* kcp, void* user) {
-    auto* ctx = static_cast<KcpContext*>(user);
-    if (!ctx) return -1;
+    auto* self_weak = static_cast<std::weak_ptr<KcpSession>*>(user);
+    if (!self_weak) return -1;
 
-    auto session = ctx->session.lock();
+    auto session = self_weak->lock();
     if (!session) return -1;
 
     if (session->m_callbacks.on_output) {

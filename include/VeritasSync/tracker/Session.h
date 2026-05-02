@@ -41,7 +41,6 @@ private:
     void handle_message(const json& msg);
     void handle_register(const json& payload);
     void handle_signal(const json& msg);
-    void handle_relay(const json& msg);
 
     tcp::socket m_socket;
     TrackerServer& m_server;

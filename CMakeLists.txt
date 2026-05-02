@@ -51,7 +51,6 @@ find_package(kcp CONFIG REQUIRED)
 find_package(Snappy CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(LibJuice CONFIG REQUIRED)
-find_package(unofficial-b64 CONFIG REQUIRED)
 find_package(miniupnpc CONFIG REQUIRED)
 find_package(httplib CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
@@ -120,7 +119,6 @@ target_link_libraries(veritas_sync PRIVATE
     Boost::system
     Boost::asio
     nlohmann_json::nlohmann_json
-    unofficial::b64::b64
     kcp::kcp
     Snappy::snappy
     spdlog::spdlog
@@ -325,7 +323,6 @@ target_link_libraries(unit_tests PRIVATE
     OpenSSL::Crypto
     OpenSSL::SSL
     unofficial::sqlite3::sqlite3
-    unofficial::b64::b64
     kcp::kcp
     Boost::system
     Boost::asio

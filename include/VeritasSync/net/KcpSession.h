@@ -15,25 +15,24 @@ namespace VeritasSync {
 class KcpSession;
 
 /**
- * @brief KCP 回调上下文结构体
- * 用于在 KCP 回调中安全地访问 KcpSession
- * 使用 weak_ptr 避免循环引用，同时允许检测对象是否已销毁
- *
- * 生命周期由 KcpSession 的 m_ctx 成员管理，无需全局注册表。
- */
-struct KcpContext {
-    std::weak_ptr<KcpSession> session;
-};
-
-/**
  * @brief KCP 会话配置
+ *
+ * KCP 官方推荐模式（ikcp.h / README）：
+ *   普通模式: ikcp_nodelay(kcp, 0, 40, 0, 0)
+ *   极速模式: ikcp_nodelay(kcp, 1, 10, 2, 1)
  */
 struct KcpConfig {
-    // nodelay 模式参数
-    // 推荐配置（KCP 官方）: nodelay=1, interval=20, resend=2, nc=1
+    // --- 预设模式 ---
+    static KcpConfig normal() {
+        return {.nodelay = 0, .interval = 40, .resend = 0, .nc = 0};
+    }
+    static KcpConfig turbo() {
+        return {.nodelay = 1, .interval = 10, .resend = 2, .nc = 1};
+    }
+
     int nodelay = 1;      // 0: 正常模式, 1: 极速模式
     int interval = 20;    // 内部时钟间隔 (ms)
-    int resend = 2;       // 快速重传次数
+    int resend = 2;       // 快速重传阈值，0 关闭，2 表示 2 次 ACK 跨越即重传
     int nc = 1;           // 0: 启用流控, 1: 关闭流控
 
     // 窗口大小（单位：包数，非字节数）
@@ -96,7 +95,7 @@ struct KcpSessionCallbacks {
  * @brief KcpSession - 封装 ikcp 的可靠传输会话
  *
  * 职责：
- * 1. 管理 ikcpcb 的生命周期
+ * 1. 管理 ikcpcb 的生命周期（通过 KcpDeleter RAII 封装 C 资源）
  * 2. 处理 KCP 的更新驱动
  * 3. 提供可靠的消息发送/接收接口
  * 4. 隔离 ikcp 的 C 回调风格
@@ -177,9 +176,10 @@ private:
 
     static int kcp_output_callback(const char* buf, int len, ikcpcb* kcp, void* user);
 
-    // 自定义删除器：仅释放 KCP 资源
-    // 上下文 (m_ctx) 的生命周期由 KcpSession 成员管理，析构顺序保证安全：
-    // m_kcp 先析构（ikcp_release），m_ctx 后析构
+    // ikcpcb 是 C 库创建的结构体，必须用 ikcp_release() 释放，不能用 delete。
+    // KcpDeleter 告诉 unique_ptr 用 ikcp_release 代替 delete，实现 RAII。
+    // 析构顺序：m_kcp 先析构（ikcp_release），此后不再有回调触发，
+    //           m_self_weak 后析构，回调执行期间 weak_ptr 始终有效。
     struct KcpDeleter {
         void operator()(ikcpcb* kcp) const {
             if (kcp) ikcp_release(kcp);
@@ -189,7 +189,7 @@ private:
     uint32_t m_conv;
     std::unique_ptr<ikcpcb, KcpDeleter> m_kcp;
     KcpSessionCallbacks m_callbacks;
-    std::unique_ptr<KcpContext> m_ctx;  // 回调上下文，生命周期与 KcpSession 绑定
+    std::weak_ptr<KcpSession> m_self_weak;  // 供 KCP output 回调安全访问
 
     mutable std::mutex m_mutex;
 };

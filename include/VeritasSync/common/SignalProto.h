@@ -14,5 +14,4 @@ constexpr const char* TYPE_REG_ACK = "REG_ACK";
 constexpr const char* TYPE_PEER_JOIN = "PEER_JOIN";
 constexpr const char* TYPE_PEER_LEAVE = "PEER_LEAVE";
 constexpr const char* TYPE_SIGNAL = "SIGNAL";
-constexpr const char* TYPE_RELAY_DATA = "RELAY_DATA";
 }  // namespace SignalProto
