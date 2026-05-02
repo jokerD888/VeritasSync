@@ -186,7 +186,7 @@ public:
     const std::string& get_peer_id() const { return m_peer_id; }
     PeerState get_state() const { return m_state.load(); }
     bool is_connected() const { return m_state.load() == PeerState::Connected; }
-    /// C-1: 检查 controller 是否仍然有效（未被 close）
+    /// 检查 controller 是否仍然有效（未被 close）
     bool is_valid() const { return !m_closed.load(); }
     
     /// 是否是 Offer 方（self_id < peer_id）
@@ -278,11 +278,8 @@ private:
         PeerControllerCallbacks callbacks,
         const KcpConfig& kcp_config);
     
-    /// 第一阶段初始化：创建 IceTransport
-    bool initialize_ice(const IceConfig& ice_config);
-    
-    /// 第二阶段初始化：绑定回调（在 shared_ptr 创建后调用）
-    void bind_callbacks();
+    /// 创建 IceTransport 并绑定回调（在 shared_ptr 创建后调用）
+    bool init_ice_and_bind_callbacks(const IceConfig& ice_config);
     
     // ICE 回调处理（在 io_context 线程中执行）
     void on_ice_state_changed(IceState state);
@@ -313,7 +310,7 @@ private:
     std::shared_ptr<KcpSession> m_kcp;
     
     std::atomic<PeerState> m_state{PeerState::Disconnected};
-    std::atomic<bool> m_closed{false};             // C-1: 替代 m_is_valid，close() 后为 true
+    std::atomic<bool> m_closed{false};             // 替代 m_is_valid，close() 后为 true
     std::atomic<bool> m_kcp_initialized{false};  // 防止重复初始化
     
     mutable std::mutex m_mutex;  // 保护 m_ice、m_kcp 和 m_sync_timeout_timer

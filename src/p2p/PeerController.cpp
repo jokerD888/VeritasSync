@@ -33,15 +33,11 @@ std::shared_ptr<PeerController> PeerController::create(
 
     auto controller = std::make_shared<PeerControllerMaker>(
         self_id, peer_id, io_context, std::move(crypto), std::move(callbacks), kcp_config);
-    
-    // 第一阶段：创建 IceTransport（但不绑定回调）
-    if (!controller->initialize_ice(ice_config)) {
+
+    if (!controller->init_ice_and_bind_callbacks(ice_config)) {
         return nullptr;
     }
-    
-    // 第二阶段：现在 shared_ptr 已创建，可以安全使用 weak_from_this()
-    controller->bind_callbacks();
-    
+
     return controller;
 }
 
@@ -74,12 +70,9 @@ PeerController::~PeerController() {
 // 初始化
 // ═══════════════════════════════════════════════════════════════
 
-bool PeerController::initialize_ice(const IceConfig& ice_config) {
-    // 第一阶段：仅创建 IceTransport，回调留空
-    // 回调将在 bind_callbacks() 中设置（此时 shared_ptr 已就绪）
-    
-    IceTransportCallbacks ice_callbacks;  // 空回调，后续在 bind_callbacks 中设置
-
+bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
+    // 创建 IceTransport
+    IceTransportCallbacks ice_callbacks;
     m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), m_io_context);
     if (!m_ice) {
         if (g_logger) {
@@ -87,20 +80,11 @@ bool PeerController::initialize_ice(const IceConfig& ice_config) {
         }
         return false;
     }
-    
-    return true;
-}
 
-void PeerController::bind_callbacks() {
-    // C-1 安全修复：ICE 回调改用 weak_ptr
-    // 现在 shared_ptr 已创建，可以安全使用 weak_from_this()
-    // weak_ptr::lock() 是原子判活 + 延寿，彻底消除 Use-After-Free
-    
+    // 绑定 ICE 回调（weak_from_this 要求 shared_ptr 已就绪）
     auto self_weak = weak_from_this();
     auto& io = m_io_context;
-    
-    IceTransportCallbacks ice_callbacks;
-    
+
     ice_callbacks.on_state_changed = [self_weak, &io](IceState state) {
         boost::asio::post(io, [self_weak, state]() {
             auto self = self_weak.lock();
@@ -138,9 +122,11 @@ void PeerController::bind_callbacks() {
     m_ice->set_callbacks(std::move(ice_callbacks));
     
     if (g_logger) {
-        g_logger->info("[PeerController] Initialized {} <-> {} (offer_side={})", 
+        g_logger->info("[PeerController] Initialized {} <-> {} (offer_side={})",
                        m_self_id, m_peer_id, m_is_offer_side);
     }
+
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════
