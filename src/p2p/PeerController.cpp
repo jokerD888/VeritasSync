@@ -71,28 +71,19 @@ PeerController::~PeerController() {
 // ═══════════════════════════════════════════════════════════════
 
 bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
-    // 创建 IceTransport
-    IceTransportCallbacks ice_callbacks;
-    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), m_io_context);
-    if (!m_ice) {
-        if (g_logger) {
-            g_logger->error("[PeerController] Failed to create IceTransport for {}", m_peer_id);
-        }
-        return false;
-    }
-
-    // 绑定 ICE 回调（weak_from_this 要求 shared_ptr 已就绪）
     auto self_weak = weak_from_this();
     auto& io = m_io_context;
+
+    IceTransportCallbacks ice_callbacks;
 
     ice_callbacks.on_state_changed = [self_weak, &io](IceState state) {
         boost::asio::post(io, [self_weak, state]() {
             auto self = self_weak.lock();
-            if (!self) return;  // 对象已析构，安全跳过
+            if (!self) return;
             self->on_ice_state_changed(state);
         });
     };
-    
+
     ice_callbacks.on_local_candidate = [self_weak, &io](const std::string& candidate) {
         boost::asio::post(io, [self_weak, candidate]() {
             auto self = self_weak.lock();
@@ -100,7 +91,7 @@ bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
             self->on_ice_local_candidate(candidate);
         });
     };
-    
+
     ice_callbacks.on_gathering_done = [self_weak, &io](const std::string& local_desc) {
         boost::asio::post(io, [self_weak, local_desc]() {
             auto self = self_weak.lock();
@@ -110,7 +101,6 @@ bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
     };
 
     ice_callbacks.on_data_received = [self_weak, &io](const char* data, size_t size) {
-        // 数据接收需要拷贝，因为原始指针在回调返回后可能无效
         std::string data_copy(data, size);
         boost::asio::post(io, [self_weak, data_copy]() {
             auto self = self_weak.lock();
@@ -119,8 +109,14 @@ bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
         });
     };
 
-    m_ice->set_callbacks(std::move(ice_callbacks));
-    
+    m_ice = IceTransport::create(ice_config, std::move(ice_callbacks), m_io_context);
+    if (!m_ice) {
+        if (g_logger) {
+            g_logger->error("[PeerController] Failed to create IceTransport for {}", m_peer_id);
+        }
+        return false;
+    }
+
     if (g_logger) {
         g_logger->info("[PeerController] Initialized {} <-> {} (offer_side={})",
                        m_self_id, m_peer_id, m_is_offer_side);
