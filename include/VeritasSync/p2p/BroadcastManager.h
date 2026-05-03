@@ -16,25 +16,24 @@
 namespace VeritasSync {
 
 class PeerController;
+class StateManager;
 
-/// 广播管理器 — 负责增量广播、批量广播、流控和 Anti-Entropy 对账
+/// 广播管理器 — 负责增量广播、全量推送、批量广播、流控和 Anti-Entropy 对账
 /// 从 P2PManager 提取，使 P2PManager 聚焦于连接管理和生命周期编排
 class BroadcastManager {
 public:
     /// 回调类型
     /// send_fn: 广播消息给所有已连接对等点（等价于 P2PManager::send_over_kcp）
     using SendCallback = std::function<bool(const std::string& msg)>;
-    /// flood_sync: 对账时调用 SyncSession::perform_flood_sync
-    using FloodSyncCallback = std::function<void(std::shared_ptr<PeerController>, uint64_t session_id)>;
-    /// state_provider: 获取当前目录状态 JSON（调用 StateManager）
-    using StateProvider = std::function<std::string()>;
+    /// send_to_peer: 发送消息给指定对等点
+    using SendToPeerFunc = std::function<void(const std::string& msg, PeerController* peer)>;
 
     BroadcastManager(boost::asio::io_context& io_context,
                      boost::asio::thread_pool& worker_pool,
                      PeerRegistry& peer_registry,
+                     StateManager* state_manager,
                      SendCallback send_fn,
-                     FloodSyncCallback flood_sync_fn,
-                     StateProvider state_provider);
+                     SendToPeerFunc send_to_peer);
 
     void set_role(SyncRole role);
     void set_mode(SyncMode mode);
@@ -55,8 +54,13 @@ public:
     // --- 优雅关闭 ---
     void broadcast_goodbye();
 
+    // --- 全量推送（flood sync）---
+    /// 扫描本地全量文件/目录，批量推送给指定对端
+    /// 由连接建立和 Anti-Entropy 对账触发
+    void perform_flood_sync(std::shared_ptr<PeerController> controller, uint64_t session_id);
+
     // --- 流控发送 ---
-    bool send_to_peers_with_flow_control(
+    void send_to_peers_with_flow_control(
         const std::vector<std::shared_ptr<PeerController>>& peers,
         const std::string& packet);
 
@@ -69,13 +73,20 @@ public:
 private:
     bool can_broadcast() const;
 
+    // 异步背压：通过 KCP drain 回调驱动发送节奏
+    void pace_and_send_file_batches(
+        std::shared_ptr<PeerController> controller,
+        uint64_t session_id,
+        std::vector<FileInfo> files,
+        size_t batch_index);
+
     // 依赖
     boost::asio::io_context& m_io_context;
     boost::asio::thread_pool& m_worker_pool;
     PeerRegistry& m_peer_registry;
+    StateManager* m_state_manager;
     SendCallback m_send_fn;
-    FloodSyncCallback m_flood_sync_fn;
-    StateProvider m_state_provider;
+    SendToPeerFunc m_send_to_peer;
 
     SyncRole m_role = SyncRole::Source;
     SyncMode m_mode = SyncMode::OneWay;

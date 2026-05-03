@@ -7,8 +7,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <unordered_map>
 #include <atomic>
@@ -75,7 +75,7 @@ namespace VeritasSync {
         void print_current_state() const;
 
         const std::filesystem::path& get_root_path() const { return m_root_path; }
-        std::set<std::string> get_local_directories() const;
+        std::unordered_set<std::string> get_local_directories() const;
 
         // --- P2PManager 需要的辅助函数 ---
         void add_dir_to_map(const std::string& relative_path);
@@ -152,13 +152,12 @@ namespace VeritasSync {
         SyncConfig m_sync_config;                // 同步参数配置
 
     // 文件状态的核心存储结构
-    // 【优化 #10】使用 unordered_map 替代 map，查找从 O(log n) 提升到 O(1)
     std::unordered_map<std::string, FileInfo> m_file_map;
         std::unique_ptr<Database> m_db;
         std::unique_ptr<CachedFileStore> m_file_store;  // Write-through 缓存层
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
 
-        std::set<std::string> m_dir_map;
+        std::unordered_set<std::string> m_dir_map;
         mutable std::mutex m_dir_map_mutex;
 
         // 文件监控器
@@ -180,10 +179,14 @@ namespace VeritasSync {
         // --- 生命周期管理 ---
         // 唯一的重试计时器，负责调度所有文件冲突后的再次处理任务
         std::unique_ptr<boost::asio::steady_timer> m_retry_timer;
-        
+
+        // Phase 1 工作线程（jthread 析构时自动 join，避免 detached thread 悬垂）
+        std::jthread m_phase1_thread;
+        std::mutex m_phase1_mutex;  // 保护 m_phase1_thread（watcher + io_context 均可调用）
+
         // --- 阈值触发机制 ---
-        // 上次批处理时间点（用于限制触发频率）
-        std::chrono::steady_clock::time_point m_last_batch_time;
+        // 上次批处理时间点（atomic，跨线程安全）
+        std::atomic<int64_t> m_last_batch_time_ns{0};
         // 是否正在处理中（防止重入）
         std::atomic<bool> m_processing{false};
         

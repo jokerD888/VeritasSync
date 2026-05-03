@@ -1,14 +1,16 @@
 #include "VeritasSync/p2p/BroadcastManager.h"
 
 #include <algorithm>
-#include <thread>
+#include <chrono>
+#include <set>
 
 #include <boost/asio/post.hpp>
 #include <nlohmann/json.hpp>
 
 #include "VeritasSync/common/Logger.h"
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/p2p/PeerController.h"
+#include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/sync/Protocol.h"
 
 namespace VeritasSync {
@@ -20,11 +22,6 @@ namespace VeritasSync {
 static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;   // 每批最多 50 个文件更新
 static constexpr size_t FILE_DELETE_BATCH_SIZE = 100;  // 每批最多 100 个文件删除
 
-// 广播流控配置（与 SyncSession::perform_flood_sync 保持一致的阈值）
-static constexpr int    BROADCAST_FLOW_CONTROL_THRESHOLD = 1024;  // KCP 积压量阈值
-static constexpr int    BROADCAST_FLOW_CONTROL_SLEEP_MS  = 20;    // 积压时等待间隔
-static constexpr int    BROADCAST_FLOW_CONTROL_MAX_WAIT  = 250;   // 单次最大等待轮次
-
 // ═══════════════════════════════════════════════════════════════
 // 构造 / 配置
 // ═══════════════════════════════════════════════════════════════
@@ -32,15 +29,15 @@ static constexpr int    BROADCAST_FLOW_CONTROL_MAX_WAIT  = 250;   // 单次最�
 BroadcastManager::BroadcastManager(boost::asio::io_context& io_context,
                                    boost::asio::thread_pool& worker_pool,
                                    PeerRegistry& peer_registry,
+                                   StateManager* state_manager,
                                    SendCallback send_fn,
-                                   FloodSyncCallback flood_sync_fn,
-                                   StateProvider state_provider)
+                                   SendToPeerFunc send_to_peer)
     : m_io_context(io_context),
       m_worker_pool(worker_pool),
       m_peer_registry(peer_registry),
+      m_state_manager(state_manager),
       m_send_fn(std::move(send_fn)),
-      m_flood_sync_fn(std::move(flood_sync_fn)),
-      m_state_provider(std::move(state_provider)),
+      m_send_to_peer(std::move(send_to_peer)),
       m_reconciliation_timer(std::make_unique<boost::asio::steady_timer>(io_context)) {
 }
 
@@ -61,32 +58,41 @@ void BroadcastManager::stop() {
 // 流控发送
 // ═══════════════════════════════════════════════════════════════
 
-bool BroadcastManager::send_to_peers_with_flow_control(
+void BroadcastManager::send_to_peers_with_flow_control(
     const std::vector<std::shared_ptr<PeerController>>& peers,
     const std::string& packet) {
-    bool all_ok = true;
-    for (auto& controller : peers) {
-        int wait_count = 0;
-        int pending = controller->get_kcp_wait_send();
-        while (pending > BROADCAST_FLOW_CONTROL_THRESHOLD &&
-               controller->is_valid() &&
-               wait_count < BROADCAST_FLOW_CONTROL_MAX_WAIT) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(BROADCAST_FLOW_CONTROL_SLEEP_MS));
-            pending = controller->get_kcp_wait_send();
-            wait_count++;
-        }
+    if (peers.empty()) return;
 
-        if (controller->send_message(packet) < 0) {
-            all_ok = false;
-        }
-    }
+    boost::asio::post(m_io_context,
+        [peers, packet]() {
+            g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)",
+                          peers.size(), packet.length());
 
-    if (!peers.empty()) {
-        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)",
-                      peers.size(), packet.length());
-    }
-    return all_ok;
+            struct State {
+                std::vector<std::shared_ptr<PeerController>> peers;
+                std::string packet;
+                size_t index = 0;
+            };
+            auto state = std::make_shared<State>(State{peers, packet, 0});
+
+            // shared_ptr<function> 解决递归 lambda 自引用生命周期问题
+            auto send_next = std::make_shared<std::function<void()>>();
+            *send_next = [state, send_next]() {
+                if (state->index >= state->peers.size()) return;
+                auto ctrl = state->peers[state->index];  // 按值捕获 shared_ptr
+                if (!ctrl->is_valid()) {
+                    state->index++;
+                    (*send_next)();
+                    return;
+                }
+                ctrl->on_send_ready([ctrl, state, send_next]() {
+                    ctrl->send_message(state->packet);
+                    state->index++;
+                    (*send_next)();
+                });
+            };
+            (*send_next)();
+        });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -95,10 +101,11 @@ bool BroadcastManager::send_to_peers_with_flow_control(
 
 void BroadcastManager::broadcast_current_state() {
     if (!can_broadcast()) return;
-    if (!m_state_provider) return;
+    if (!m_state_manager) return;
 
     boost::asio::post(m_worker_pool, [this]() {
-        std::string json_state = m_state_provider();
+        m_state_manager->scan_directory();
+        std::string json_state = m_state_manager->get_state_as_json_string();
 
         std::string json_packet;
         json_packet.push_back(MSG_TYPE_JSON);
@@ -171,7 +178,6 @@ void BroadcastManager::broadcast_file_updates_batch(const std::vector<FileInfo>&
     boost::asio::post(m_worker_pool, [this, files]() {
         g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
 
-        bool any_failed = false;
         for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
             size_t end = std::min(i + FILE_UPDATE_BATCH_SIZE, files.size());
 
@@ -188,18 +194,7 @@ void BroadcastManager::broadcast_file_updates_batch(const std::vector<FileInfo>&
             json_packet.append(msg.dump());
 
             auto peers = m_peer_registry.collect_connected();
-            if (!send_to_peers_with_flow_control(peers, json_packet)) {
-                any_failed = true;
-            }
-
-            g_logger->debug("[P2P] 发送文件更新批次 {}/{} ({} 个文件)",
-                           (i / FILE_UPDATE_BATCH_SIZE) + 1,
-                           (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE,
-                           end - i);
-        }
-
-        if (any_failed) {
-            g_logger->warn("[P2P] 部分文件更新批次发送失败（无可用对等点）");
+            send_to_peers_with_flow_control(peers, json_packet);
         }
 
         schedule_reconciliation();
@@ -213,7 +208,6 @@ void BroadcastManager::broadcast_file_deletes_batch(const std::vector<std::strin
     boost::asio::post(m_worker_pool, [this, paths]() {
         g_logger->info("[P2P] (Source) 批量广播 {} 个文件删除", paths.size());
 
-        bool any_failed = false;
         for (size_t i = 0; i < paths.size(); i += FILE_DELETE_BATCH_SIZE) {
             size_t end = std::min(i + FILE_DELETE_BATCH_SIZE, paths.size());
 
@@ -230,13 +224,7 @@ void BroadcastManager::broadcast_file_deletes_batch(const std::vector<std::strin
             json_packet.append(msg.dump());
 
             auto peers = m_peer_registry.collect_connected();
-            if (!send_to_peers_with_flow_control(peers, json_packet)) {
-                any_failed = true;
-            }
-        }
-
-        if (any_failed) {
-            g_logger->warn("[P2P] 部分文件删除批次发送失败（无可用对等点）");
+            send_to_peers_with_flow_control(peers, json_packet);
         }
 
         schedule_reconciliation();
@@ -293,6 +281,125 @@ void BroadcastManager::broadcast_goodbye() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 全量推送（flood sync）
+// ═══════════════════════════════════════════════════════════════
+
+void BroadcastManager::perform_flood_sync(std::shared_ptr<PeerController> controller,
+                                          uint64_t session_id) {
+    if (!controller || !controller->is_valid() || !m_state_manager) {
+        g_logger->warn("[Broadcast] perform_flood_sync: 上下文无效，跳过");
+        return;
+    }
+
+    std::string peer_id = controller->get_peer_id();
+
+    if (controller->get_sync_session_id() != session_id) {
+        g_logger->info("[Broadcast] 会话 ID 已变更，跳过本次同步");
+        return;
+    }
+
+    // 1. 扫描目录获取所有文件
+    m_state_manager->scan_directory();
+    std::vector<FileInfo> files = m_state_manager->get_all_files();
+    auto dirs = m_state_manager->get_local_directories();
+
+    if (files.empty() && dirs.empty()) {
+        g_logger->info("[Broadcast] 没有文件需要推送给 {}", peer_id);
+        return;
+    }
+
+    g_logger->info("[Broadcast] 开始向 {} 推送 {} 个文件和 {} 个目录 (session: {})...",
+                   peer_id, files.size(), dirs.size(), session_id);
+
+    // 2-4 全部在 io_context 上串行执行，文件发送使用异步背压
+    boost::asio::post(m_io_context, [this, controller, session_id,
+                                     files = std::move(files),
+                                     dirs = std::move(dirs)]() {
+        if (!controller->is_valid()) return;
+
+        std::string peer_id = controller->get_peer_id();
+
+        // 2. sync_begin
+        nlohmann::json begin_msg;
+        begin_msg[Protocol::MSG_TYPE] = Protocol::TYPE_SYNC_BEGIN;
+        begin_msg[Protocol::MSG_PAYLOAD] = {
+            {"session_id", session_id},
+            {"file_count", files.size()},
+            {"dir_count", dirs.size()}
+        };
+        m_send_to_peer(begin_msg.dump(), controller.get());
+
+        // 3. 目录批量
+        if (!dirs.empty()) {
+            std::vector<std::string> dir_list(dirs.begin(), dirs.end());
+            nlohmann::json msg;
+            msg[Protocol::MSG_TYPE] = Protocol::TYPE_DIR_BATCH;
+            msg[Protocol::MSG_PAYLOAD]["creates"] = dir_list;
+            msg[Protocol::MSG_PAYLOAD]["deletes"] = nlohmann::json::array();
+            m_send_to_peer(msg.dump(), controller.get());
+            g_logger->debug("[Broadcast] 批量发送 {} 个目录信息", dir_list.size());
+        }
+
+        // 4. 文件批量（异步背压）
+        if (!files.empty()) {
+            pace_and_send_file_batches(controller, session_id, std::move(files), 0);
+        } else {
+            g_logger->info("[Broadcast] 向 {} 批量推送完成 (0 个文件, {} 个目录, session: {})",
+                           peer_id, dirs.size(), session_id);
+        }
+    });
+}
+
+void BroadcastManager::pace_and_send_file_batches(
+    std::shared_ptr<PeerController> controller,
+    uint64_t session_id,
+    std::vector<FileInfo> files,
+    size_t batch_index) {
+    size_t total_batches = (files.size() + FILE_UPDATE_BATCH_SIZE - 1) / FILE_UPDATE_BATCH_SIZE;
+
+    if (batch_index >= total_batches) {
+        g_logger->info("[Broadcast] 向 {} 批量推送文件状态完成 ({} 个文件, session: {})",
+                       controller->get_peer_id(), files.size(), session_id);
+        return;
+    }
+
+    if (!controller->is_valid()) {
+        g_logger->warn("[Broadcast] 连接已断开，停止发送文件 (session: {}, 已发送 {}/{})",
+                       session_id, batch_index * FILE_UPDATE_BATCH_SIZE, files.size());
+        return;
+    }
+
+    if (controller->get_sync_session_id() != session_id) {
+        g_logger->info("[Broadcast] 会话 ID 已变更，停止本次同步 (已发送 {}/{})",
+                       batch_index * FILE_UPDATE_BATCH_SIZE, files.size());
+        return;
+    }
+
+    // KCP drain 回调驱动：等待发送队列有余量后再发送
+    controller->on_send_ready(
+        [this, controller, session_id, files = std::move(files), batch_index, total_batches]() {
+            if (!controller->is_valid()) return;
+            if (controller->get_sync_session_id() != session_id) return;
+
+            size_t start = batch_index * FILE_UPDATE_BATCH_SIZE;
+            size_t end = std::min(start + FILE_UPDATE_BATCH_SIZE, files.size());
+
+            nlohmann::json msg;
+            msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE_BATCH;
+            msg[Protocol::MSG_PAYLOAD]["files"] = nlohmann::json::array();
+            for (size_t j = start; j < end; ++j) {
+                msg[Protocol::MSG_PAYLOAD]["files"].push_back(files[j]);
+            }
+            m_send_to_peer(msg.dump(), controller.get());
+
+            g_logger->debug("[Broadcast] 发送文件批次 {}/{} ({} 个文件)",
+                            batch_index + 1, total_batches, end - start);
+
+            pace_and_send_file_batches(controller, session_id, std::move(files), batch_index + 1);
+        });
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Anti-Entropy 对账
 // ═══════════════════════════════════════════════════════════════
 
@@ -325,7 +432,7 @@ void BroadcastManager::trigger_reconciliation() {
         std::string peer_id = controller->get_peer_id();
         boost::asio::post(m_worker_pool, [this, controller, session_id, peer_id]() {
             g_logger->info("[Anti-Entropy] 开始向 {} 执行对账 flood sync (session={})", peer_id, session_id);
-            m_flood_sync_fn(controller, session_id);
+            perform_flood_sync(controller, session_id);
             g_logger->info("[Anti-Entropy] 对账 flood sync 完成 (peer={}, session={})", peer_id, session_id);
         });
     }

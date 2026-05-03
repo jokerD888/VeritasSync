@@ -172,18 +172,6 @@ public:
      */
     bool is_connected() const;
     
-    /**
-     * @brief 替换回调（用于两阶段初始化）
-     *
-     * 调用约束：必须在 io_context 线程上调用（与回调读取在同一线程，
-     * 因此无需加锁；后续所有回调读取也在 io_context 线程上发生）。
-     *
-     * @param callbacks 新的回调接口
-     */
-    void set_callbacks(IceTransportCallbacks callbacks) {
-        m_callbacks = std::move(callbacks);
-    }
-
 private:
     IceTransport(IceTransportCallbacks callbacks, boost::asio::io_context& io_context);
 

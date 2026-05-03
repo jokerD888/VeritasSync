@@ -257,7 +257,6 @@ add_executable(unit_tests
     tests/test_protocol.cpp
     tests/test_hashing.cpp
     tests/test_database.cpp
-    tests/test_binary_frame.cpp
     tests/test_crypto_layer.cpp
     tests/test_encoding_utils.cpp
     tests/test_file_filter.cpp
@@ -280,7 +279,6 @@ add_executable(unit_tests
     tests/test_database_coverage.cpp
     tests/test_state_manager_coverage.cpp
     tests/test_logger_coverage.cpp
-    tests/test_binary_frame_coverage.cpp
     tests/test_protocol_coverage.cpp
     tests/test_transfer_manager_coverage.cpp
     

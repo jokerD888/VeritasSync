@@ -16,7 +16,7 @@
 #include <mutex>
 
 #include "VeritasSync/sync/TransferManager.h"
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/common/Hashing.h"
 
 using namespace VeritasSync;

@@ -10,6 +10,7 @@
 
 #include "VeritasSync/common/Config.h"
 #include "VeritasSync/sync/Protocol.h"
+#include "VeritasSync/sync/SyncManager.h"
 #include "VeritasSync/sync/TransferManager.h"
 
 namespace VeritasSync {
@@ -84,17 +85,36 @@ public:
 private:
     // 刷新 peer 的同步超时定时器
     void refresh_peer_timeout(PeerController* from_peer);
-    
+
     // 检查是否可以接收同步消息
     bool can_receive() const;
 
-    // 【修复问题7】提取的辅助函数：安全地从 JSON 解析字段
+    // 处理单个文件更新（echo check → 冲突检测 → 返回待请求的 FileInfo）
+    // 返回 nullopt 表示跳过（echo/冲突无需下载）
+    std::optional<FileInfo> process_single_file(const std::string& peer_id,
+                                                const FileInfo& remote_info);
+
+    // 异步背压发送：通过 KCP drain 回调驱动发送节奏
+    void pace_and_send_files(const std::string& peer_id,
+                             std::vector<FileInfo> files_to_request,
+                             size_t index = 0);
+
+    // handle_share_state 辅助：同步目录操作（删除多余、创建缺失）
+    void sync_directory_actions(const DirSyncActions& dir_actions,
+                                SyncMode mode);
+
+    // handle_share_state 辅助：发送文件请求
+    void send_file_requests(const std::string& peer_id,
+                            const std::vector<std::string>& files_to_request,
+                            const std::vector<FileInfo>& remote_files);
+
+    // 提取的辅助函数：安全地从 JSON 解析字段
     template<typename T>
     std::optional<T> get_json_field(const nlohmann::json& payload, 
                                     const std::string& field,
                                     const char* context);
 
-    // 【修复问题7】提取的辅助函数：验证路径安全并记录错误
+    // 提取的辅助函数：验证路径安全并记录错误
     bool validate_path_safe(const std::filesystem::path& root, 
                             const std::string& rel_path, 
                             const char* context,

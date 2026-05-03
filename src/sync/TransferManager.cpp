@@ -11,7 +11,7 @@
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
 #include "VeritasSync/common/PathUtils.h"
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/storage/StateManager.h"
 

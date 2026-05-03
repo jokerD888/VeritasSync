@@ -170,6 +170,23 @@ public:
      */
     void flush();
 
+    // ── Drain 回调（背压驱动） ──────────────────────────────────
+
+    /// 注册"发送队列消化到阈值以下"回调（单次触发）
+    /// 回调在 update() 中 mutex 释放后触发，可安全调用 send()
+    void set_on_drain(std::function<void()> on_drain);
+
+    /// 清除 drain 回调
+    void clear_on_drain();
+
+    /// 设置/获取 drain 阈值（默认 512）
+    void set_drain_threshold(int threshold);
+    int get_drain_threshold() const;
+
+    /// 取出待立即触发的 drain 回调（set_on_drain 时队列已在阈值以下）
+    /// 调用者负责在锁外执行返回的回调；取出后内部清空
+    std::function<void()> take_pending_drain();
+
 private:
     KcpSession(uint32_t conv, KcpSessionCallbacks callbacks);
     bool initialize(const KcpConfig& config);
@@ -190,6 +207,12 @@ private:
     std::unique_ptr<ikcpcb, KcpDeleter> m_kcp;
     KcpSessionCallbacks m_callbacks;
     std::weak_ptr<KcpSession> m_self_weak;  // 供 KCP output 回调安全访问
+
+    // Drain 回调（背压驱动）
+    std::function<void()> m_on_drain;
+    std::function<void()> m_pending_drain;  // set_on_drain 时队列已在阈值以下，待调用者取出
+    int m_drain_threshold = 512;
+    bool m_drain_notified = false;  // 防止重复触发
 
     mutable std::mutex m_mutex;
 };

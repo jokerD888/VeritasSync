@@ -176,10 +176,10 @@ void PeerController::handle_signaling(const std::string& signal_type, const std:
 }
 
 void PeerController::close() {
-    // C-1: 标记为已关闭，is_valid() 返回 false（atomic，锁外安全）
+    // 标记为已关闭，is_valid() 返回 false（atomic，锁外安全）
     m_closed.store(true);
 
-    // A-6 修复：状态变更与资源释放在同一把锁内完成
+    // 状态变更与资源释放在同一把锁内完成
     // 防止其他线程在 m_state=Disconnected 但资源尚未释放的窗口期内访问已失效的指针
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -256,11 +256,33 @@ IceConnectionType PeerController::get_connection_type() const {
 
 int PeerController::get_kcp_wait_send() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
+
     if (m_kcp) {
         return m_kcp->get_wait_send_count();
     }
     return 0;
+}
+
+void PeerController::on_send_ready(std::function<void()> callback) {
+    std::function<void()> fire_now;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_kcp) {
+            m_kcp->set_on_drain(std::move(callback));
+            // 优化：如果队列已在阈值以下，set_on_drain 已标记为待触发
+            // 取出待触发的回调，在锁外执行（避免 callback→send_message 死锁）
+            fire_now = m_kcp->take_pending_drain();
+        }
+    }
+    // mutex 已释放，安全调用回调（回调可调用 send_message 等方法）
+    if (fire_now) fire_now();
+}
+
+void PeerController::clear_send_ready() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_kcp) {
+        m_kcp->clear_on_drain();
+    }
 }
 
 void PeerController::flush_kcp() {
@@ -296,7 +318,7 @@ void PeerController::on_ice_state_changed(IceState state) {
                     now.time_since_epoch()).count());
         }
 
-        // 【P0-b 修复】仅在首次到达 Connected/Completed 时通知上层
+        // 仅在首次到达 Connected/Completed 时通知上层
         // 使用 compare_exchange 确保 Connecting→Connected 转换只发生一次
         // 防止 ICE Connected(3) 和 Completed(4) 重复触发 perform_flood_sync
         PeerState prev = PeerState::Connecting;
@@ -437,7 +459,7 @@ void PeerController::setup_kcp_session() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// A-6: 同步超时定时器封装（线程安全）
+// 同步超时定时器封装（线程安全）
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::start_sync_timeout(

@@ -1,8 +1,8 @@
 ﻿#pragma once
 
 #include <functional>
-#include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "VeritasSync/common/Config.h"
@@ -62,9 +62,8 @@ namespace VeritasSync {
                                                            HistoryQueryFunc get_history,
                                                            SyncMode mode = SyncMode::OneWay);
 
-        static DirSyncActions compare_dir_states(const std::set<std::string>& local_dirs,
-                                                 const std::set<std::string>& remote_dirs,
-                                                 SyncMode mode = SyncMode::OneWay);
+        static DirSyncActions compare_dir_states(const std::unordered_set<std::string>& local_dirs,
+                                                 const std::unordered_set<std::string>& remote_dirs);
 
     private:
         /**
@@ -81,7 +80,6 @@ namespace VeritasSync {
          */
         static bool detect_conflict(
             const std::string& local_hash,
-            const std::string& remote_hash,
             const std::optional<SyncHistory>& history
         );
     };

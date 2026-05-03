@@ -20,6 +20,10 @@ public:
     /// 添加 peer（写锁）
     void add(const std::string& peer_id, std::shared_ptr<PeerController> controller);
 
+    /// 原子性"查找+添加"（写锁），避免 find+add 之间的 TOCTOU
+    /// @return true 表示成功插入，false 表示已存在（未替换）
+    bool try_add(const std::string& peer_id, std::shared_ptr<PeerController> controller);
+
     /// 移除 peer 并返回（写锁），不存在返回 nullptr
     std::shared_ptr<PeerController> remove(const std::string& peer_id);
 

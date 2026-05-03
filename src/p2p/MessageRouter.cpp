@@ -1,5 +1,4 @@
 #include "VeritasSync/p2p/MessageRouter.h"
-#include "VeritasSync/common/Logger.h"
 
 #include <nlohmann/json.hpp>
 

@@ -47,14 +47,16 @@ public:
      */
     using GetPeerFunc = std::function<std::shared_ptr<PeerController>(const std::string& peer_id)>;
 
+    /// 收到不完整的 ACK 时，请求重新同步的回调
+    using ResyncCallback = std::function<void(std::shared_ptr<PeerController> controller, uint64_t session_id)>;
+
     SyncSession(StateManager* state_manager,
                 boost::asio::thread_pool& worker_pool,
                 boost::asio::io_context& io_context,
                 SendToPeerFunc send_to_peer,
                 WithPeerFunc with_peer,
                 GetPeerFunc get_peer,
-                int flow_control_threshold = 1024,
-                int flow_control_sleep_ms = 20,
+                ResyncCallback resync_fn,
                 int sync_timeout_seconds = 60);
 
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
@@ -85,12 +87,6 @@ public:
      */
     void handle_sync_ack(const nlohmann::json& payload, PeerController* from_peer);
     
-    /**
-     * @brief 执行全量同步推送
-     * 扫描本地文件/目录，批量推送给指定对端
-     */
-    void perform_flood_sync(std::shared_ptr<PeerController> controller, uint64_t session_id);
-
 private:
     StateManager* m_state_manager;
     boost::asio::thread_pool& m_worker_pool;
@@ -103,14 +99,9 @@ private:
     SendToPeerFunc m_send_to_peer;
     WithPeerFunc m_with_peer;
     GetPeerFunc m_get_peer;
+    ResyncCallback m_resync_fn;
 
-    // 批量大小配置
-    static constexpr size_t FILE_UPDATE_BATCH_SIZE = 50;
-
-    // 运行时配置参数（从 Config::Sync 注入）
-    int m_flow_control_threshold = 1024;
-    int m_flow_control_sleep_ms  = 20;
-    int m_sync_timeout_seconds   = 60;
+    int m_sync_timeout_seconds = 60;
 };
 
 }  // namespace VeritasSync

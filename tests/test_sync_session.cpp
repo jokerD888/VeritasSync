@@ -49,6 +49,7 @@ protected:
     SyncSession::SendToPeerFunc capture_send;
     SyncSession::WithPeerFunc noop_with_peer;
     SyncSession::GetPeerFunc noop_get_peer;
+    SyncSession::ResyncCallback noop_resync;
 
     void SetUp() override {
         work_guard.emplace(boost::asio::make_work_guard(io_ctx));
@@ -61,6 +62,7 @@ protected:
 
         noop_with_peer = [](const std::string&, std::function<void(PeerController*)>) {};
         noop_get_peer = [](const std::string&) -> std::shared_ptr<PeerController> { return nullptr; };
+        noop_resync = [](std::shared_ptr<PeerController>, uint64_t) {};
     }
 
     void TearDown() override {
@@ -72,13 +74,13 @@ protected:
 
 TEST_F(SyncSessionBasicTest, Construction) {
     SyncSession session(nullptr, worker_pool, io_ctx,
-                        capture_send, noop_with_peer, noop_get_peer);
+                        capture_send, noop_with_peer, noop_get_peer, noop_resync);
     // 不崩溃即通过
 }
 
 TEST_F(SyncSessionBasicTest, SetRole_SetMode) {
     SyncSession session(nullptr, worker_pool, io_ctx,
-                        capture_send, noop_with_peer, noop_get_peer);
+                        capture_send, noop_with_peer, noop_get_peer, noop_resync);
 
     session.set_role(SyncRole::Source);
     session.set_mode(SyncMode::BiDirectional);
@@ -87,7 +89,7 @@ TEST_F(SyncSessionBasicTest, SetRole_SetMode) {
 
 TEST_F(SyncSessionBasicTest, SendSyncBegin_NullPeer_NoOp) {
     SyncSession session(nullptr, worker_pool, io_ctx,
-                        capture_send, noop_with_peer, noop_get_peer);
+                        capture_send, noop_with_peer, noop_get_peer, noop_resync);
 
     // 传入 nullptr peer，应直接返回
     session.send_sync_begin(nullptr, 12345, 10, 5);
@@ -100,7 +102,7 @@ TEST_F(SyncSessionBasicTest, SendSyncBegin_NullPeer_NoOp) {
 
 TEST_F(SyncSessionBasicTest, SendSyncAck_NullPeer_NoOp) {
     SyncSession session(nullptr, worker_pool, io_ctx,
-                        capture_send, noop_with_peer, noop_get_peer);
+                        capture_send, noop_with_peer, noop_get_peer, noop_resync);
 
     session.send_sync_ack(nullptr, 12345, 10, 5);
 
@@ -146,7 +148,8 @@ TEST_F(SyncSessionMessageTest, HandleSyncBegin_NullPeer) {
         return nullptr;
     };
 
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
+    SyncSession::ResyncCallback resync = [](std::shared_ptr<PeerController>, uint64_t) {};
+    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer, resync);
 
     // nullptr peer 应提前返回
     json payload = {{"session_id", 12345}, {"file_count", 10}, {"dir_count", 5}};
@@ -165,7 +168,8 @@ TEST_F(SyncSessionMessageTest, HandleSyncBegin_MalformedPayload) {
         return nullptr;
     };
 
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
+    SyncSession::ResyncCallback resync = [](std::shared_ptr<PeerController>, uint64_t) {};
+    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer, resync);
 
     // 缺少必要字段的 payload
     json bad_payload = {{"wrong_field", 42}};
@@ -185,7 +189,8 @@ TEST_F(SyncSessionMessageTest, HandleSyncAck_NullPeer) {
         return nullptr;
     };
 
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
+    SyncSession::ResyncCallback resync = [](std::shared_ptr<PeerController>, uint64_t) {};
+    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer, resync);
 
     json payload = {{"session_id", 12345}, {"received_files", 8}, {"received_dirs", 3}};
     session.handle_sync_ack(payload, nullptr);
@@ -203,65 +208,14 @@ TEST_F(SyncSessionMessageTest, HandleSyncAck_MalformedPayload) {
         return nullptr;
     };
 
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
+    SyncSession::ResyncCallback resync = [](std::shared_ptr<PeerController>, uint64_t) {};
+    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer, resync);
 
     json bad_payload = {{"wrong", "data"}};
     // 应该被 try-catch 捕获
     session.handle_sync_ack(bad_payload, nullptr);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-}
-
-// ============================================================================
-// SyncSession perform_flood_sync 测试
-// ============================================================================
-
-class SyncSessionFloodSyncTest : public ::testing::Test {
-protected:
-    boost::asio::thread_pool worker_pool{2};
-    boost::asio::io_context io_ctx;
-    std::optional<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>> work_guard;
-    std::thread io_thread;
-
-    void SetUp() override {
-        work_guard.emplace(boost::asio::make_work_guard(io_ctx));
-        io_thread = std::thread([this]() { io_ctx.run(); });
-    }
-
-    void TearDown() override {
-        work_guard.reset();
-        io_ctx.stop();
-        if (io_thread.joinable()) io_thread.join();
-    }
-};
-
-TEST_F(SyncSessionFloodSyncTest, NullController_Returns) {
-    SyncSession::SendToPeerFunc send = [](const std::string&, PeerController*) {};
-    SyncSession::WithPeerFunc with_peer = [](const std::string&, std::function<void(PeerController*)>) {};
-    SyncSession::GetPeerFunc get_peer = [](const std::string&) -> std::shared_ptr<PeerController> {
-        return nullptr;
-    };
-
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
-
-    // 传入 nullptr controller，应直接返回
-    session.perform_flood_sync(nullptr, 12345);
-    // 不崩溃即通过
-}
-
-TEST_F(SyncSessionFloodSyncTest, NullStateManager_Returns) {
-    SyncSession::SendToPeerFunc send = [](const std::string&, PeerController*) {};
-    SyncSession::WithPeerFunc with_peer = [](const std::string&, std::function<void(PeerController*)>) {};
-    SyncSession::GetPeerFunc get_peer = [](const std::string&) -> std::shared_ptr<PeerController> {
-        return nullptr;
-    };
-
-    // StateManager 为 nullptr
-    SyncSession session(nullptr, worker_pool, io_ctx, send, with_peer, get_peer);
-
-    // 即使 controller 不为 nullptr，StateManager 为空也应返回
-    // 但这里由于无法简单创建 PeerController，我们仍传 nullptr
-    session.perform_flood_sync(nullptr, 12345);
 }
 
 // ============================================================================

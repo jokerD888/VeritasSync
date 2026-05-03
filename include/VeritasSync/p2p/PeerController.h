@@ -194,7 +194,14 @@ public:
 
     IceConnectionType get_connection_type() const;
     int get_kcp_wait_send() const;
-    
+
+    /// 注册"KCP 发送队列有余量"回调，由 KCP drain 事件驱动（单次触发）
+    /// 如果队列已在阈值以下，回调会立即触发（在当前调用栈中，锁外执行）
+    void on_send_ready(std::function<void()> callback);
+
+    /// 清除 drain 回调
+    void clear_send_ready();
+
     // --- 同步会话状态（封装访问，线程安全） ---
 
     /// 设置同步会话 ID

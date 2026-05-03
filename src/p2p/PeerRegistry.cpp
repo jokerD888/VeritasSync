@@ -9,6 +9,12 @@ void PeerRegistry::add(const std::string& peer_id, std::shared_ptr<PeerControlle
     m_peers[peer_id] = std::move(controller);
 }
 
+bool PeerRegistry::try_add(const std::string& peer_id, std::shared_ptr<PeerController> controller) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex);
+    auto [_, inserted] = m_peers.try_emplace(peer_id, std::move(controller));
+    return inserted;
+}
+
 std::shared_ptr<PeerController> PeerRegistry::remove(const std::string& peer_id) {
     std::unique_lock<std::shared_mutex> lock(m_mutex);
     auto it = m_peers.find(peer_id);

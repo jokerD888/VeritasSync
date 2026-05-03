@@ -92,6 +92,7 @@ int KcpSession::send(const std::string& message) {
 
 void KcpSession::update(uint32_t current_ms) {
     std::vector<std::string> messages;
+    std::function<void()> drain_cb;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -99,8 +100,20 @@ void KcpSession::update(uint32_t current_ms) {
 
         ikcp_update(m_kcp.get(), current_ms);
 
+        // drain 检测：队列从高于阈值降到阈值以下时触发一次
+        if (m_on_drain && !m_drain_notified) {
+            if (ikcp_waitsnd(m_kcp.get()) <= m_drain_threshold) {
+                m_drain_notified = true;
+                drain_cb = m_on_drain;
+            }
+        }
+
         // 快速检查：无完整消息则跳过收取，避免 messages 分配
-        if (ikcp_peeksize(m_kcp.get()) < 0) return;
+        if (ikcp_peeksize(m_kcp.get()) < 0) {
+            // 即使无消息，也需要在锁外触发 drain 回调
+            if (drain_cb) drain_cb();
+            return;
+        }
 
         // thread_local buffer 复用，避免高频分配（每 10ms 调一次）
         thread_local std::vector<char> t_buffer;
@@ -119,6 +132,7 @@ void KcpSession::update(uint32_t current_ms) {
     }
 
     // 锁外触发回调，允许回调内安全调用 send() 等方法
+    if (drain_cb) drain_cb();
     if (m_callbacks.on_message_received) {
         for (const auto& msg : messages) {
             m_callbacks.on_message_received(msg);
@@ -166,6 +180,40 @@ int KcpSession::get_wait_send_count() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_kcp) return 0;
     return ikcp_waitsnd(m_kcp.get());
+}
+
+void KcpSession::set_on_drain(std::function<void()> on_drain) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_pending_drain = nullptr;  // 清除未取出的旧 pending
+    m_on_drain = std::move(on_drain);
+    m_drain_notified = false;
+    // 如果队列已在阈值以下，标记为待触发（不直接调用，避免在调用者锁内执行回调）
+    if (m_kcp && ikcp_waitsnd(m_kcp.get()) <= m_drain_threshold) {
+        m_drain_notified = true;
+        m_pending_drain = m_on_drain;
+    }
+}
+
+void KcpSession::clear_on_drain() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_on_drain = nullptr;
+    m_pending_drain = nullptr;
+    m_drain_notified = false;
+}
+
+void KcpSession::set_drain_threshold(int threshold) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_drain_threshold = threshold;
+}
+
+int KcpSession::get_drain_threshold() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_drain_threshold;
+}
+
+std::function<void()> KcpSession::take_pending_drain() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return std::move(m_pending_drain);
 }
 
 int KcpSession::kcp_output_callback(const char* buf, int len,

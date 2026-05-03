@@ -15,46 +15,51 @@ namespace VeritasSync {
 
 class TransferManagerAsyncTest : public ::testing::Test {
 protected:
-    std::filesystem::path test_root = "test_transfer_root";
+    std::filesystem::path test_root;
     boost::asio::thread_pool worker_pool{4};
     CryptoLayer crypto;
     std::shared_ptr<TransferManager> tm;
     std::unique_ptr<StateManager> sm;
     boost::asio::io_context m_io_context;
-    
+
     std::atomic<int> sent_packets{0};
     std::mutex payload_mutex;
 
     void SetUp() override {
+        // 每个测试使用独立目录，避免跨测试文件锁干扰
+        static int test_counter = 0;
+        test_root = std::filesystem::temp_directory_path() /
+                    ("vs_async_test_" + std::to_string(test_counter++));
         if (std::filesystem::exists(test_root)) {
             std::filesystem::remove_all(test_root);
         }
         std::filesystem::create_directories(test_root);
-        
+
         crypto.set_key("test_transfer_key_1234567890123");
-        
-        StateManagerCallbacks callbacks;  // 空回调，测试中不需要广播
+
+        StateManagerCallbacks callbacks;
         sm = std::make_unique<StateManager>(test_root.string(), m_io_context,
                                             std::move(callbacks), false, "test_sync");
-        
+
         auto send_cb = [this](const std::string& /*peer_id*/, const std::string& /*data*/) {
             sent_packets++;
-            return 0; 
+            return 0;
         };
-        
+
         tm = std::make_shared<TransferManager>(sm.get(), m_io_context, worker_pool, send_cb);
     }
 
     void TearDown() override {
         tm.reset();
         sm.reset();
+        // 等待 worker 线程完成所有任务
         worker_pool.join();
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        if (std::filesystem::exists(test_root)) {
-            std::error_code ec;
-            std::filesystem::remove_all(test_root, ec);
-        }
+        // 排空 io_context 中的残余 handler，确保数据库句柄完全释放
+        m_io_context.restart();
+        m_io_context.run_for(std::chrono::milliseconds(100));
+
+        std::error_code ec;
+        std::filesystem::remove_all(test_root, ec);
     }
 
     void create_dummy_file(const std::string& name, size_t size) {

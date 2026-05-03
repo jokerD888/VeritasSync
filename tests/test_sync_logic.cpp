@@ -185,30 +185,30 @@ TEST(SyncLogicTest, SpecialFilePaths) {
 // --- 目录同步测试 ---
 
 TEST(SyncLogicTest, DirSync_RemoteNewDirs_ShouldCreate) {
-    std::set<std::string> local_dirs;
-    std::set<std::string> remote_dirs = {"dir1", "dir2/subdir"};
+    std::unordered_set<std::string> local_dirs;
+    std::unordered_set<std::string> remote_dirs = {"dir1", "dir2/subdir"};
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     EXPECT_EQ(actions.dirs_to_create.size(), 2);
     EXPECT_TRUE(actions.dirs_to_delete.empty());
 }
 
 TEST(SyncLogicTest, DirSync_LocalExtraDirs_ShouldDelete) {
-    std::set<std::string> local_dirs = {"local_dir", "another_dir"};
-    std::set<std::string> remote_dirs;
+    std::unordered_set<std::string> local_dirs = {"local_dir", "another_dir"};
+    std::unordered_set<std::string> remote_dirs;
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     EXPECT_TRUE(actions.dirs_to_create.empty());
     EXPECT_EQ(actions.dirs_to_delete.size(), 2);
 }
 
 TEST(SyncLogicTest, DirSync_BiDi_BothSidesMarked) {
-    std::set<std::string> local_dirs = {"local_new"};
-    std::set<std::string> remote_dirs = {"remote_new"};
+    std::unordered_set<std::string> local_dirs = {"local_new"};
+    std::unordered_set<std::string> remote_dirs = {"remote_new"};
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::BiDirectional);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     // 远程有而本地没有的目录应该被创建
     EXPECT_EQ(actions.dirs_to_create.size(), 1);

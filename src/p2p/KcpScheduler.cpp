@@ -1,6 +1,6 @@
 #include "VeritasSync/p2p/KcpScheduler.h"
 
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/p2p/PeerController.h"
 
 #include <algorithm>

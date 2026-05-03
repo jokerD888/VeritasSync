@@ -14,7 +14,7 @@
 
 #include "VeritasSync/common/CryptoLayer.h"
 #include "VeritasSync/common/Hashing.h"
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/sync/TransferManager.h"
 

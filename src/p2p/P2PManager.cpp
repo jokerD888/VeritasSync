@@ -7,7 +7,7 @@
 #include <thread>
 
 #include "VeritasSync/common/Logger.h"
-#include "VeritasSync/net/BinaryFrame.h"
+#include "VeritasSync/net/KcpProto.h"
 #include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/storage/StateManager.h"
 #include "VeritasSync/p2p/TrackerClient.h"
@@ -160,11 +160,40 @@ void P2PManager::create_transfer_manager() {
 }
 
 void P2PManager::create_sync_components() {
-    auto with_peer_cb = [this](const std::string& peer_id, std::function<void(PeerController*)> action) {
-        auto controller = m_peer_registry.find(peer_id);
+    auto weak_self = weak_from_this();
+
+    auto with_peer_cb = [weak_self](const std::string& peer_id, std::function<void(PeerController*)> action) {
+        auto self = weak_self.lock();
+        if (!self) return;
+        auto controller = self->m_peer_registry.find(peer_id);
         if (controller && controller->is_connected()) {
             action(controller.get());
         }
+    };
+
+    auto send_to_peer_cb = [weak_self](const std::string& msg, PeerController* peer) {
+        auto self = weak_self.lock();
+        if (!self) return;
+        self->send_over_kcp_peer(msg, peer);
+    };
+
+    auto send_to_peer_safe_cb = [weak_self](const std::string& msg, const std::string& peer_id) {
+        auto self = weak_self.lock();
+        if (!self) return;
+        self->send_over_kcp_peer_safe(msg, peer_id);
+    };
+
+    auto get_peer_cb = [weak_self](const std::string& peer_id) -> std::shared_ptr<PeerController> {
+        auto self = weak_self.lock();
+        if (!self) return nullptr;
+        return self->m_peer_registry.find(peer_id);
+    };
+
+    // resync_cb: SyncSession 收到不完整 ACK 时，通过此回调请求 BroadcastManager 重新推送
+    auto resync_cb = [weak_self](std::shared_ptr<PeerController> controller, uint64_t session_id) {
+        auto self = weak_self.lock();
+        if (!self || !self->m_broadcast_manager) return;
+        self->m_broadcast_manager->perform_flood_sync(std::move(controller), session_id);
     };
 
     m_sync_handler = std::make_unique<SyncHandler>(
@@ -172,12 +201,8 @@ void P2PManager::create_sync_components() {
         m_transfer_manager,
         m_worker_pool,
         m_io_context,
-        [this](const std::string& msg, PeerController* peer) {
-            send_over_kcp_peer(msg, peer);
-        },
-        [this](const std::string& msg, const std::string& peer_id) {
-            send_over_kcp_peer_safe(msg, peer_id);
-        },
+        send_to_peer_cb,
+        send_to_peer_safe_cb,
         with_peer_cb
     );
     m_sync_handler->set_role(m_role);
@@ -187,13 +212,10 @@ void P2PManager::create_sync_components() {
         m_state_manager,
         m_worker_pool,
         m_io_context,
-        [this](const std::string& msg, PeerController* peer) {
-            send_over_kcp_peer(msg, peer);
-        },
+        send_to_peer_cb,
         with_peer_cb,
-        [this](const std::string& peer_id) -> std::shared_ptr<PeerController> {
-            return m_peer_registry.find(peer_id);
-        }
+        get_peer_cb,
+        resync_cb
     );
     m_sync_session->set_role(m_role);
     m_sync_session->set_mode(m_mode);
@@ -218,21 +240,23 @@ void P2PManager::init() {
     m_kcp_scheduler = std::make_unique<KcpScheduler>(m_io_context, collect_peers_cb, m_kcp_update_interval_ms);
 
     // 创建 BroadcastManager
+    auto weak_self = weak_from_this();
     m_broadcast_manager = std::make_unique<BroadcastManager>(
         m_io_context,
         m_worker_pool,
         m_peer_registry,
+        m_state_manager,
         // send_fn: 广播消息给所有已连接对等点
-        [this](const std::string& msg) -> bool { return send_over_kcp(msg); },
-        // flood_sync_fn: 对账时调用 SyncSession::perform_flood_sync
-        [this](std::shared_ptr<PeerController> peer, uint64_t session_id) {
-            m_sync_session->perform_flood_sync(peer, session_id);
+        [weak_self](const std::string& msg) -> bool {
+            auto self = weak_self.lock();
+            if (!self) return false;
+            return self->send_over_kcp(msg);
         },
-        // state_provider: 获取当前目录状态 JSON
-        [this]() -> std::string {
-            if (!m_state_manager) return "";
-            m_state_manager->scan_directory();
-            return m_state_manager->get_state_as_json_string();
+        // send_to_peer: 发送消息给指定对等点
+        [weak_self](const std::string& msg, PeerController* peer) {
+            auto self = weak_self.lock();
+            if (!self) return;
+            self->send_over_kcp_peer(msg, peer);
         }
     );
     m_broadcast_manager->set_role(m_role);
@@ -356,17 +380,12 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
     }
 
     for (auto& np : new_peers) {
-        if (m_peer_registry.find(np.peer_id)) {
+        if (!m_peer_registry.try_add(np.peer_id, np.controller)) {
             g_logger->debug("[ICE] {} 已被并发创建，跳过", np.peer_id);
             np.controller->close();
             np.controller.reset();
             continue;
         }
-        m_peer_registry.add(np.peer_id, np.controller);
-    }
-
-    for (auto& np : new_peers) {
-        if (!np.controller || !np.controller->is_valid()) continue;
 
         if (np.controller->is_offer_side()) {
             g_logger->info("[ICE] 我们是 Offer 方，主动发起连接 (对于 {})", np.peer_id);
@@ -402,8 +421,8 @@ void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState
                 uint64_t session_id = std::chrono::steady_clock::now().time_since_epoch().count();
                 controller->set_sync_session_id(session_id);
 
-                boost::asio::post(m_worker_pool, [this, self = shared_from_this(), controller, session_id]() {
-                    m_sync_session->perform_flood_sync(controller, session_id);
+                boost::asio::post(m_worker_pool, [self = shared_from_this(), controller, session_id]() {
+                    self->m_broadcast_manager->perform_flood_sync(controller, session_id);
                 });
             }
         }
@@ -658,7 +677,10 @@ void P2PManager::schedule_cleanup_task() {
     m_cleanup_timer.expires_after(std::chrono::minutes(CLEANUP_INTERVAL_MINUTES));
     std::weak_ptr<P2PManager> weak_self = shared_from_this();
     m_cleanup_timer.async_wait([weak_self](const boost::system::error_code& ec) {
-        if (ec == boost::asio::error::operation_aborted) {
+        if (ec) {
+            if (ec != boost::asio::error::operation_aborted) {
+                g_logger->warn("[P2P] cleanup_timer 异常: {}", ec.message());
+            }
             return;
         }
 
@@ -731,9 +753,10 @@ void P2PManager::handle_goodbye(PeerController* from_peer) {
         m_transfer_manager->cancel_receives_for_peer(peer_id);
     }
 
-    auto controller = m_peer_registry.remove(peer_id);
+    auto controller = m_peer_registry.find(peer_id);
     if (controller) {
         controller->close();
+        m_peer_registry.remove(peer_id);
     }
 }
 

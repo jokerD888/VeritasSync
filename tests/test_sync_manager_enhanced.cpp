@@ -74,10 +74,10 @@ TEST(SyncManagerEnhanced, PathCaseInsensitivity_MixedCase) {
 // ============================================================================
 
 TEST(SyncManagerEnhanced, DirCaseInsensitivity_SameDir) {
-    std::set<std::string> local_dirs = {"Docs", "SRC/Utils"};
-    std::set<std::string> remote_dirs = {"docs", "src/utils"};  // 小写
+    std::unordered_set<std::string> local_dirs = {"Docs", "SRC/Utils"};
+    std::unordered_set<std::string> remote_dirs = {"docs", "src/utils"};  // 小写
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     // 应该识别为相同目录
     EXPECT_TRUE(actions.dirs_to_create.empty()) << "大小写不同的目录应该被识别为相同";
@@ -85,10 +85,10 @@ TEST(SyncManagerEnhanced, DirCaseInsensitivity_SameDir) {
 }
 
 TEST(SyncManagerEnhanced, DirCaseInsensitivity_NewDir) {
-    std::set<std::string> local_dirs = {"Docs"};
-    std::set<std::string> remote_dirs = {"docs", "NEW_DIR"};  // 有新目录
+    std::unordered_set<std::string> local_dirs = {"Docs"};
+    std::unordered_set<std::string> remote_dirs = {"docs", "NEW_DIR"};  // 有新目录
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     // Docs 和 docs 应该被识别为相同，只有 NEW_DIR 是新的
     ASSERT_EQ(actions.dirs_to_create.size(), 1);
@@ -331,8 +331,8 @@ TEST(SyncManagerEnhanced, Performance_10kFiles) {
 }
 
 TEST(SyncManagerEnhanced, Performance_10kDirs) {
-    std::set<std::string> local_dirs;
-    std::set<std::string> remote_dirs;
+    std::unordered_set<std::string> local_dirs;
+    std::unordered_set<std::string> remote_dirs;
     
     // 创建 10,000 个目录
     for (int i = 0; i < 10000; ++i) {
@@ -341,7 +341,7 @@ TEST(SyncManagerEnhanced, Performance_10kDirs) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs, SyncMode::OneWay);
+    auto actions = SyncManager::compare_dir_states(local_dirs, remote_dirs);
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);

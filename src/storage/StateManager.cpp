@@ -151,19 +151,27 @@ namespace VeritasSync {
     }
 
     StateManager::~StateManager() {
-        // 【安全修复 H7】先销毁 file_watcher（停止 efsw 线程），
-        // 确保 UpdateListener 回调不再触发，然后再销毁 listener 和其他成员。
-        // efsw::FileWatcher 析构会等待内部线程退出。
+        // 1. 停止文件监控，不再产生新变更
         if (m_file_watcher) {
             g_logger->info("[StateManager] 正在停止文件监控...");
-            m_file_watcher.reset();  // 显式先销毁，等待 efsw 线程退出
+            m_file_watcher.reset();
         }
-        m_listener.reset();  // efsw 线程已停，安全销毁 listener
+        m_listener.reset();
 
-        // --- 关键：安全关闭异步任务 ---
+        // 2. 取消重试定时器，不再触发 process_debounced_changes
         if (m_retry_timer) {
             m_retry_timer->cancel();
         }
+
+        // 3. 等待 Phase 1 工作线程完成（jthread 析构自动 join）
+        //    必须在 file_watcher 停止之后，确保不会有新的 process_debounced_changes 调用
+        {
+            std::lock_guard<std::mutex> lock(m_phase1_mutex);
+            if (m_phase1_thread.joinable()) {
+                m_phase1_thread.request_stop();
+            }
+        }
+        // m_phase1_thread 析构时自动 join
     }
     std::string StateManager::get_base_hash(const std::string& peer_id, const std::string& path) {
         if (!m_db) return "";
@@ -177,7 +185,7 @@ namespace VeritasSync {
             m_db->update_sync_history(peer_id, path, hash);
         }
     }
-    std::set<std::string> StateManager::get_local_directories() const {
+    std::unordered_set<std::string> StateManager::get_local_directories() const {
         std::lock_guard<std::mutex> lock(m_dir_map_mutex);
         return m_dir_map;
     }
@@ -217,11 +225,12 @@ namespace VeritasSync {
             return false;
         }
         
-        // 检查时间间隔
+        // 检查时间间隔（atomic 读，跨线程安全）
         auto now = std::chrono::steady_clock::now();
+        int64_t last_ns = m_last_batch_time_ns.load(std::memory_order_relaxed);
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - m_last_batch_time).count();
-        
+            now.time_since_epoch() - std::chrono::steady_clock::duration(last_ns)).count();
+
         if (elapsed_ms < m_sync_config.batch_min_interval_ms) {
             return false;  // 间隔太短，等待下一次
         }
@@ -238,9 +247,11 @@ namespace VeritasSync {
         // 非阻塞：post 到 io_context，不在监控线程中执行耗时操作
         boost::asio::post(m_io_context, [this]() {
             process_debounced_changes();
-            
-            // 更新时间戳并释放处理标志
-            m_last_batch_time = std::chrono::steady_clock::now();
+
+            // 更新时间戳（atomic 写，跨线程安全）并释放处理标志
+            m_last_batch_time_ns.store(
+                std::chrono::steady_clock::now().time_since_epoch().count(),
+                std::memory_order_relaxed);
             m_processing.store(false);
         });
         
@@ -248,11 +259,11 @@ namespace VeritasSync {
     }
 
     // --- 由 UpdateListener 定时器调用 ---
-    // B-1 锁粒度优化：将 I/O、哈希计算、数据库操作移到锁外执行，
+    // 将 I/O、哈希计算、数据库操作移到锁外执行，
     // 仅在更新内存映射时短暂持锁，避免秒级阻塞其他线程。
     void StateManager::process_debounced_changes() {
         // ═══════════════════════════════════════════════════════════
-        // 【性能修复】将 Phase 1（SHA256 哈希计算）移到独立线程，
+        // 将 Phase 1（SHA256 哈希计算）移到独立线程，
         // 避免长时间阻塞 io_context 导致 KCP update 无法执行，
         // 进而引发 ACK 延迟 → RTO 指数退避 → KCP 拥塞崩溃。
         // ═══════════════════════════════════════════════════════════
@@ -281,9 +292,16 @@ namespace VeritasSync {
 
         // Step 2: 将 Phase 1（I/O + 哈希）移到独立线程执行，
         // 完成后 post 回 io_context 执行 Phase 2 + Phase 3。
-        std::thread([this, changes_to_process = std::move(changes_to_process)]() {
-            process_changes_phase1(changes_to_process);
-        }).detach();
+        // 使用 jthread：析构时自动 join，避免 detached thread 悬垂风险。
+        {
+            std::lock_guard<std::mutex> lock(m_phase1_mutex);
+            if (m_phase1_thread.joinable()) {
+                m_phase1_thread.join();  // 等待上一轮 Phase 1 完成
+            }
+            m_phase1_thread = std::jthread([this, changes_to_process = std::move(changes_to_process)]() {
+                process_changes_phase1(changes_to_process);
+            });
+        }
     }
 
     // ─── Phase 1: I/O 密集操作（在独立线程上执行，不阻塞 io_context）───
@@ -589,13 +607,13 @@ namespace VeritasSync {
         };
         
         std::vector<PendingFile> pending_files;
-        std::set<std::string> pending_dirs;
+        std::unordered_set<std::string> pending_dirs;
         std::vector<std::string> retry_list;
         
         std::atomic<int> cache_hit_count{0};
         std::atomic<int> calc_count{0};
         
-        // 【修复】错误计数和上限，防止无限错误循环
+        // 错误计数和上限，防止无限错误循环
         size_t error_count = 0;
         constexpr size_t MAX_ERROR_COUNT = 100;
         
@@ -772,8 +790,8 @@ namespace VeritasSync {
         }
         
         // Phase 3a（短锁）：仅更新内存映射，收集需要写数据库的脏数据
-        // B-2 锁粒度优化：数据库事务移到锁外执行
-        // 【修复 #6】先在锁外构建临时 map，再原子替换，避免 clear() 后其他线程读到空 map
+        // 锁粒度优化：数据库事务移到锁外执行
+        // 先在锁外构建临时 map，再原子替换，避免 clear() 后其他线程读到空 map
         std::vector<FileInfo> db_dirty_entries;
         db_dirty_entries.reserve(pending_files.size());
         {
@@ -870,7 +888,7 @@ namespace VeritasSync {
             schedule_retry(2);
         }
         
-        // 【修复】添加错误统计到日志
+        // 添加错误统计到日志
         if (error_count > 0) {
             g_logger->warn("[StateManager] 扫描完成。文件: {} (DB命中: {}, 重算: {}), 错误: {}", 
                           m_file_map.size(), cache_hit_count.load(), calc_count.load(), error_count);
@@ -955,7 +973,7 @@ namespace VeritasSync {
     void StateManager::schedule_retry(int delay_seconds) {
         if (!m_retry_timer) return;
 
-        // 【核心加固】通过 post 确保所有的计时器操作都在 io_context 的线程内线性执行
+        // 通过 post 确保所有的计时器操作都在 io_context 的线程内线性执行
         // 这样即使 scan_directory (主线程) 和之前挂起的回调同时触发重试，也不会发生竞态
         boost::asio::post(m_io_context, [this, delay_seconds]() {
             if (!m_retry_timer) return;

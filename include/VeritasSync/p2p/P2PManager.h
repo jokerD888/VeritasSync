@@ -32,14 +32,6 @@
 
 namespace VeritasSync {
 
-// --- ICE 连接类型枚举 ---
-enum class ConnectionType {
-    None,  // 未连接
-    P2P,   // 直连 (host 或 srflx)
-    Relay  // 中继 (relay)
-};
-// -------------------------
-
 // === 前向声明 ===
 class StateManager;
 class TrackerClient;
@@ -93,8 +85,6 @@ public:
     virtual void broadcast_file_delete(const std::string& relative_path);
     virtual void broadcast_dir_create(const std::string& relative_path);
     virtual void broadcast_dir_delete(const std::string& relative_path);
-
-    // --- 批量广播方法（委托给 BroadcastManager）---
     virtual void broadcast_file_updates_batch(const std::vector<FileInfo>& files);
     virtual void broadcast_file_deletes_batch(const std::vector<std::string>& paths);
     virtual void broadcast_dir_changes_batch(const std::vector<std::string>& creates,
@@ -128,7 +118,8 @@ public:
     std::vector<PeerInfo> get_peers_info();
 
 protected:
-    P2PManager();
+    P2PManager();  // protected 允许测试 Mock 继承
+private:
     void init();  // 由 create() 内部调用，配置参数已就绪
 
 
