@@ -2,15 +2,10 @@
 
 #include <sqlite3.h>
 
-#include <iostream>
-
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Logger.h"
 
 namespace VeritasSync {
-
-// E-1: 魔数统一为命名常量（保留为默认值参考）
-static constexpr int DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000;  // SQLite 繁忙重试超时（毫秒）
 
 // --- StmtDeleter 实现 ---
 void Database::StmtDeleter::operator()(sqlite3_stmt* s) {
@@ -19,10 +14,7 @@ void Database::StmtDeleter::operator()(sqlite3_stmt* s) {
     }
 }
 
-Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : m_db_path(db_path.string()) {
-    // 注意：成员变量 m_db_path 只是为了存个日志用的 string，转成 UTF-8 存起来
-    m_db_path = PathToUtf8(db_path);
-
+Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : m_db_path(PathToUtf8(db_path)) {
     int rc = 0;
 #ifdef _WIN32
     // 【关键】Windows 上使用宽字符接口打开数据库
@@ -58,6 +50,14 @@ Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : 
         sqlite3_exec(m_db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
     }
 
+    // --- 性能优化 PRAGMA ---
+    // 内存映射 I/O：省去 read() 系统调用和内核态→用户态 DMA 拷贝，上限 256MB
+    sqlite3_exec(m_db, "PRAGMA mmap_size=268435456;", nullptr, nullptr, nullptr);
+    // 扩大 page cache 至 20MB，减少并发批量写入时的磁盘 I/O
+    sqlite3_exec(m_db, "PRAGMA cache_size=-20000;", nullptr, nullptr, nullptr);
+    // 临时表放内存，避免排序等操作生成磁盘文件
+    sqlite3_exec(m_db, "PRAGMA temp_store=MEMORY;", nullptr, nullptr, nullptr);
+
     // 初始化表结构
     init_schema();
     // 预编译 SQL 语句
@@ -68,7 +68,7 @@ Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : 
 
 Database::~Database() {
     if (m_db) {
-        sqlite3_close(m_db);
+        sqlite3_close_v2(m_db);  // v2 容忍未释放的 statement，避免 leaking
     }
 }
 
@@ -98,7 +98,7 @@ void Database::init_schema() {
     // 增加此索引可将全表扫描优化为索引查找，在大数据量下性能提升百倍。
     const char* sql_index_path = "CREATE INDEX IF NOT EXISTS idx_sync_history_path ON sync_history(path);";
 
-    // C-4 正确性修复: 每次 sqlite3_exec 后独立检查并释放 errMsg，防止泄漏
+    // 每次 sqlite3_exec 后独立检查并释放 errMsg，防止泄漏
     auto exec_schema = [this](const char* sql, const char* description) {
         char* errMsg = nullptr;
         int rc = sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg);
@@ -108,60 +108,71 @@ void Database::init_schema() {
         }
     };
 
+    // 4. download_tasks 表（断点续传持久化）
+    const char* sql_tasks =
+        "CREATE TABLE IF NOT EXISTS download_tasks ("
+        "  path TEXT PRIMARY KEY,"
+        "  peer_id TEXT NOT NULL,"
+        "  total_chunks INTEGER NOT NULL,"
+        "  received_bitmap BLOB,"
+        "  expected_hash TEXT,"
+        "  expected_size INTEGER,"
+        "  temp_path TEXT NOT NULL,"
+        "  last_active INTEGER"
+        ");";
+
     // 执行建表和索引创建
     exec_schema(sql_files, "创建 files 表");
     exec_schema(sql_history, "创建 sync_history 表");
     exec_schema(sql_index_path, "创建 sync_history path 索引");
+    exec_schema(sql_tasks, "创建 download_tasks 表");
 }
 
 void Database::prepare_statements() {
-    const char* sql_get = "SELECT hash, mtime FROM files WHERE path = ?;";
-    sqlite3_stmt* stmt_get = nullptr;
-    sqlite3_prepare_v2(m_db, sql_get, -1, &stmt_get, nullptr);
-    m_stmt_get.reset(stmt_get);
+    auto prepare = [this](const char* sql, ScopedStmt& stmt, const char* desc) {
+        sqlite3_stmt* raw = nullptr;
+        if (sqlite3_prepare_v2(m_db, sql, -1, &raw, nullptr) != SQLITE_OK) {
+            g_logger->error("[Database] 预编译失败 ({}): {}", desc, sqlite3_errmsg(m_db));
+        }
+        stmt.reset(raw);
+    };
 
-    const char* sql_update = "INSERT OR REPLACE INTO files (path, hash, mtime) VALUES (?, ?, ?);";
-    sqlite3_stmt* stmt_update = nullptr;
-    sqlite3_prepare_v2(m_db, sql_update, -1, &stmt_update, nullptr);
-    m_stmt_update.reset(stmt_update);
+    prepare("SELECT hash, mtime FROM files WHERE path = ?;", m_stmt_get, "get_file");
 
-    const char* sql_delete = "DELETE FROM files WHERE path = ?;";
-    sqlite3_stmt* stmt_delete = nullptr;
-    sqlite3_prepare_v2(m_db, sql_delete, -1, &stmt_delete, nullptr);
-    m_stmt_delete.reset(stmt_delete);
+    prepare("INSERT INTO files (path, hash, mtime) VALUES (?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET hash=excluded.hash, mtime=excluded.mtime;",
+            m_stmt_update, "update_file");
+
+    prepare("DELETE FROM files WHERE path = ?;", m_stmt_delete, "delete_file");
 
     // 记录发送历史 (Upsert)
-    const char* sql_hist_update = "INSERT OR REPLACE INTO sync_history (peer_id, path, hash, ts) VALUES (?, ?, ?, STRFTIME('%s','now'));";
-    sqlite3_stmt* stmt_hist_update = nullptr;
-    sqlite3_prepare_v2(m_db, sql_hist_update, -1, &stmt_hist_update, nullptr);
-    m_stmt_hist_update.reset(stmt_hist_update);
+    prepare("INSERT INTO sync_history (peer_id, path, hash, ts) VALUES (?, ?, ?, STRFTIME('%s','now')) "
+            "ON CONFLICT(peer_id, path) DO UPDATE SET hash=excluded.hash, ts=excluded.ts;",
+            m_stmt_hist_update, "update_sync_history");
 
-    // 查询发送历史
-    const char* sql_hist_get = "SELECT hash, ts FROM sync_history WHERE peer_id = ? AND path = ?;";
-    sqlite3_stmt* stmt_hist_get = nullptr;
-    sqlite3_prepare_v2(m_db, sql_hist_get, -1, &stmt_hist_get, nullptr);
-    m_stmt_hist_get.reset(stmt_hist_get);
+    prepare("SELECT hash, ts FROM sync_history WHERE peer_id = ? AND path = ?;",
+            m_stmt_hist_get, "get_sync_history");
 
-    // 删除历史
-    const char* sql_hist_delete = "DELETE FROM sync_history WHERE path = ?;";
-    sqlite3_stmt* stmt_hist_delete = nullptr;
-    sqlite3_prepare_v2(m_db, sql_hist_delete, -1, &stmt_hist_delete, nullptr);
-    m_stmt_hist_delete.reset(stmt_hist_delete);
+    prepare("DELETE FROM sync_history WHERE path = ?;",
+            m_stmt_hist_delete, "delete_sync_history");
 
-    const char* sql_get_all = "SELECT path FROM files;";
-    sqlite3_stmt* stmt_get_all = nullptr;
-    sqlite3_prepare_v2(m_db, sql_get_all, -1, &stmt_get_all, nullptr);
-    m_stmt_get_all_paths.reset(stmt_get_all);
+    prepare("SELECT path FROM files;", m_stmt_get_all_paths, "get_all_paths");
 
-    const char* sql_get_all_files = "SELECT path, hash, mtime FROM files;";
-    sqlite3_stmt* stmt_get_all_files = nullptr;
-    sqlite3_prepare_v2(m_db, sql_get_all_files, -1, &stmt_get_all_files, nullptr);
-    m_stmt_get_all_files.reset(stmt_get_all_files);
+    prepare("SELECT path, hash, mtime FROM files;", m_stmt_get_all_files, "get_all_files");
 
-    const char* sql_count_files = "SELECT COUNT(*) FROM files;";
-    sqlite3_stmt* stmt_count_files = nullptr;
-    sqlite3_prepare_v2(m_db, sql_count_files, -1, &stmt_count_files, nullptr);
-    m_stmt_count_files.reset(stmt_count_files);
+    // 断点续传
+    prepare("INSERT OR REPLACE INTO download_tasks "
+            "(path, peer_id, total_chunks, received_bitmap, expected_hash, expected_size, temp_path, last_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            m_stmt_save_task, "save_download_task");
+
+    prepare("DELETE FROM download_tasks WHERE path = ?;",
+            m_stmt_remove_task, "remove_download_task");
+
+    prepare("SELECT path, peer_id, total_chunks, received_bitmap, "
+            "expected_hash, expected_size, temp_path, last_active "
+            "FROM download_tasks;",
+            m_stmt_load_all_tasks, "load_all_tasks");
 }
 std::optional<SyncHistory> Database::get_sync_history(const std::string& peer_id, const std::string& path) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -225,7 +236,9 @@ std::optional<FileMetadata> Database::get_file(const std::string& rel_path) cons
     if (sqlite3_step(m_stmt_get.get()) == SQLITE_ROW) {
         FileMetadata meta;
         meta.path = rel_path;
-        meta.hash = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_get.get(), 0));
+        const char* hash_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_get.get(), 0));
+        if (!hash_val) return std::nullopt;
+        meta.hash = hash_val;
         meta.mtime = sqlite3_column_int64(m_stmt_get.get(), 1);
         return meta;
     }
@@ -279,15 +292,7 @@ std::vector<FileMetadata> Database::get_all_files() const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<FileMetadata> files;
     if (!m_db || !m_stmt_get_all_files) return files;
-
-    // 先查 COUNT 预分配容量，避免 vector 反复扩容
-    if (m_stmt_count_files) {
-        sqlite3_reset(m_stmt_count_files.get());
-        if (sqlite3_step(m_stmt_count_files.get()) == SQLITE_ROW) {
-            int count = sqlite3_column_int(m_stmt_count_files.get(), 0);
-            if (count > 0) files.reserve(static_cast<size_t>(count));
-        }
-    }
+    files.reserve(1024);  // 经验值预分配，避免双重全表扫描
 
     sqlite3_reset(m_stmt_get_all_files.get());
     while (sqlite3_step(m_stmt_get_all_files.get()) == SQLITE_ROW) {
@@ -304,54 +309,138 @@ std::vector<FileMetadata> Database::get_all_files() const {
     return files;
 }
 
-void Database::begin_transaction() {
-    // 这里依然需要 lock_guard，防止 begin 指令与其它 SQL 冲突
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    // C-4: 添加错误诊断
+// --- 无锁事务操作（供 TransactionGuard 直接调用）---
+
+bool Database::begin_transaction_nolock() {
     char* errMsg = nullptr;
     if (sqlite3_exec(m_db, "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
         g_logger->error("[Database] BEGIN TRANSACTION 失败: {}", errMsg ? errMsg : "unknown");
         if (errMsg) sqlite3_free(errMsg);
+        return false;
     }
+    return true;
 }
 
-void Database::commit_transaction() {
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+bool Database::commit_transaction_nolock() {
     char* errMsg = nullptr;
     if (sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
         g_logger->error("[Database] COMMIT 失败: {}", errMsg ? errMsg : "unknown");
         if (errMsg) sqlite3_free(errMsg);
+        return false;
     }
+    return true;
 }
 
-void Database::rollback_transaction() {
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+bool Database::rollback_transaction_nolock() {
     char* errMsg = nullptr;
     if (sqlite3_exec(m_db, "ROLLBACK;", nullptr, nullptr, &errMsg) != SQLITE_OK) {
         g_logger->error("[Database] ROLLBACK 失败: {}", errMsg ? errMsg : "unknown");
         if (errMsg) sqlite3_free(errMsg);
+        return false;
     }
+    return true;
+}
+
+// --- 断点续传持久化 ---
+
+bool Database::save_download_task(const DownloadTaskRecord& task) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_save_task) return false;
+
+    sqlite3_reset(m_stmt_save_task.get());
+    sqlite3_bind_text(m_stmt_save_task.get(), 1, task.path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_save_task.get(), 2, task.peer_id.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(m_stmt_save_task.get(), 3, task.total_chunks);
+    sqlite3_bind_blob(m_stmt_save_task.get(), 4,
+                      task.bitmap_data.empty() ? nullptr : task.bitmap_data.data(),
+                      static_cast<int>(task.bitmap_data.size()), SQLITE_STATIC);
+    sqlite3_bind_text(m_stmt_save_task.get(), 5,
+                      task.expected_hash.empty() ? nullptr : task.expected_hash.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(m_stmt_save_task.get(), 6, static_cast<int64_t>(task.expected_size));
+    sqlite3_bind_text(m_stmt_save_task.get(), 7, task.temp_path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(m_stmt_save_task.get(), 8, task.last_active);
+
+    if (sqlite3_step(m_stmt_save_task.get()) != SQLITE_DONE) {
+        g_logger->error("[Database] save_download_task 失败: {}", sqlite3_errmsg(m_db));
+        return false;
+    }
+    return true;
+}
+
+bool Database::remove_download_task(const std::string& path) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_db || !m_stmt_remove_task) return false;
+
+    sqlite3_reset(m_stmt_remove_task.get());
+    sqlite3_bind_text(m_stmt_remove_task.get(), 1, path.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(m_stmt_remove_task.get()) != SQLITE_DONE) {
+        g_logger->error("[Database] remove_download_task 失败: {}", sqlite3_errmsg(m_db));
+        return false;
+    }
+    return true;
+}
+
+std::vector<DownloadTaskRecord> Database::load_all_download_tasks() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<DownloadTaskRecord> tasks;
+    if (!m_db || !m_stmt_load_all_tasks) return tasks;
+
+    sqlite3_reset(m_stmt_load_all_tasks.get());
+    while (sqlite3_step(m_stmt_load_all_tasks.get()) == SQLITE_ROW) {
+        DownloadTaskRecord task;
+
+        const char* path_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_load_all_tasks.get(), 0));
+        if (!path_val) continue;
+        task.path = path_val;
+
+        const char* peer_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_load_all_tasks.get(), 1));
+        if (peer_val) task.peer_id = peer_val;
+
+        task.total_chunks = static_cast<uint32_t>(sqlite3_column_int64(m_stmt_load_all_tasks.get(), 2));
+
+        // 读取 bitmap BLOB
+        int blob_size = sqlite3_column_bytes(m_stmt_load_all_tasks.get(), 3);
+        if (blob_size > 0) {
+            const auto* blob = static_cast<const uint8_t*>(sqlite3_column_blob(m_stmt_load_all_tasks.get(), 3));
+            task.bitmap_data.assign(blob, blob + blob_size);
+        }
+
+        const char* hash_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_load_all_tasks.get(), 4));
+        if (hash_val) task.expected_hash = hash_val;
+
+        task.expected_size = static_cast<uint64_t>(sqlite3_column_int64(m_stmt_load_all_tasks.get(), 5));
+
+        const char* temp_val = reinterpret_cast<const char*>(sqlite3_column_text(m_stmt_load_all_tasks.get(), 6));
+        if (temp_val) task.temp_path = temp_val;
+
+        task.last_active = sqlite3_column_int64(m_stmt_load_all_tasks.get(), 7);
+
+        tasks.push_back(std::move(task));
+    }
+    return tasks;
 }
 
 // --- TransactionGuard 实现 ---
 
 Database::TransactionGuard::TransactionGuard(Database& db) 
-    : m_db(db), m_lock(db.m_mutex) { // 关键：在这里直接持有 unique_lock
-    m_db.begin_transaction();
+    : m_db(db), m_lock(db.m_mutex) {
+    // 直接调用无锁版本，避免通过公有方法重复加锁
+    m_db.begin_transaction_nolock();
 }
 
 Database::TransactionGuard::~TransactionGuard() {
     if (!m_committed) {
-        m_db.rollback_transaction();
+        m_db.rollback_transaction_nolock();  // 析构中不抛异常
     }
-    // m_lock 析构时会自动解锁
+    // m_lock 析构时自动解锁
 }
 
-void Database::TransactionGuard::commit() {
-    if (!m_committed) {
-        m_db.commit_transaction();
-        m_committed = true;
-    }
+bool Database::TransactionGuard::commit() {
+    if (m_committed) return true;
+    if (!m_db.commit_transaction_nolock()) return false;
+    m_committed = true;
+    return true;
 }
 
 }  // namespace VeritasSync

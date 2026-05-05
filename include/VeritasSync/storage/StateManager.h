@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -37,32 +38,21 @@ namespace VeritasSync {
         std::function<void(const std::vector<std::string>&, const std::vector<std::string>&)> on_dir_changes;
     };
 
+    /// 从 Config::Sync 注入的运行时参数
+    struct SyncConfig {
+        int batch_trigger_threshold     = 100;
+        int batch_min_interval_ms       = 1000;
+        int file_change_debounce_delay_ms = 5000;
+    };
+
     class StateManager {
         friend class StateManagerEnhancedTest;
     public:
-        /// 从 Config::Sync 注入的运行时参数
-        struct SyncConfig {
-            int batch_trigger_threshold     = 100;
-            int batch_min_interval_ms       = 1000;
-            int file_change_debounce_delay_ms = 5000;
-        };
-
         // 构造函数接收 io_context 引用和回调，不再依赖 P2PManager
-        //
-        // 注：拆成两个重载（而非使用 `SyncConfig sync_config = {}` 默认实参），是为了
-        // 避免 clang 在解析包含本头的下游 .cpp 时触发诊断
-        //   "default member initializer for 'batch_trigger_threshold' needed within
-        //    definition of enclosing class 'StateManager' outside of member functions"
-        // 嵌套类型 SyncConfig 的默认成员初始化器（DMI）在 StateManager 自身解析未结束
-        // 前是"未到位"的，将其作为默认实参会让上游 .cpp 的诊断流被这条 error 污染。
         StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                      StateManagerCallbacks callbacks, bool enable_watcher,
-                     const std::string& sync_key = "unknown");
-
-        StateManager(const std::string& root_path, boost::asio::io_context& io_context,
-                     StateManagerCallbacks callbacks, bool enable_watcher,
-                     const std::string& sync_key,
-                     SyncConfig sync_config);
+                     const std::string& sync_key = "unknown",
+                     SyncConfig sync_config = SyncConfig{});
         ~StateManager();
 
         // 扫描同步目录，生成当前所有文件的状态快照
@@ -75,13 +65,12 @@ namespace VeritasSync {
         void print_current_state() const;
 
         const std::filesystem::path& get_root_path() const { return m_root_path; }
+        Database& get_db() { return *m_db; }
         std::unordered_set<std::string> get_local_directories() const;
 
         // --- P2PManager 需要的辅助函数 ---
         void add_dir_to_map(const std::string& relative_path);
         void remove_dir_from_map(const std::string& relative_path);
-
-        // (供 P2PManager::handle_file_delete 调用)
         void remove_path_from_map(const std::string& relative_path);
 
         // 供 P2PManager 检查是否为回声
@@ -120,25 +109,25 @@ namespace VeritasSync {
         void notify_change_detected(const std::string& full_path);
         void process_debounced_changes();
 
-        // --- Phase 1/2/3 拆分（Phase 1 在独立线程，Phase 2+3 在 io_context）---
-        // Phase 1 中间结果类型（跨方法共享）
-        struct Phase1FileResult {
+        // --- 变更处理流水线：scan_and_hash_changes 在独立线程，commit_changes 在 io_context ---
+        // scan_and_hash_changes 中间结果类型（跨方法共享）
+        struct ScanResult {
             FileInfo info;
             bool is_echo = false;
         };
-        struct Phase1DeleteResult {
+        struct DeleteCheckResult {
             std::string rel_path;
             enum Type { Unknown, FileDelete, DirDelete } type = Unknown;
         };
-        struct Phase1DirResult {
+        struct DirResult {
             std::string rel_path;
         };
 
-        void process_changes_phase1(const std::unordered_set<std::string>& changes);
-        void process_changes_phase2_and_3(
-            std::vector<Phase1FileResult>& file_update_results,
-            std::vector<Phase1DeleteResult>& delete_check_results,
-            const std::vector<Phase1DirResult>& dir_create_results,
+        void scan_and_hash_changes(const std::unordered_set<std::string>& changes, std::stop_token st = {});
+        void commit_changes(
+            std::vector<ScanResult>& file_update_results,
+            std::vector<DeleteCheckResult>& delete_check_results,
+            const std::vector<DirResult>& dir_create_results,
             const std::unordered_set<std::string>& failed_changes);
 
         // 统一调度重试任务 (线程安全，内部使用 post)
@@ -151,8 +140,8 @@ namespace VeritasSync {
         StateManagerCallbacks m_callbacks;       // 变更通知回调
         SyncConfig m_sync_config;                // 同步参数配置
 
-    // 文件状态的核心存储结构
-    std::unordered_map<std::string, FileInfo> m_file_map;
+        // 文件状态的核心存储结构
+        std::unordered_map<std::string, FileInfo> m_file_map;
         std::unique_ptr<Database> m_db;
         std::unique_ptr<CachedFileStore> m_file_store;  // Write-through 缓存层
         mutable std::mutex m_file_map_mutex;  // 保护 m_file_map
@@ -180,9 +169,9 @@ namespace VeritasSync {
         // 唯一的重试计时器，负责调度所有文件冲突后的再次处理任务
         std::unique_ptr<boost::asio::steady_timer> m_retry_timer;
 
-        // Phase 1 工作线程（jthread 析构时自动 join，避免 detached thread 悬垂）
-        std::jthread m_phase1_thread;
-        std::mutex m_phase1_mutex;  // 保护 m_phase1_thread（watcher + io_context 均可调用）
+        // scan_and_hash_changes 工作线程（jthread 析构时自动 join，避免 detached thread 悬垂）
+        std::jthread m_scan_thread;
+        std::mutex m_scan_mutex;  // 保护 m_scan_thread（watcher + io_context 均可调用）
 
         // --- 阈值触发机制 ---
         // 上次批处理时间点（atomic，跨线程安全）
@@ -196,3 +185,4 @@ namespace VeritasSync {
     };
 
 }  // namespace VeritasSync
+

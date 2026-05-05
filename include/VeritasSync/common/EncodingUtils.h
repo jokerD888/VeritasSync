@@ -31,6 +31,17 @@ inline std::filesystem::path Utf8ToPath(const std::string& utf8_str) {
 #endif
 }
 
+// 将 std::filesystem::path 转换为 UTF-8 std::string（通用分隔符 /）
+// 与 PathToUtf8 的区别：使用 generic_u8string 确保跨平台路径字符串一致
+inline std::string PathToGenericUtf8(const std::filesystem::path& path) {
+#ifdef _WIN32
+    std::u8string u8_str = path.generic_u8string();
+    return std::string(reinterpret_cast<const char*>(u8_str.c_str()));
+#else
+    return path.generic_string();
+#endif
+}
+
 // 将 std::filesystem::path 转换为 UTF-8 std::string
 // 核心解决：path.string() 在 Windows 上可能返回 GBK，导致乱码
 inline std::string PathToUtf8(const std::filesystem::path& path) {

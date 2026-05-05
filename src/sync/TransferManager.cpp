@@ -5,14 +5,12 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <cerrno>
-#include <thread>
 
 #include "VeritasSync/common/EncodingUtils.h"
 #include "VeritasSync/common/Hashing.h"
 #include "VeritasSync/common/Logger.h"
 #include "VeritasSync/common/PathUtils.h"
 #include "VeritasSync/net/KcpProto.h"
-#include "VeritasSync/sync/Protocol.h"
 #include "VeritasSync/storage/StateManager.h"
 
 namespace VeritasSync {
@@ -39,9 +37,6 @@ private:
     std::function<void()> m_func;
 };
 
-// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时使用 m_transfer_config）
-static constexpr int  DEFAULT_FILE_OPEN_MAX_RETRIES     = 5;
-static constexpr int  DEFAULT_FILE_OPEN_RETRY_DELAY_MS  = 200;
 static constexpr int  DEFAULT_FILE_OPEN_EMFILE_DELAY_MS = 1000;   // 文件句柄耗尽时重试延迟（毫秒）
 
 // --- 上传任务上下文 (用于异步管理状态) ---
@@ -50,10 +45,10 @@ struct UploadContext {
     std::string path;
     std::ifstream file;
     std::string file_hash;
-    // 【健壮性修复 M12】使用 uint32_t 避免超大文件溢出，与 ChunkHeader 一致
+    // 使用 uint32_t 避免超大文件溢出，与 ChunkHeader 一致
     uint32_t total_chunks = 0;
     uint32_t current_chunk = 0;
-    int open_retry_count = 0; // 新增：用于异步重试计数
+    int open_retry_count = 0; // 用于异步重试计数
 
     // 资源复用
     std::vector<char> buffer;
@@ -61,21 +56,20 @@ struct UploadContext {
     boost::asio::steady_timer timer;
 
     // 流控阈值：当 KCP 发送队列超过此值时触发流控等待
-    // 注意：旧版本 (b1148f9) 使用 1024，新版本因锁层次增加，需要更早触发流控
     static constexpr int CONGESTION_THRESHOLD = 256;
 
     // 运行时 chunk 大小
     size_t chunk_data_size;
 
     UploadContext(boost::asio::io_context& ioc, size_t chunk_size) 
-        : timer(ioc), buffer(chunk_size), chunk_data_size(chunk_size) {
-        compressed_data.reserve(chunk_size * 2);
+        : buffer(chunk_size), timer(ioc), chunk_data_size(chunk_size) {
+        compressed_data.reserve(snappy::MaxCompressedLength(chunk_size));
     }
 };
 
-// --- 实现 ---
-
+// 拒绝 total_chunks 超过 8M 的请求
 static constexpr uint32_t MAX_ALLOWED_TOTAL_CHUNKS = 8 * 1024 * 1024;
+// 拒绝路径超过 4096 字节的请求
 static constexpr size_t MAX_ALLOWED_RELATIVE_PATH_LEN = 4096;
 
 std::optional<TransferManager::UploadRequest> TransferManager::parse_and_validate_upload_request(
@@ -119,7 +113,6 @@ std::optional<TransferManager::UploadRequest> TransferManager::parse_and_validat
             error_reason = "path traversal detected";
             return std::nullopt;
         }
-
         return req;
     } catch (const std::exception& e) {
         error_reason = std::string("json parse failed: ") + e.what();
@@ -167,16 +160,12 @@ TransferManager::SessionStats TransferManager::get_session_stats() const {
 }
 TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
                                  boost::asio::thread_pool& pool, SendCallback send_cb,
-                                 size_t chunk_size, TransferManager::TransferConfig config)
-    : m_state_manager(sm), m_io_context(io_context), m_worker_pool(pool), m_send_callback(std::move(send_cb)),
-      CHUNK_DATA_SIZE(chunk_size), m_transfer_config(std::move(config)) {}
-
-// 不带 TransferConfig 的便捷构造：委托给主构造函数，使用默认配置。
-// 此处 TransferConfig{} 在函数体内求值，clang 不会触发"DMI 在外层类外部"诊断。
-TransferManager::TransferManager(StateManager* sm, boost::asio::io_context& io_context,
-                                 boost::asio::thread_pool& pool, SendCallback send_cb,
-                                 size_t chunk_size)
-    : TransferManager(sm, io_context, pool, std::move(send_cb), chunk_size, TransferConfig{}) {}
+                                 size_t chunk_size, TransferConfig config)
+    : CHUNK_DATA_SIZE(chunk_size), m_state_manager(sm), m_io_context(io_context),
+      m_worker_pool(pool), m_send_callback(std::move(send_cb)), m_transfer_config(std::move(config)) {
+    // 启动时从 DB 恢复未完成的下载任务
+    load_download_state();
+}
 
 void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::json& request_payload) {
     if (peer_id.empty()) return;
@@ -329,39 +318,36 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 ctx->file.seekg(static_cast<std::streampos>(ctx->current_chunk) * ctx->chunk_data_size, std::ios::beg);
             }
             // 使用 while 循环来处理非阻塞的情况，提高效率
-            while (ctx->current_chunk < ctx->total_chunks) {
+            // 将"读→压缩→组包→发送"提取为局部 lambda，缩小循环体
+            auto send_one_chunk = [&]() -> int {
                 // 读取数据
                 ctx->file.read(ctx->buffer.data(), ctx->chunk_data_size);
                 std::streamsize bytes_read = ctx->file.gcount();
 
                 // 压缩
-                // 优化：如果是 0 字节，Snappy 处理为空串，正常兼容
                 snappy::Compress(ctx->buffer.data(), bytes_read, &ctx->compressed_data);
 
-                // 组包
-                std::string packet_payload;
-                // 预估大小：PathLen(2) + Path(N) + ChunkIdx(4) + TotalChunks(4) + CompressedData(M)
-                static constexpr size_t CHUNK_HEADER_OVERHEAD = 2 + 4 + 4;  // PathLen + ChunkIdx + TotalChunks
-                packet_payload.reserve(CHUNK_HEADER_OVERHEAD + ctx->path.length() + ctx->compressed_data.length());
-
-                append_uint16(packet_payload, static_cast<uint16_t>(ctx->path.length()));
-                packet_payload.append(ctx->path);
-                append_uint32(packet_payload, ctx->current_chunk);
-                append_uint32(packet_payload, ctx->total_chunks);
-                packet_payload.append(ctx->compressed_data);
-
+                // 组包：MsgType(1) + PathLen(2) + Path + ChunkIdx(4) + TotalChunks(4) + CompressedData
                 std::string binary_packet;
-                binary_packet.reserve(1 + packet_payload.length());
+                static constexpr size_t CHUNK_HEADER_OVERHEAD = 1 + 2 + 4 + 4;  // MsgType + PathLen + ChunkIdx + TotalChunks
+                binary_packet.reserve(CHUNK_HEADER_OVERHEAD + ctx->path.length() + ctx->compressed_data.length());
                 binary_packet.push_back(MSG_TYPE_BINARY_CHUNK);
-                binary_packet.append(std::move(packet_payload));
+                append_uint16(binary_packet, static_cast<uint16_t>(ctx->path.length()));
+                binary_packet.append(ctx->path);
+                append_uint32(binary_packet, ctx->current_chunk);
+                append_uint32(binary_packet, ctx->total_chunks);
+                binary_packet.append(ctx->compressed_data);
 
-                // 加密已下沉到 PeerController (KCP 层)
-                // 这里直接发送明文数据包
-                int pending = self->m_send_callback(ctx->peer_id, binary_packet);
+                // 加密已下沉到 PeerController (KCP 层)，直接发送明文
+                return self->m_send_callback(ctx->peer_id, binary_packet);
+            };
+
+            while (ctx->current_chunk < ctx->total_chunks) {
+                int pending = send_one_chunk();
 
                 // 【断点续传】检测连接是否已断开
                 if (pending < 0) {
-                    g_logger->warn("[Transfer] 连接已断开，终止发送: {} (已发送 {}/{} 块)", 
+                    g_logger->warn("[Transfer] 连接已断开，终止发送: {} (已发送 {}/{} 块)",
                                   ctx->path, ctx->current_chunk, ctx->total_chunks);
                     ctx->file.close();
                     {
@@ -369,7 +355,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                     }
                     self->m_session_done++;
-                    return;  // 提前退出，避免 CPU 浪费
+                    return;
                 }
 
                 // 更新进度
@@ -385,12 +371,11 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
                 // --- 智能流控 ---
                 if (pending > ctx->CONGESTION_THRESHOLD) {
-                    // 【关键修复】在挂起等待前，主动关闭文件句柄！
+                    // 在挂起等待前，主动关闭文件句柄！
                     // 这确保了只有当前正在活跃读写的线程（通常只有几个）会占用句柄。
                     ctx->file.close();
 
                     // 增加等待时间，给 KCP 更多时间消耗发送队列
-                    // 新版本锁层次增加，需要更长的等待时间
                     int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * self->m_transfer_config.congestion_high_multiplier) ? self->m_transfer_config.congestion_wait_high_ms : self->m_transfer_config.congestion_wait_low_ms;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
                     ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
@@ -408,7 +393,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
             // --- 循环结束：清理与收尾 ---
             if (ctx->current_chunk >= ctx->total_chunks) {
                 ctx->file.close(); // 传输完成，关闭句柄
-                // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+                // StateManager 可能在 stop() 中被置空
                 if (!ctx->file_hash.empty() && self->m_state_manager) {
                     self->m_state_manager->record_file_sent(ctx->peer_id, ctx->path, ctx->file_hash);
                 }
@@ -426,7 +411,7 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
     });
 }
 // ═══════════════════════════════════════════════════════════════
-// C-2 超长函数拆分：handle_chunk 的子步骤
+// handle_chunk 的子步骤
 // ═══════════════════════════════════════════════════════════════
 
 TransferManager::ChunkHeader TransferManager::parse_chunk_payload(const std::string& payload) {
@@ -467,13 +452,13 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
 
     ChunkLookupResult result;
 
-    // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+    // StateManager 可能在 stop() 中被置空
     if (!m_state_manager) {
         g_logger->warn("[Transfer] StateManager 已释放，跳过接收: {}", file_path_str);
         return result;
     }
 
-    // 【安全】路径遍历攻击防护：验证网络传入的路径不会逃逸出同步根目录
+    // 路径遍历攻击防护：验证网络传入的路径不会逃逸出同步根目录
     if (!PathUtils::is_path_safe(m_state_manager->get_root_path(), file_path_str)) {
         g_logger->error("[Transfer] ⚠️ 路径安全检查失败，拒绝接收: {}", file_path_str);
         return result;  // result.recv_ptr 为 nullptr，上层会跳过
@@ -485,17 +470,27 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
     bool is_new_task = (it == m_receiving_files.end());
     result.need_open_stream = is_new_task;
 
+    // 统一构造路径，避免 if-else 分支重复
+    std::filesystem::path relative_path = Utf8ToPath(file_path_str);
+    result.full_path = m_state_manager->get_root_path() / relative_path;
+    result.temp_path = result.full_path;
+    result.temp_path += ".veritas_tmp";
+
+    // 两个分支对应两种接收场景：
+    //
+    // [新任务] first chunk 直接到达，m_receiving_files 无此文件记录。
+    //   → 创建完整的 ReceivingFile（bitmap/temp_path/total_chunks 全设置）
+    //
+    // [预注册] chunk 到达前，register_expected_metadata 已创建占位记录。
+    //   → else 分支补全占位记录的 temp_path/bitmap 等字段。
+    //     预注册的场景：全新下载、续传不适用（零进度/临时文件丢失/源文件已变）。
+    //     反之，断点续传（check_resume_eligibility 返回有效）不走预注册。
     if (is_new_task) {
         auto new_file = std::make_shared<ReceivingFile>();
 
-        std::filesystem::path relative_path = Utf8ToPath(file_path_str);
-        result.full_path = m_state_manager->get_root_path() / relative_path;
-        result.temp_path = result.full_path;
-        result.temp_path += ".veritas_tmp";
-
         new_file->temp_path = PathToUtf8(result.temp_path);
         new_file->total_chunks = total_chunks;
-        // 【修复】初始化 bitmap 用于去重
+        // 初始化 bitmap 用于去重
         new_file->received_bitmap.resize(total_chunks, false);
         new_file->peer_id = peer_id;
         new_file->busy = true;
@@ -513,10 +508,6 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
         }
 
         if (result.recv_ptr->temp_path.empty()) {
-            std::filesystem::path relative_path = Utf8ToPath(file_path_str);
-            result.full_path = m_state_manager->get_root_path() / relative_path;
-            result.temp_path = result.full_path;
-            result.temp_path += ".veritas_tmp";
             result.recv_ptr->temp_path = PathToUtf8(result.temp_path);
             result.need_open_stream = true;
             result.need_create_dirs = result.full_path.has_parent_path();
@@ -538,11 +529,15 @@ void TransferManager::finalize_received_file(
         m_session_done++;
         std::lock_guard<std::mutex> map_lock(m_transfer_mutex);
         m_receiving_files.erase(file_path_str);
+        // 同时清理 DB 中的持久化记录
+        if (m_state_manager && m_state_manager->get_db().is_valid()) {
+            m_state_manager->get_db().remove_download_task(file_path_str);
+        }
     });
 
     recv_ptr->file_stream.close();
 
-    // 【修复 Bug C】StateManager 可能在 stop() 中被置空
+    // StateManager 可能在 stop() 中被置空
     if (!m_state_manager) {
         g_logger->warn("[Transfer] StateManager 已释放，跳过文件完成处理: {}", file_path_str);
         return;
@@ -556,11 +551,27 @@ void TransferManager::finalize_received_file(
     std::filesystem::rename(temp_path_obj, final_path, ec);
 
     if (!ec) {
-        g_logger->info("[Transfer] ✅ 下载完成: {}", file_path_str);
+        // 计算本地哈希并与对端声称的 expected_hash 校验
+        // 原因：KCP 虽然有序传输，但不保证数据完整性；UDP 校验和不可靠。
+        // 必须本地校验哈希，否则损坏的数据会污染同步状态。
         if (!peer_id.empty() && m_state_manager) {
             std::string new_hash = Hashing::CalculateSHA256(final_path);
-            m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
-            m_state_manager->mark_file_received(file_path_str, new_hash);
+            bool hash_match = recv_ptr->expected_hash.empty() || new_hash == recv_ptr->expected_hash;
+
+            if (hash_match) {
+                g_logger->info("[Transfer] ✅ 下载完成: {} (hash 校验通过)", file_path_str);
+                m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
+                m_state_manager->mark_file_received(file_path_str, new_hash);
+            } else {
+                g_logger->error("[Transfer] ❌ 文件损坏: {} (本地 {}..., 期望 {}...)，已删除",
+                                file_path_str, new_hash.substr(0, 8),
+                                recv_ptr->expected_hash.substr(0, 8));
+                std::error_code rm_ec;
+                std::filesystem::remove(final_path, rm_ec);
+                // 不记录 sync_success，文件不在同步状态中
+            }
+        } else {
+            g_logger->info("[Transfer] ✅ 下载完成: {} (无校验)", file_path_str);
         }
     } else {
         g_logger->error("[Transfer] 重命名失败: {} -> {} | {}", recv_ptr->temp_path, PathToUtf8(final_path), ec.message());
@@ -571,7 +582,7 @@ void TransferManager::finalize_received_file(
 // ═══════════════════════════════════════════════════════════════
 
 void TransferManager::handle_chunk(std::string payload, const std::string& peer_id) {
-    // 【优化】payload 按值传入，直接 move 进 lambda，避免热路径上 ~16KB 的额外拷贝
+    // payload 按值传入，直接 move 进 lambda，避免热路径上 ~16KB 的额外拷贝
     boost::asio::post(m_worker_pool, [self = shared_from_this(), payload = std::move(payload), peer_id]() {
         std::shared_ptr<ReceivingFile> recv_ptr;  // 提到 try 外部，供 catch 块清理用
         try {
@@ -609,9 +620,9 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
                 if (hdr.chunk_index == 0) {
                     g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", hdr.file_path);
                     recv_ptr->received_chunks = 0;
-                    // 【修复】重置 bitmap
+                    // 重置 bitmap
                     std::fill(recv_ptr->received_bitmap.begin(), recv_ptr->received_bitmap.end(), false);
-                    // 【安全修复 C3】关闭并删除旧临时文件，防止新旧数据混合
+                    // 关闭并删除旧临时文件，防止新旧数据混合
                     if (recv_ptr->file_stream.is_open()) {
                         recv_ptr->file_stream.close();
                     }
@@ -659,7 +670,7 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
                 g_logger->debug("[Transfer] 打开文件流: {}", recv_ptr->temp_path);
             }
 
-            // 【修复】使用 bitmap 去重：如果这个 chunk 已经收过，跳过写入
+            // 使用 bitmap 去重：如果这个 chunk 已经收过，跳过写入
             // 确保 bitmap 大小足够
             if (recv_ptr->received_bitmap.size() <= hdr.chunk_index) {
                 recv_ptr->received_bitmap.resize(hdr.total_chunks, false);
@@ -686,25 +697,26 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
                 if (cleanup_ec) {
                     g_logger->warn("[Transfer] 清理临时文件失败: {} | {}", recv_ptr->temp_path, cleanup_ec.message());
                 }
-                // 【安全修复 H9】写失败也要递增 session_done，保持计数器一致
+                // 写失败也要递增 session_done，保持计数器一致
                 self->m_session_done++;
                 std::lock_guard<std::mutex> map_lock(self->m_transfer_mutex);
                 self->m_receiving_files.erase(hdr.file_path);
                 return;
             }
-            // 【修复】标记 bitmap 并递增计数器（仅新 chunk 时）
+            // 标记 bitmap 并递增计数器（仅新 chunk 时）
             recv_ptr->received_bitmap[hdr.chunk_index] = true;
             recv_ptr->received_chunks++;
 
             // 阶段 C: 检查完成 → 调用收尾方法
             if (recv_ptr->received_chunks >= recv_ptr->total_chunks) {
                 self->finalize_received_file(hdr.file_path, recv_ptr, peer_id);
+                recv_ptr->busy = false;  // 完成路径统一复位，与 else 分支对称
             } else {
                 recv_ptr->busy = false;
             }
         } catch (const std::exception& e) {
             g_logger->error("[Transfer] handle_chunk 异常: {}", e.what());
-            // 【修复】异常路径下必须重置 busy 标志并关闭文件流，
+            // 异常路径下必须重置 busy 标志并关闭文件流，
             // 否则该条目将永远为 busy，cleanup_stale_buffers 和
             // cancel_receives_for_peer 都会跳过它，导致永久僵尸和句柄泄漏
             if (recv_ptr) {
@@ -730,65 +742,44 @@ std::vector<TransferStatus> TransferManager::get_active_transfers() {
     std::vector<TransferStatus> list;
     auto now = std::chrono::steady_clock::now();
 
+    // 速度计算辅助 lambda，消除上传/下载的逻辑重复
+    auto update_speed = [&](auto current_chunks, auto& last_tick_chunks,
+                            auto& last_tick_time, auto& current_speed) {
+        std::chrono::duration<double> elapsed = now - last_tick_time;
+        if (elapsed.count() >= m_transfer_config.speed_update_interval_sec) {
+            current_speed = ((current_chunks - last_tick_chunks) * CHUNK_DATA_SIZE) / elapsed.count();
+            last_tick_chunks = current_chunks;
+            last_tick_time = now;
+        }
+    };
 
     // 1. 处理下载任务 (Receiving)
     for (auto& [path, recv_ptr] : m_receiving_files) {
         auto& recv = *recv_ptr;
-        // --- 速度计算逻辑 ---
-        std::chrono::duration<double> elapsed = now - recv.last_tick_time;
-        if (elapsed.count() >= m_transfer_config.speed_update_interval_sec) {  // 每 500ms 更新一次速度
-            uint32_t delta_chunks = recv.received_chunks - recv.last_tick_chunks;
-            recv.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
-            recv.last_tick_chunks = recv.received_chunks;
-            recv.last_tick_time = now;
-        }
+        update_speed(recv.received_chunks.load(), recv.last_tick_chunks,
+                     recv.last_tick_time, recv.current_speed);
 
-        // 【新增】检测是否停滞
         auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - recv.last_active).count();
         bool stalled = (time_since_active > m_transfer_config.stall_threshold_ms);
-
-        // 如果停滞，速度显示为 0，避免用户困惑
         double display_speed = stalled ? 0.0 : recv.current_speed;
+        float prog = (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks.load()) / recv.total_chunks * 100.0f) : 0.0f;
 
-        float prog =
-            (recv.total_chunks > 0) ? (static_cast<float>(recv.received_chunks) / recv.total_chunks * 100.0f) : 0.0f;
-
-        // 【修改】填入 stalled 状态
-        list.push_back({
-            path, recv.total_chunks, recv.received_chunks, prog,
-            false,  // is_upload
-            display_speed,
-            stalled  // stalled
-        });
+        list.push_back({path, recv.total_chunks, recv.received_chunks.load(), prog,
+                        false, display_speed, stalled});
     }
 
     // 2. 处理上传任务 (Sending)
     for (auto& [path, send] : m_sending_files) {
-        // --- 速度计算逻辑 ---
-        std::chrono::duration<double> elapsed = now - send.last_tick_time;
-        if (elapsed.count() >= m_transfer_config.speed_update_interval_sec) {
-            uint32_t delta_chunks = send.sent_chunks - send.last_tick_chunks;
-            send.current_speed = (delta_chunks * CHUNK_DATA_SIZE) / elapsed.count();
-            send.last_tick_chunks = send.sent_chunks;
-            send.last_tick_time = now;
-        }
+        update_speed(send.sent_chunks, send.last_tick_chunks,
+                     send.last_tick_time, send.current_speed);
 
-        // 【新增】检测是否停滞
         auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(now - send.last_active).count();
         bool stalled = (time_since_active > m_transfer_config.stall_threshold_ms);
-
         double display_speed = stalled ? 0.0 : send.current_speed;
+        float prog = (send.total_chunks > 0) ? (static_cast<float>(send.sent_chunks) / send.total_chunks * 100.0f) : 0.0f;
 
-        float prog =
-            (send.total_chunks > 0) ? (static_cast<float>(send.sent_chunks) / send.total_chunks * 100.0f) : 0.0f;
-
-        // 【修改】填入 stalled 状态
-        list.push_back({
-            path, send.total_chunks, send.sent_chunks, prog,
-            true,  // is_upload
-            display_speed,
-            stalled  // stalled
-        });
+        list.push_back({path, send.total_chunks, send.sent_chunks, prog,
+                        true, display_speed, stalled});
     }
 
     return list;
@@ -800,7 +791,7 @@ void TransferManager::cleanup_stale_buffers() {
 
     for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ++it) {
         auto& recv = *it->second;
-        // C-2: 如果条目正在被 handle_chunk 处理，跳过
+        // 如果条目正在被 handle_chunk 处理，跳过
         if (recv.busy) continue;
         
         // 接收超时：只关闭文件流，保留记录和临时文件以便续传
@@ -813,6 +804,9 @@ void TransferManager::cleanup_stale_buffers() {
             // 【断点续传】不删除记录和临时文件，由 cancel_receives_for_peer 或后续校验决定
         }
     }
+
+    // 周期性持久化：将当前下载任务状态写入 DB
+    persist_download_state();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -822,44 +816,57 @@ void TransferManager::cleanup_stale_buffers() {
 void TransferManager::cancel_receives_for_peer(const std::string& peer_id) {
     std::lock_guard<std::mutex> lock(m_transfer_mutex);
     
-    int cancelled_count = 0;
+    int cleaned_count = 0;
     for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ) {
         auto& recv = *it->second;
         if (recv.peer_id == peer_id) {
-            // C-2: 如果 handle_chunk 正在处理这个条目，跳过
-            // handle_chunk 会在完成后自行清理
+            // 如果 handle_chunk 正在处理这个条目，跳过
             if (recv.busy) {
                 g_logger->info("[Transfer] 任务 {} 正在处理中，跳过清理", it->first);
                 ++it;
                 continue;
             }
             
-            g_logger->info("[Transfer] 清理来自 {} 的未完成任务: {} ({}/{})", 
-                          peer_id, it->first, 
-                          recv.received_chunks, recv.total_chunks);
-            
-            // 关闭文件流
+            // 关闭文件流，释放系统句柄
             if (recv.file_stream.is_open()) {
                 recv.file_stream.close();
             }
             
-            // 删除临时文件
-            std::error_code ec;
-            std::filesystem::remove(recv.temp_path, ec);
-            if (ec) {
-                g_logger->warn("[Transfer] 删除临时文件失败: {} | {}", 
-                              recv.temp_path, FormatErrorCode(ec));
-            }
+            g_logger->info("[Transfer] 清理来自 {} 的任务: {} ({}/{} chunks)，保留记录等待续传",
+                          peer_id, it->first,
+                          recv.received_chunks.load(), recv.total_chunks);
             
-            it = m_receiving_files.erase(it);
-            cancelled_count++;
+            // 解除 peer 关联，标记为"无主"状态
+            // 保留临时文件和 DB 记录，便于后续续传
+            recv.peer_id.clear();
+            
+            ++it;
+            cleaned_count++;
         } else {
             ++it;
         }
     }
     
+    if (cleaned_count > 0) {
+        g_logger->info("[Transfer] 已清理 {} 的 {} 个任务（保留待续传）", peer_id, cleaned_count);
+    }
+}
+
+void TransferManager::cancel_sends_for_peer(const std::string& peer_id) {
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    std::string prefix = peer_id + '\0';
+    int cancelled_count = 0;
+    for (auto it = m_sending_files.begin(); it != m_sending_files.end(); ) {
+        if (it->first.substr(0, prefix.size()) == prefix) {
+            g_logger->info("[Transfer] 清理上传任务: {} (key={})", peer_id, it->first);
+            it = m_sending_files.erase(it);
+            cancelled_count++;
+        } else {
+            ++it;
+        }
+    }
     if (cancelled_count > 0) {
-        g_logger->info("[Transfer] 已清理 {} 的 {} 个未完成任务", peer_id, cancelled_count);
+        g_logger->info("[Transfer] 已清理 {} 的 {} 个上传任务", peer_id, cancelled_count);
     }
 }
 
@@ -932,7 +939,7 @@ std::optional<TransferManager::ResumeInfo> TransferManager::check_resume_eligibi
     }
     
     // 可以续传
-    // 【安全修复 C2】计算从 0 开始连续已收到的 chunk 数（而非总计数），
+    // 计算从 0 开始连续已收到的 chunk 数（而非总计数），
     // 避免乱序到达时 start_chunk 跳过空洞导致文件损坏
     uint32_t contiguous = 0;
     for (size_t i = 0; i < rf.received_bitmap.size(); ++i) {
@@ -942,7 +949,7 @@ std::optional<TransferManager::ResumeInfo> TransferManager::check_resume_eligibi
 
     g_logger->info("[Transfer] ✅ 可以续传: {} ({}/{} chunks contiguous, {}/{} total, {:.1f}%)",
                   path, contiguous, rf.total_chunks,
-                  rf.received_chunks, rf.total_chunks,
+                  rf.received_chunks.load(), rf.total_chunks,
                   rf.total_chunks > 0 ? (100.0 * contiguous / rf.total_chunks) : 0.0);
 
     return ResumeInfo{
@@ -982,6 +989,110 @@ void TransferManager::register_expected_metadata(
         m_receiving_files[path] = std::move(rf);
         g_logger->debug("[Transfer] 预注册接收任务: {} (hash={}..., size={})", 
                        path, hash.substr(0, 8), size);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 断点续传持久化
+// ═══════════════════════════════════════════════════════════════
+
+// vector<bool> → 字节数组（每 8 个 bit 打包为 1 个 byte）
+static std::vector<uint8_t> serialize_bitmap(const std::vector<bool>& bitmap) {
+    if (bitmap.empty()) return {};
+    size_t bytes = (bitmap.size() + 7) / 8;
+    std::vector<uint8_t> data(bytes, 0);
+    for (size_t i = 0; i < bitmap.size(); ++i) {
+        if (bitmap[i]) data[i / 8] |= static_cast<uint8_t>(1 << (i % 8));
+    }
+    return data;
+}
+
+// 字节数组 → vector<bool>
+static std::vector<bool> deserialize_bitmap(const std::vector<uint8_t>& data, size_t count) {
+    std::vector<bool> bitmap(count, false);
+    for (size_t i = 0; i < count; ++i) {
+        if (data[i / 8] & static_cast<uint8_t>(1 << (i % 8))) bitmap[i] = true;
+    }
+    return bitmap;
+}
+
+void TransferManager::persist_download_state() {
+    if (!m_state_manager) return;
+    auto& db = m_state_manager->get_db();
+    if (!db.is_valid()) return;
+
+    // 注意：调用者必须已持有 m_transfer_mutex（如 cleanup_stale_buffers），
+    // 否则需在调用处自行加锁
+    if (m_receiving_files.empty()) return;
+
+    auto now_ts = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // 事务批量写入，减少 SQLite I/O
+    Database::TransactionGuard txn(db);
+    for (const auto& [path, recv_ptr] : m_receiving_files) {
+        auto& recv = *recv_ptr;
+        DownloadTaskRecord task;
+        task.path = path;
+        task.peer_id = recv.peer_id;
+        task.total_chunks = recv.total_chunks;
+        task.bitmap_data = serialize_bitmap(recv.received_bitmap);
+        task.expected_hash = recv.expected_hash;
+        task.expected_size = recv.expected_size;
+        task.temp_path = recv.temp_path;
+        task.last_active = now_ts;
+        db.save_download_task(task);
+    }
+    txn.commit();
+}
+
+void TransferManager::load_download_state() {
+    if (!m_state_manager) return;
+    auto& db = m_state_manager->get_db();
+    if (!db.is_valid()) return;
+
+    auto tasks = db.load_all_download_tasks();
+    if (tasks.empty()) return;
+
+    std::lock_guard<std::mutex> lock(m_transfer_mutex);
+    int restored = 0;
+    for (auto& task : tasks) {
+        // 校验临时文件是否还在
+        if (!std::filesystem::exists(task.temp_path)) {
+            g_logger->warn("[Transfer] 断点续传: 临时文件已丢失，跳过: {} ({})", task.path, task.temp_path);
+            db.remove_download_task(task.path);
+            continue;
+        }
+
+        // 重建 ReceivingFile
+        auto rf = std::make_shared<ReceivingFile>();
+        rf->received_bitmap = deserialize_bitmap(task.bitmap_data, task.total_chunks);
+        rf->total_chunks = task.total_chunks;
+
+        // 从 bitmap 恢复 received_chunks 计数
+        uint32_t count = 0;
+        for (bool b : rf->received_bitmap) {
+            if (b) count++;
+        }
+        rf->received_chunks = count;
+
+        rf->temp_path = task.temp_path;
+        rf->peer_id = task.peer_id;
+        rf->expected_hash = task.expected_hash;
+        rf->expected_size = task.expected_size;
+        rf->last_active = std::chrono::steady_clock::now();
+        rf->last_tick_chunks = count;       // 避免恢复后首次速度计算异常
+        rf->last_tick_time = std::chrono::steady_clock::now();
+
+        m_receiving_files[task.path] = std::move(rf);
+        m_session_total++;
+        restored++;
+        g_logger->info("[Transfer] 断点续传: 已恢复下载任务: {} ({}/{})",
+                       task.path, count, task.total_chunks);
+    }
+
+    if (restored > 0) {
+        g_logger->info("[Transfer] 断点续传: 共恢复 {} 个下载任务", restored);
     }
 }
 

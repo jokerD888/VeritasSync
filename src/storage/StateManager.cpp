@@ -42,9 +42,6 @@ namespace VeritasSync {
             // 3. 忽略下载临时文件
             if (filename.find(".veritas_tmp") != std::string::npos) return;
 
-            // 4. (可选) 忽略常见的系统垃圾文件，减少噪音
-            if (filename == ".DS_Store" || filename == "Thumbs.db") return;
-
             // 目录路径只转换一次，避免同一回调内重复 Utf8ToPath(dir)
             const std::filesystem::path dir_path = Utf8ToPath(dir);
 
@@ -87,24 +84,15 @@ namespace VeritasSync {
 
     // --- StateManager 实现 ---
 
-    // 不带 SyncConfig 的便捷构造：委托给主构造函数，使用默认配置。
-    // 此处 SyncConfig{} 在函数体内（mem-initializer 链路）求值，clang 不会触发
-    // "DMI 在外层类外部"诊断。
     StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
                                StateManagerCallbacks callbacks, bool enable_watcher,
-                               const std::string& sync_key)
-        : StateManager(root_path, io_context, std::move(callbacks), enable_watcher,
-                       sync_key, SyncConfig{}) {}
-
-    StateManager::StateManager(const std::string& root_path, boost::asio::io_context& io_context,
-                               StateManagerCallbacks callbacks, bool enable_watcher,
-                               const std::string& sync_key, StateManager::SyncConfig sync_config)
-        : m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
+                               const std::string& sync_key, SyncConfig sync_config)
+        : m_sync_key(sync_key),
+          m_root_path(std::filesystem::absolute(Utf8ToPath(root_path))),
           m_io_context(io_context),
           m_callbacks(std::move(callbacks)),
-          m_sync_key(sync_key),
           m_sync_config(std::move(sync_config)),
-          // B-06: 重试计时器与 watcher 解耦，Destination+OneWay 也可用
+          // 重试计时器与 watcher 解耦，Destination+OneWay 也可用
           m_retry_timer(std::make_unique<boost::asio::steady_timer>(m_io_context)) {
         if (!std::filesystem::exists(m_root_path)) {
             g_logger->info("[StateManager] 根目录 {} 不存在，正在创建。", PathToUtf8(m_root_path));
@@ -118,21 +106,16 @@ namespace VeritasSync {
         // --- 初始化数据库 ---
         // 数据库文件放在同步根目录下的隐藏文件中，例如 .veritas.db
         // 这样随目录移动，且不污染用户文件（已被默认 FileFilter 忽略）
-        try {
-            std::filesystem::path db_path = m_root_path / ".veritas.db";
-            m_db = std::make_unique<Database>(db_path);
-            // 【修复】检查数据库是否成功初始化
-            if (!m_db->is_valid()) {
-                g_logger->error("[StateManager] 数据库初始化失败，将不使用数据库缓存");
-                m_db.reset();  // 释放无效的数据库对象
-            } else {
-                m_file_store = std::make_unique<CachedFileStore>(*m_db);
-                m_file_store->load_cache();
-                g_logger->info("[{}] [StateManager] 元数据缓存加载完成, cached {} files", m_sync_key, m_file_store->cache_size());
-            }
-        } catch (const std::exception& e) {
-            g_logger->error("[StateManager] 数据库初始化失败: {}", e.what());
+        // 若数据库初始化失败，直接抛出异常，让调用者知晓系统不可用。
+        std::filesystem::path db_path = m_root_path / ".veritas.db";
+        m_db = std::make_unique<Database>(db_path);
+        if (!m_db->is_valid()) {
+            g_logger->error("[StateManager] 数据库初始化失败，无法继续");
+            throw std::runtime_error("StateManager: 数据库初始化失败 " + PathToUtf8(db_path));
         }
+        m_file_store = std::make_unique<CachedFileStore>(*m_db);
+        m_file_store->load_cache();
+        g_logger->info("[{}] [StateManager] 元数据缓存加载完成, cached {} files", m_sync_key, m_file_store->cache_size());
         // -------------------------
 
         if (enable_watcher) {
@@ -163,19 +146,18 @@ namespace VeritasSync {
             m_retry_timer->cancel();
         }
 
-        // 3. 等待 Phase 1 工作线程完成（jthread 析构自动 join）
+        // 3. 等待 scan_and_hash_changes 工作线程完成（jthread 析构自动 join）
         //    必须在 file_watcher 停止之后，确保不会有新的 process_debounced_changes 调用
         {
-            std::lock_guard<std::mutex> lock(m_phase1_mutex);
-            if (m_phase1_thread.joinable()) {
-                m_phase1_thread.request_stop();
+            std::lock_guard<std::mutex> lock(m_scan_mutex);
+            if (m_scan_thread.joinable()) {
+                m_scan_thread.request_stop();
             }
         }
-        // m_phase1_thread 析构时自动 join
+        // m_scan_thread 析构时自动 join
     }
     std::string StateManager::get_base_hash(const std::string& peer_id, const std::string& path) {
         if (!m_db) return "";
-        // 复用上一阶段实现的 get_last_sent_hash，逻辑是一样的：查询 sync_history 表
         return m_db->get_last_sent_hash(peer_id, path);
     }
 
@@ -263,7 +245,7 @@ namespace VeritasSync {
     // 仅在更新内存映射时短暂持锁，避免秒级阻塞其他线程。
     void StateManager::process_debounced_changes() {
         // ═══════════════════════════════════════════════════════════
-        // 将 Phase 1（SHA256 哈希计算）移到独立线程，
+        // 将 scan_and_hash_changes（SHA256 哈希计算）移到独立线程，
         // 避免长时间阻塞 io_context 导致 KCP update 无法执行，
         // 进而引发 ACK 延迟 → RTO 指数退避 → KCP 拥塞崩溃。
         // ═══════════════════════════════════════════════════════════
@@ -277,7 +259,7 @@ namespace VeritasSync {
 
         if (changes_to_process.empty()) return;
 
-        // --- 按需重载忽略规则（必须在 Phase 1 之前完成）---
+        // --- 按需重载忽略规则（必须在 scan_and_hash_changes 之前完成）---
         bool need_reload_filter = false;
         for (const auto& full_path_str : changes_to_process) {
             if (full_path_str.find(".veritasignore") != std::string::npos) {
@@ -290,28 +272,29 @@ namespace VeritasSync {
             m_file_filter.load_rules(m_root_path);
         }
 
-        // Step 2: 将 Phase 1（I/O + 哈希）移到独立线程执行，
-        // 完成后 post 回 io_context 执行 Phase 2 + Phase 3。
+        // Step 2: 将 scan_and_hash_changes（I/O + 哈希）移到独立线程执行，
+        // 完成后 post 回 io_context 执行 commit_changes。
         // 使用 jthread：析构时自动 join，避免 detached thread 悬垂风险。
         {
-            std::lock_guard<std::mutex> lock(m_phase1_mutex);
-            if (m_phase1_thread.joinable()) {
-                m_phase1_thread.join();  // 等待上一轮 Phase 1 完成
+            std::lock_guard<std::mutex> lock(m_scan_mutex);
+            if (m_scan_thread.joinable()) {
+                m_scan_thread.join();  // 等待上一轮 scan_and_hash_changes 完成
             }
-            m_phase1_thread = std::jthread([this, changes_to_process = std::move(changes_to_process)]() {
-                process_changes_phase1(changes_to_process);
+            m_scan_thread = std::jthread([this, changes_to_process = std::move(changes_to_process)](std::stop_token st) {
+                scan_and_hash_changes(changes_to_process, std::move(st));
             });
         }
     }
 
-    // ─── Phase 1: I/O 密集操作（在独立线程上执行，不阻塞 io_context）───
+    // ─── scan_and_hash_changes: I/O 密集操作（在独立线程上执行，不阻塞 io_context）───
 
-    void StateManager::process_changes_phase1(
-        const std::unordered_set<std::string>& changes_to_process) {
+    void StateManager::scan_and_hash_changes(
+        const std::unordered_set<std::string>& changes_to_process,
+        std::stop_token st) {
 
-        auto file_update_results = std::make_shared<std::vector<Phase1FileResult>>();
-        auto delete_check_results = std::make_shared<std::vector<Phase1DeleteResult>>();
-        auto dir_create_results = std::make_shared<std::vector<Phase1DirResult>>();
+        auto file_update_results = std::make_shared<std::vector<ScanResult>>();
+        auto delete_check_results = std::make_shared<std::vector<DeleteCheckResult>>();
+        auto dir_create_results = std::make_shared<std::vector<DirResult>>();
         auto failed_changes = std::make_shared<std::unordered_set<std::string>>();
 
         // 第一遍：收集文件元数据，区分需要哈希和不需要哈希的文件
@@ -322,6 +305,10 @@ namespace VeritasSync {
         std::vector<PendingHash> files_needing_hash;
 
         for (const auto& full_path_str : changes_to_process) {
+            if (st.stop_requested()) {
+                g_logger->info("[{}] [StateManager] 收到停止请求，终止变更扫描", m_sync_key);
+                return;
+            }
             try {
                 std::filesystem::path full_path = Utf8ToPath(full_path_str);
 
@@ -334,8 +321,7 @@ namespace VeritasSync {
                     continue;
                 }
 
-                const std::u8string u8_path_str = relative_path.generic_u8string();
-                std::string rel_path_str(reinterpret_cast<const char*>(u8_path_str.c_str()), u8_path_str.length());
+                std::string rel_path_str = PathToGenericUtf8(relative_path);
 
                 if (m_file_filter.should_ignore(rel_path_str)) {
                     g_logger->debug("[{}] [Watcher] 忽略变更: {}", m_sync_key, rel_path_str);
@@ -373,7 +359,8 @@ namespace VeritasSync {
                         if (ec) {
                             info.size = 0;
                         }
-
+                        // 为什么需要 idx？ 因为 files_needing_hash 和 file_update_results 是两个独立的向量，且哈希在并行线程池中执行，
+                        // 需要一种方式把计算结果映射回原条目。用 pending_result_index 而不是重复存储所有信息，避免了数据冗余。
                         size_t idx = file_update_results->size();
                         file_update_results->push_back({std::move(info), false});
 
@@ -385,12 +372,18 @@ namespace VeritasSync {
                         dir_create_results->push_back({std::move(rel_path_str)});
                     }
                 } else {
-                    delete_check_results->push_back({std::move(rel_path_str), Phase1DeleteResult::Unknown});
+                    delete_check_results->push_back({std::move(rel_path_str), DeleteCheckResult::Unknown});
                 }
             } catch (const std::exception& e) {
                 g_logger->error("[{}] [StateManager] 处理变更异常: {} ({}) - 将重试", m_sync_key, full_path_str, e.what());
                 failed_changes->insert(full_path_str);
             }
+        }
+
+        // 哈希阶段之前再次检查停止信号
+        if (st.stop_requested()) {
+            g_logger->info("[{}] [StateManager] 哈希阶段前收到停止请求，丢弃已收集的变更", m_sync_key);
+            return;
         }
 
         // 并行计算 SHA256 哈希（与 scan_directory 相同的模式）
@@ -424,18 +417,25 @@ namespace VeritasSync {
             // 移除哈希失败的条目
             file_update_results->erase(
                 std::remove_if(file_update_results->begin(), file_update_results->end(),
-                    [](const Phase1FileResult& r) { return r.info.hash.empty(); }),
+                    [](const ScanResult& r) { return r.info.hash.empty(); }),
                 file_update_results->end());
         }
 
-        // Step 3: post 回 io_context 执行 Phase 2 + Phase 3（毫秒级）
+        // 回传前检查停止信号（如果已停止，变更会被静默丢弃，但 DB 未被污染所以无副作用）
+        if (st.stop_requested()) {
+            g_logger->info("[{}] [StateManager] 提交阶段前收到停止请求，丢弃本次变更", m_sync_key);
+            return;
+        }
+
+        // Step 3: post 回 io_context 执行 commit_changes（毫秒级）
+        // 使用 init capture 转移 shared_ptr 所有权，避免原子引用计数增减
         boost::asio::post(m_io_context,
             [this,
-             file_update_results,
-             delete_check_results,
-             dir_create_results,
-             failed_changes]() {
-                process_changes_phase2_and_3(
+             file_update_results = std::move(file_update_results),
+             delete_check_results = std::move(delete_check_results),
+             dir_create_results = std::move(dir_create_results),
+             failed_changes = std::move(failed_changes)]() {
+                commit_changes(
                     *file_update_results,
                     *delete_check_results,
                     *dir_create_results,
@@ -443,16 +443,16 @@ namespace VeritasSync {
             });
     }
 
-    // ─── Phase 2 + 3: 内存更新 + DB 持久化 + 广播（在 io_context 上执行）───
+    // ─── commit_changes: 内存更新 + DB 持久化 + 回调（在 io_context 上执行）───
 
-    void StateManager::process_changes_phase2_and_3(
-        std::vector<Phase1FileResult>& file_update_results,
-        std::vector<Phase1DeleteResult>& delete_check_results,
-        const std::vector<Phase1DirResult>& dir_create_results,
+    void StateManager::commit_changes(
+        std::vector<ScanResult>& file_update_results,
+        std::vector<DeleteCheckResult>& delete_check_results,
+        const std::vector<DirResult>& dir_create_results,
         const std::unordered_set<std::string>& failed_changes) {
 
         // ═══════════════════════════════════════════════════════════
-        // Phase 2（短锁）：批量更新内存映射（m_file_map / m_dir_map）
+        // 步骤1（短锁）：批量更新内存映射（m_file_map / m_dir_map）
         // ═══════════════════════════════════════════════════════════
 
         std::vector<FileInfo> file_updates;
@@ -486,11 +486,11 @@ namespace VeritasSync {
 
             for (auto& result : delete_check_results) {
                 if (m_file_map.erase(result.rel_path) > 0) {
-                    result.type = Phase1DeleteResult::FileDelete;
+                    result.type = DeleteCheckResult::FileDelete;
                     file_deletes.push_back(result.rel_path);
                     g_logger->debug("[{}] [StateManager] 收集文件删除: {}", m_sync_key, result.rel_path);
                 } else if (m_dir_map.erase(result.rel_path) > 0) {
-                    result.type = Phase1DeleteResult::DirDelete;
+                    result.type = DeleteCheckResult::DirDelete;
                     dir_deletes.push_back(result.rel_path);
                     g_logger->debug("[{}] [StateManager] 收集目录删除: {}", m_sync_key, result.rel_path);
                 }
@@ -498,7 +498,7 @@ namespace VeritasSync {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Phase 3（无锁）：数据库持久化 + 触发回调
+        // 步骤2（无锁）：数据库持久化 + 触发回调
         // ═══════════════════════════════════════════════════════════
 
         if (m_file_store) {
@@ -515,7 +515,7 @@ namespace VeritasSync {
 
             if (db_ok) {
                 for (const auto& result : delete_check_results) {
-                    if (result.type == Phase1DeleteResult::FileDelete) {
+                    if (result.type == DeleteCheckResult::FileDelete) {
                         if (!m_file_store->remove(result.rel_path)) {
                             g_logger->error("[{}] [StateManager] 持久化文件删除失败: {}", m_sync_key, result.rel_path);
                             db_ok = false;
@@ -526,7 +526,9 @@ namespace VeritasSync {
             }
 
             if (db_ok) {
-                trans_guard.commit();
+                if (!trans_guard.commit()) {
+                    g_logger->error("[{}] [StateManager] commit_changes 事务提交失败", m_sync_key);
+                }
             }
         }
 
@@ -583,7 +585,9 @@ namespace VeritasSync {
             auto txn = m_file_store->begin_transaction();
             m_file_store->remove(relative_path);
             m_db->remove_sync_history(relative_path);  // 移除"僵尸"同步历史！
-            txn.commit();
+            if (!txn.commit()) {
+                g_logger->error("[{}] [StateManager] remove_path_from_map 事务提交失败", m_sync_key);
+            }
         }
     }
 
@@ -643,8 +647,7 @@ namespace VeritasSync {
 
                 // 3. 路径标准化
                 // generic_u8string() 确保在 Windows 上也使用 '/'，实现跨平台一致性
-                std::u8string u8_rel_path = relative_path.generic_u8string();
-                std::string rel_path_str(reinterpret_cast<const char*>(u8_rel_path.c_str()), u8_rel_path.length());
+                std::string rel_path_str = PathToGenericUtf8(relative_path);
                 
                 if (rel_path_str.empty()) continue;
                 
@@ -838,7 +841,9 @@ namespace VeritasSync {
                     }
                 }
                 if (window_ok) {
-                    window_guard.commit();
+                    if (!window_guard.commit()) {
+                        g_logger->error("[StateManager] scan_directory 批量写入事务提交失败");
+                    }
                 }
             }
         }
@@ -869,7 +874,9 @@ namespace VeritasSync {
                     }
                 }
                 if (cleanup_ok) {
-                    cleanup_guard.commit();
+                    if (!cleanup_guard.commit()) {
+                        g_logger->error("[StateManager] scan_directory 清理僵尸记录事务提交失败");
+                    }
                 }
             }
         }
@@ -931,7 +938,7 @@ namespace VeritasSync {
         }
         g_logger->info("-----------------------------");
     }
-
+    
     bool StateManager::should_ignore_echo(const std::string& peer_id, const std::string& path,
                                           const std::string& remote_hash) {
         if (!m_db) return false;
@@ -940,6 +947,8 @@ namespace VeritasSync {
 
         // 如果不为空，且等于对方现在声称的 Hash -> 这是回声
         if (!last_sent.empty() && last_sent == remote_hash) {
+            g_logger->debug("[{}] [Echo] 对端回声被 should_ignore_echo 拦截: peer={}, path={}, hash={}...",
+                            m_sync_key, peer_id, path, remote_hash.substr(0, 8));
             return true;
         }
         return false;
