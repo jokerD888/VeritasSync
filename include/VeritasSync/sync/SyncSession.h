@@ -35,8 +35,8 @@ public:
     using SendToPeerFunc = std::function<void(const std::string& msg, PeerController* peer)>;
     
     /**
-     * @brief 通过 peer_id 安全查找 peer 并执行操作的回调
-     * 在 peers 锁内查找 peer，若连接有效则执行 action
+     * @brief 通过 peer_id 安全查找已连接的 peer 并执行操作的回调
+     * 查找 peer_id 对应的控制器，确认已连接后才执行 action，否则跳过
      */
     using WithPeerFunc = std::function<void(const std::string& peer_id,
                                             std::function<void(PeerController*)> action)>;

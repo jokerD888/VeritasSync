@@ -145,14 +145,14 @@ void P2PManager::set_mode(SyncMode mode) {
 
 void P2PManager::create_transfer_manager() {
     auto send_cb = [weak_self = weak_from_this()](const std::string& peer_id,
-                                                  const std::string& encrypted_data) -> int {
+                                                  const std::string& data) -> int {
         auto self = weak_self.lock();
         if (!self) return 0;
 
         auto controller = self->m_peer_registry.find(peer_id);
 
         if (controller && controller->is_connected() && controller->is_valid()) {
-            return controller->send_message(encrypted_data);
+            return controller->send_message(data);
         }
         return -1;
     };
@@ -162,6 +162,8 @@ void P2PManager::create_transfer_manager() {
 void P2PManager::create_sync_components() {
     auto weak_self = weak_from_this();
 
+    // 安全访问已连接的 PeerController：查找 peer_id 对应的控制器，
+    // 确认已连接后执行 action，否则跳过。避免调用方直接持有可能失效的指针。
     auto with_peer_cb = [weak_self](const std::string& peer_id, std::function<void(PeerController*)> action) {
         auto self = weak_self.lock();
         if (!self) return;

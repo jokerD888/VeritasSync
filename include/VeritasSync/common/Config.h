@@ -58,7 +58,6 @@ struct Config {
     struct Transfer {
         size_t chunk_size = 16384;
         int stall_threshold_ms = 5000;
-        int zombie_threshold_seconds = 60;
         int receive_timeout_minutes = 10;
         int congestion_wait_high_ms = 200;
         int congestion_wait_low_ms = 100;
@@ -242,7 +241,6 @@ inline nlohmann::json advanced_to_json(const Config& c) {
         {"transfer", {
             {"chunk_size", c.transfer.chunk_size},
             {"stall_threshold_ms", c.transfer.stall_threshold_ms},
-            {"zombie_threshold_seconds", c.transfer.zombie_threshold_seconds},
             {"receive_timeout_minutes", c.transfer.receive_timeout_minutes},
             {"congestion_wait_high_ms", c.transfer.congestion_wait_high_ms},
             {"congestion_wait_low_ms", c.transfer.congestion_wait_low_ms},
@@ -315,7 +313,6 @@ inline void advanced_from_json(const nlohmann::json& j, Config& c) {
         const auto& t = j["transfer"];
         LOAD_OPT(t, "chunk_size", c.transfer.chunk_size);
         LOAD_OPT(t, "stall_threshold_ms", c.transfer.stall_threshold_ms);
-        LOAD_OPT(t, "zombie_threshold_seconds", c.transfer.zombie_threshold_seconds);
         LOAD_OPT(t, "receive_timeout_minutes", c.transfer.receive_timeout_minutes);
         LOAD_OPT(t, "congestion_wait_high_ms", c.transfer.congestion_wait_high_ms);
         LOAD_OPT(t, "congestion_wait_low_ms", c.transfer.congestion_wait_low_ms);

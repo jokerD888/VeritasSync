@@ -31,16 +31,16 @@ struct TransferStatus {
     bool is_stalled = false;
 };
 
-// 定义发送回调：(目标PeerID, 加密后的数据)
+// 定义发送回调：(目标PeerID, 待发送数据)
+// 加密已下沉到 PeerController (KCP 层)，此回调传递明文
 // TransferManager 在 Worker 线程完成处理后，会调用此回调
-using SendCallback = std::function<int(const std::string& peer_id, const std::string& encrypted_data)>;
+using SendCallback = std::function<int(const std::string& peer_id, const std::string& data)>;
 
 /// 从 Config::Transfer 注入的运行时参数
 struct TransferConfig {
     int file_open_max_retries       = 5;
     int file_open_retry_delay_ms    = 200;
     int stall_threshold_ms          = 5000;
-    int zombie_threshold_seconds    = 60;
     int receive_timeout_minutes     = 10;
     int congestion_wait_high_ms     = 200;
     int congestion_wait_low_ms      = 100;

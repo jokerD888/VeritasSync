@@ -505,6 +505,25 @@ TransferManager::ChunkLookupResult TransferManager::lookup_or_create_receiving(
         result.recv_ptr->peer_id = peer_id;
         if (result.recv_ptr->total_chunks == 0) {
             result.recv_ptr->total_chunks = total_chunks;
+            // 同步初始化 bitmap，避免延迟 resize 的竞态窗口
+            result.recv_ptr->received_bitmap.resize(total_chunks, false);
+        } else if (result.recv_ptr->total_chunks != total_chunks) {
+            // total_chunks 不一致说明源文件变化或协议异常，重置接收状态
+            g_logger->warn("[Transfer] ⚠️ total_chunks 不一致 (记录={}, 新={})，重置接收: {}",
+                          result.recv_ptr->total_chunks, total_chunks, file_path_str);
+            if (result.recv_ptr->file_stream.is_open()) {
+                result.recv_ptr->file_stream.close();
+            }
+            if (!result.recv_ptr->temp_path.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(Utf8ToPath(result.recv_ptr->temp_path), ec);
+            }
+            result.recv_ptr->total_chunks = total_chunks;
+            result.recv_ptr->received_chunks = 0;
+            result.recv_ptr->received_bitmap.assign(total_chunks, false);
+            result.recv_ptr->temp_path = PathToUtf8(result.temp_path);
+            result.need_open_stream = true;
+            result.need_create_dirs = result.full_path.has_parent_path();
         }
 
         if (result.recv_ptr->temp_path.empty()) {
@@ -556,9 +575,13 @@ void TransferManager::finalize_received_file(
         // 必须本地校验哈希，否则损坏的数据会污染同步状态。
         if (!peer_id.empty() && m_state_manager) {
             std::string new_hash = Hashing::CalculateSHA256(final_path);
-            bool hash_match = recv_ptr->expected_hash.empty() || new_hash == recv_ptr->expected_hash;
 
-            if (hash_match) {
+            if (recv_ptr->expected_hash.empty()) {
+                // 未经预注册流程就收到了完整文件——说明对端绕过了握手协议
+                g_logger->error("[Transfer] ❌ 文件完成但无预期哈希（未经预注册），无法校验完整性: {}", file_path_str);
+                m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
+                m_state_manager->mark_file_received(file_path_str, new_hash);
+            } else if (new_hash == recv_ptr->expected_hash) {
                 g_logger->info("[Transfer] ✅ 下载完成: {} (hash 校验通过)", file_path_str);
                 m_state_manager->record_sync_success(peer_id, file_path_str, new_hash);
                 m_state_manager->mark_file_received(file_path_str, new_hash);
@@ -609,29 +632,6 @@ void TransferManager::handle_chunk(std::string payload, const std::string& peer_
 
 
             auto now = std::chrono::steady_clock::now();
-
-            // 僵尸复活检测
-            // 【性能修复】从未收到过任何 chunk 的文件（received_chunks==0）不参与僵尸检测。
-            // 原因：大批量预注册时，后面的文件从"预注册"到"收到第一个chunk"可能远超阈值，
-            // 但这只是排队等待，不是"僵尸复活"。真正的僵尸是：之前已收到过数据、然后长期中断。
-            bool has_ever_received = (recv_ptr->received_chunks > 0);
-            auto duration_sec = std::chrono::duration_cast<std::chrono::seconds>(now - recv_ptr->last_active).count();
-            if (has_ever_received && duration_sec > self->m_transfer_config.zombie_threshold_seconds) {
-                if (hdr.chunk_index == 0) {
-                    g_logger->warn("[Transfer] 检测到僵尸任务复活 (重启): {}, 重置进度。", hdr.file_path);
-                    recv_ptr->received_chunks = 0;
-                    // 重置 bitmap
-                    std::fill(recv_ptr->received_bitmap.begin(), recv_ptr->received_bitmap.end(), false);
-                    // 关闭并删除旧临时文件，防止新旧数据混合
-                    if (recv_ptr->file_stream.is_open()) {
-                        recv_ptr->file_stream.close();
-                    }
-                    std::error_code zombie_ec;
-                    std::filesystem::remove(Utf8ToPath(recv_ptr->temp_path), zombie_ec);
-                } else {
-                    g_logger->info("[Transfer] 检测到僵尸任务恢复 (断网重连): {}", hdr.file_path);
-                }
-            }
             recv_ptr->last_active = now;
 
             // 创建目录
@@ -972,12 +972,18 @@ void TransferManager::register_expected_metadata(
     
     auto it = m_receiving_files.find(path);
     if (it != m_receiving_files.end()) {
-        // 更新已有记录的元数据
         auto& rf = *it->second;
+        // 如果文件已有活跃进度，拒绝覆盖元数据，防止校验信息被偷换
+        if (rf.received_chunks > 0) {
+            g_logger->warn("[Transfer] 拒绝覆盖活跃任务的元数据: {} (已收 {} chunks, 现有hash={}...)",
+                          path, rf.received_chunks.load(),
+                          rf.expected_hash.empty() ? "空" : rf.expected_hash.substr(0, 8));
+            return;
+        }
         rf.peer_id = peer_id;
         rf.expected_hash = hash;
         rf.expected_size = size;
-        g_logger->debug("[Transfer] 更新接收任务元数据: {} (hash={}..., size={})", 
+        g_logger->debug("[Transfer] 更新接收任务元数据: {} (hash={}..., size={})",
                        path, hash.substr(0, 8), size);
     } else {
         // 创建新的占位记录（actual file_stream 和 temp_path 在 handle_chunk 时填充）

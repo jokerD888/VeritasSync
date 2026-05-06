@@ -49,10 +49,10 @@ public:
     using SendToPeerSafeFunc = std::function<void(const std::string& msg, const std::string& peer_id)>;
 
     /**
-     * @brief 查找 peer 并执行操作的回调
-     * 在 io_context 线程中执行，持有 peers 读锁
+     * @brief 查找已连接的 peer 并执行操作的回调
+     * 通过 peer_id 查找控制器，确认已连接后才执行 action，否则跳过
      * @param peer_id 目标 peer ID  
-     * @param action 对找到的 PeerController 执行的操作
+     * @param action 对找到的已连接 PeerController 执行的操作
      */
     using WithPeerFunc = std::function<void(const std::string& peer_id,
                                             std::function<void(PeerController*)> action)>;
