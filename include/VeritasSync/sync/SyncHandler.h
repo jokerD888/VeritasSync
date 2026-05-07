@@ -72,8 +72,6 @@ public:
 
     // --- 消息处理器 ---
     void handle_share_state(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_update(const nlohmann::json& payload, PeerController* from_peer);
-    void handle_file_delete(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_create(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_delete(const nlohmann::json& payload, PeerController* from_peer);
 

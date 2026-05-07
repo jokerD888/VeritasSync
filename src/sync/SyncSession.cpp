@@ -10,7 +10,6 @@
 
 namespace VeritasSync {
 
-// E-1: 魔数统一为命名常量（保留为默认值参考，实际运行时使用成员变量）
 // SYNC_TIMEOUT_SECONDS 已统一定义在 Protocol.h (Protocol::SYNC_TIMEOUT_SECONDS)
 // FLOW_CONTROL_THRESHOLD 和 FLOW_CONTROL_SLEEP_MS 现在通过构造函数注入
 
@@ -74,7 +73,7 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         g_logger->info("[Sync] 收到同步开始: session={}, files={}, dirs={}",
                        session_id, file_count, dir_count);
 
-        // 【冲突仲裁】双向 flood sync 时，两端的 sync_begin 会互相覆盖 session_id。
+        // 双向 flood sync 时，两端的 sync_begin 会互相覆盖 session_id。
         // 解决方案：offer_side（self_id < peer_id）优先执行，answer_side 让步。
         // 让步方直接清除自己的 session_id，接受对方的 sync_begin，不做延迟重试。
         uint64_t my_session = from_peer->get_sync_session_id();
@@ -92,7 +91,7 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         from_peer->reset_received_file_count();
         from_peer->reset_received_dir_count();
         
-        // A-6: 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
+        // 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
         std::string peer_id = from_peer->get_peer_id();
         from_peer->start_sync_timeout(m_sync_timeout_seconds,
             [this, peer_id, session_id](const boost::system::error_code& ec) {
@@ -129,7 +128,7 @@ void SyncSession::handle_sync_ack(const nlohmann::json& payload, PeerController*
         size_t received_files = payload.at("received_files").get<size_t>();
         size_t received_dirs = payload.at("received_dirs").get<size_t>();
         
-        // 【关键】检查这是否针对当前活跃会话的回复
+        // 检查这是否针对当前活跃会话的回复
         uint64_t current_id = from_peer->get_sync_session_id();
         if (ack_session_id != current_id) {
             g_logger->warn("[Sync] 收到过时或不匹配的 ACK (ACK ID: {}, 当前 ID: {})，忽略。", 

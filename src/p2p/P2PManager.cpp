@@ -62,8 +62,6 @@ boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 // ═══════════════════════════════════════════════════════════════
 
 void P2PManager::broadcast_current_state()       { m_broadcast_manager->broadcast_current_state(); }
-void P2PManager::broadcast_file_update(const FileInfo& file_info) { m_broadcast_manager->broadcast_file_update(file_info); }
-void P2PManager::broadcast_file_delete(const std::string& relative_path) { m_broadcast_manager->broadcast_file_delete(relative_path); }
 void P2PManager::broadcast_dir_create(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_create(relative_path); }
 void P2PManager::broadcast_dir_delete(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_delete(relative_path); }
 void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) { m_broadcast_manager->broadcast_file_updates_batch(files); }
@@ -537,16 +535,6 @@ void P2PManager::register_message_handlers() {
     router.register_handler(Protocol::TYPE_SHARE_STATE,
         [this](nlohmann::json& payload, PeerController* peer) {
             m_sync_handler->handle_share_state(payload, peer);
-        }, true);
-
-    router.register_handler(Protocol::TYPE_FILE_UPDATE,
-        [this](nlohmann::json& payload, PeerController* peer) {
-            m_sync_handler->handle_file_update(payload, peer);
-        }, true);
-
-    router.register_handler(Protocol::TYPE_FILE_DELETE,
-        [this](nlohmann::json& payload, PeerController* peer) {
-            m_sync_handler->handle_file_delete(payload, peer);
         }, true);
 
     router.register_handler(Protocol::TYPE_REQUEST_FILE,

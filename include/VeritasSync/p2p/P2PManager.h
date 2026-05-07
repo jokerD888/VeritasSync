@@ -81,8 +81,6 @@ public:
 
     // --- 广播方法（委托给 BroadcastManager）---
     virtual void broadcast_current_state();
-    virtual void broadcast_file_update(const FileInfo& file_info);
-    virtual void broadcast_file_delete(const std::string& relative_path);
     virtual void broadcast_dir_create(const std::string& relative_path);
     virtual void broadcast_dir_delete(const std::string& relative_path);
     virtual void broadcast_file_updates_batch(const std::vector<FileInfo>& files);

@@ -123,17 +123,6 @@ void BroadcastManager::broadcast_current_state() {
     });
 }
 
-void BroadcastManager::broadcast_file_update(const FileInfo& file_info) {
-    if (!can_broadcast()) return;
-    g_logger->info("[P2P] (Source) 广播增量更新: {}", file_info.path);
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = Protocol::TYPE_FILE_UPDATE;
-    msg[Protocol::MSG_PAYLOAD] = file_info;
-    if (!m_send_fn(msg.dump())) {
-        g_logger->warn("[P2P] 广播文件更新失败（无可用对等点）: {}", file_info.path);
-    }
-}
-
 // --- 通用路径广播辅助（消除 3 个函数的重复结构）---
 static bool broadcast_path_event(SyncRole role, SyncMode mode,
                                  const std::string& msg_type,
@@ -150,11 +139,6 @@ static bool broadcast_path_event(SyncRole role, SyncMode mode,
         g_logger->warn("[P2P] 广播{}失败（无可用对等点）: {}", log_label, relative_path);
     }
     return ok;
-}
-
-void BroadcastManager::broadcast_file_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_FILE_DELETE, "删除", relative_path,
-                         [this](const std::string& s){ return m_send_fn(s); });
 }
 
 void BroadcastManager::broadcast_dir_create(const std::string& relative_path) {

@@ -40,8 +40,6 @@ public:
 
     // --- 单条广播 ---
     void broadcast_current_state();
-    void broadcast_file_update(const FileInfo& file_info);
-    void broadcast_file_delete(const std::string& relative_path);
     void broadcast_dir_create(const std::string& relative_path);
     void broadcast_dir_delete(const std::string& relative_path);
 
