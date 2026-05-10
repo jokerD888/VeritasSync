@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -145,49 +146,44 @@ bool relaunch_current_process() {
 #endif
 }
 
-int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
+/// 解析命令行参数中的 --config=<path>
+static std::optional<std::string> parse_config_arg(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        const std::string prefix = "--config=";
+        if (arg.find(prefix) == 0 && arg.size() > prefix.size()) {
+            return arg.substr(prefix.size());
+        }
+    }
+    return std::nullopt;
+}
+
+int main(int argc, char* argv[]) {
 #if defined(_WIN32)
     // ===== 高 DPI 感知声明（必须在创建任何窗口之前调用）=====
     // 防止 IFileDialog 等 Shell 对话框在 2K/4K 屏幕上被 DPI 虚拟化缩放
     {
         HMODULE hUser32 = LoadLibraryW(L"user32.dll");
         if (hUser32) {
-            // 优先使用 Win10 1703+ 的 Per-Monitor V2
             using SetDpiAwarenessContextFunc = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
             auto pSetDpiAwarenessContext = reinterpret_cast<SetDpiAwarenessContextFunc>(
                 GetProcAddress(hUser32, "SetProcessDpiAwarenessContext"));
             if (pSetDpiAwarenessContext) {
                 pSetDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             } else {
-                // 回退到 Win8.1+ 的 SetProcessDpiAwareness
                 HMODULE hShcore = LoadLibraryW(L"shcore.dll");
                 if (hShcore) {
                     using SetDpiAwarenessFunc = HRESULT(WINAPI*)(int);
                     auto pSetDpiAwareness = reinterpret_cast<SetDpiAwarenessFunc>(
                         GetProcAddress(hShcore, "SetProcessDpiAwareness"));
                     if (pSetDpiAwareness) {
-                        pSetDpiAwareness(2);  // PROCESS_PER_MONITOR_DPI_AWARE
+                        pSetDpiAwareness(2);
                     }
                     FreeLibrary(hShcore);
                 }
             }
             FreeLibrary(hUser32);
         }
-    }
-
-    HANDLE hMutex = nullptr;
-
-    // ===== 单实例检查 =====
-    // 使用命名互斥锁防止程序多开
-    hMutex = CreateMutexW(NULL, TRUE, L"VeritasSync_SingleInstance_Mutex");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        // 已有实例在运行，提示用户并退出
-        MessageBoxW(NULL, 
-                    L"VeritasSync 已经在运行中。\n\n请检查系统托盘区域。", 
-                    L"VeritasSync", 
-                    MB_OK | MB_ICONINFORMATION);
-        if (hMutex) CloseHandle(hMutex);
-        return 0;
     }
 
     // 1. 设置控制台输入输出代码页为 UTF-8
@@ -205,14 +201,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     }
 #endif
 
-    // 异常清理辅助：释放 Windows 单实例互斥锁 + 记录日志 + 关闭 spdlog
+    // 异常清理辅助
     auto fatal_cleanup = [&](const char* msg) {
-#if defined(_WIN32)
-        if (hMutex) {
-            CloseHandle(hMutex);
-            hMutex = nullptr;
-        }
-#endif
         if (VeritasSync::g_logger) {
             VeritasSync::g_logger->critical("{}", msg);
         } else {
@@ -222,9 +212,17 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     };
 
     try {
-    // 先加载配置（不需要日志），然后用配置参数初始化日志系统
+    // 解析命令行 --config=<path>，覆盖默认查找路径
+    std::string config_path;
+    auto cli_config = parse_config_arg(argc, argv);
+    if (cli_config.has_value()) {
+        config_path = cli_config.value();
+    } else {
+        config_path = resolve_config_path();
+    }
+
+    // 先加载配置（不需要日志）
     VeritasSync::Config config;
-    std::string config_path = resolve_config_path();
     try {
         config = VeritasSync::load_config_or_create_default(config_path);
     } catch (const std::exception& e) {
@@ -236,11 +234,35 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         return 1;
     }
 
-    // 使用配置参数初始化日志系统
-    VeritasSync::init_logger(
-        static_cast<size_t>(config.logging.max_file_size_mb) * 1024 * 1024,
-        static_cast<size_t>(config.logging.max_files),
-        static_cast<size_t>(config.logging.thread_pool_size));
+#if defined(_WIN32)
+    // ===== 按 WebUI 端口区分的单实例检查 =====
+    // 不同端口的实例可以同时运行（测试双实例场景）
+    {
+        std::string mutex_name = "VeritasSync_Port_" + std::to_string(config.webui.port);
+        std::wstring wmutex(mutex_name.begin(), mutex_name.end());
+        HANDLE hMutex = CreateMutexW(NULL, TRUE, wmutex.c_str());
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            VeritasSync::g_logger->warn("端口 {} 的实例已在运行，退出。", config.webui.port);
+            if (hMutex) CloseHandle(hMutex);
+            spdlog::shutdown();
+            return 0;
+        }
+        // hMutex released on process exit
+    }
+#endif
+
+    // 使用配置参数初始化日志系统（用 device_id 区分日志文件，多实例不冲突）
+    {
+        std::string log_name = "veritas_sync.log";
+        if (!config.device_id.empty()) {
+            log_name = "veritas_sync_" + config.device_id + ".log";
+        }
+        VeritasSync::init_logger(
+            static_cast<size_t>(config.logging.max_file_size_mb) * 1024 * 1024,
+            static_cast<size_t>(config.logging.max_files),
+            static_cast<size_t>(config.logging.thread_pool_size),
+            log_name);
+    }
     VeritasSync::g_logger->info("--- Veritas Sync Node Starting Up ---");
     VeritasSync::g_logger->info("Configuration loaded from: {}", config_path);
 
@@ -268,8 +290,16 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
+    // 日志文件名（与 init_logger 保持一致）
+    std::string log_filename = "veritas_sync.log";
+    if (!config.device_id.empty()) {
+        log_filename = "veritas_sync_" + config.device_id + ".log";
+    }
+
     // 启动 Web UI (端口从配置读取，默认 8800)
-    VeritasSync::WebUIServer web_ui(config.webui.port, "config.json");
+    // 使用 --config= 参数指定的路径（而非硬编码 "config.json"），
+    // 确保 WebUI 保存配置到正确的文件，支持多实例不同配置文件
+    VeritasSync::WebUIServer web_ui(config.webui.port, config_path, log_filename);
 
     // --- B-02: 重启请求回调（由 main 执行优雅重启） ---
     web_ui.set_on_restart_request([&web_ui]() {
@@ -471,17 +501,13 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 
     // 等待 WebUI 启动握手结果，避免监听失败静默
     if (webui_ready_future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
-        VeritasSync::g_logger->error("[Main] WebUI 启动超时：无法确认监听状态");
-        g_shutdown_requested = true;
+        VeritasSync::g_logger->warn("[Main] WebUI 启动超时，同步服务将继续运行（无 WebUI 界面）");
         web_ui.stop();
         ui_thread.request_stop();
     } else {
         webui_started = webui_ready_future.get();
         if (!webui_started) {
-            VeritasSync::g_logger->error("[Main] WebUI 启动失败（端口占用或监听失败）");
-            g_shutdown_requested = true;
-            web_ui.stop();
-            ui_thread.request_stop();
+            VeritasSync::g_logger->warn("[Main] WebUI 启动失败，同步服务将继续运行（无 WebUI 界面）");
         }
     }
 
@@ -583,25 +609,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         g_active_nodes.clear();
     }
 
-#if defined(_WIN32)
-    // 若不是重启，正常退出前也释放单实例句柄
-    if (!g_restart_requested.load() && hMutex) {
-        CloseHandle(hMutex);
-        hMutex = nullptr;
-    }
-#endif
-
     if (g_restart_requested.load()) {
         VeritasSync::g_logger->info("检测到重启请求，正在拉起新实例...");
-
-#if defined(_WIN32)
-        // 【安全修复 C5】先释放 mutex，再用 CreateProcessW 同步创建新进程
-        // CreateProcessW（相比原来的 ShellExecuteW）是同步的——返回时新进程已存在
-        if (hMutex) {
-            CloseHandle(hMutex);
-            hMutex = nullptr;
-        }
-#endif
 
         if (!relaunch_current_process()) {
             VeritasSync::g_logger->error("重启失败：无法拉起新进程");

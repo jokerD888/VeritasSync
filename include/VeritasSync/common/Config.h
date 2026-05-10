@@ -52,6 +52,13 @@ struct Config {
         int ice_answer_wait_timeout_seconds = 30;
         int upnp_discover_timeout_ms = 2000;
         int peer_cleanup_interval_minutes = 5;
+
+        // --- LAN 发现配置 ---
+        bool lan_discovery_enabled = true;           // 是否启用 LAN 多播发现
+        std::string lan_multicast_group = "239.255.0.100";
+        unsigned short lan_multicast_port = 9989;
+        int lan_heartbeat_interval_seconds = 5;      // 心跳间隔
+        int lan_peer_timeout_seconds = 30;           // 超时离线判定
     } network;
 
     // --- 传输配置 ---
@@ -236,7 +243,10 @@ inline nlohmann::json advanced_to_json(const Config& c) {
             {"tracker_max_packet_size_mb", c.network.tracker_max_packet_size_mb},
             {"ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds},
             {"upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms},
-            {"peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes}
+            {"peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes},
+            {"lan_discovery_enabled", c.network.lan_discovery_enabled},
+            {"lan_multicast_group", c.network.lan_multicast_group},
+            {"lan_multicast_port", c.network.lan_multicast_port}
         }},
         {"transfer", {
             {"chunk_size", c.transfer.chunk_size},
@@ -308,6 +318,9 @@ inline void advanced_from_json(const nlohmann::json& j, Config& c) {
         LOAD_OPT(n, "ice_answer_wait_timeout_seconds", c.network.ice_answer_wait_timeout_seconds);
         LOAD_OPT(n, "upnp_discover_timeout_ms", c.network.upnp_discover_timeout_ms);
         LOAD_OPT(n, "peer_cleanup_interval_minutes", c.network.peer_cleanup_interval_minutes);
+        LOAD_OPT(n, "lan_discovery_enabled", c.network.lan_discovery_enabled);
+        LOAD_OPT(n, "lan_multicast_group", c.network.lan_multicast_group);
+        LOAD_OPT(n, "lan_multicast_port", c.network.lan_multicast_port);
     }
     if (j.contains("transfer")) {
         const auto& t = j["transfer"];

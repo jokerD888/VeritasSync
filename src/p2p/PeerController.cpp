@@ -42,6 +42,41 @@ std::shared_ptr<PeerController> PeerController::create(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// LAN 直连工厂方法
+// ═══════════════════════════════════════════════════════════════
+
+std::shared_ptr<PeerController> PeerController::create_lan_direct(
+    const std::string& self_id,
+    const std::string& peer_id,
+    boost::asio::io_context& io_context,
+    std::shared_ptr<CryptoLayer> crypto,
+    PeerControllerCallbacks callbacks,
+    const KcpConfig& kcp_config,
+    const std::string& peer_ip,
+    uint16_t peer_kcp_port)
+{
+    struct PeerControllerMaker : public PeerController {
+        PeerControllerMaker(
+            const std::string& self,
+            const std::string& peer,
+            boost::asio::io_context& ioc,
+            std::shared_ptr<CryptoLayer> cry,
+            PeerControllerCallbacks cb,
+            const KcpConfig& kcp_cfg)
+            : PeerController(self, peer, ioc, std::move(cry), std::move(cb), kcp_cfg) {}
+    };
+
+    auto controller = std::make_shared<PeerControllerMaker>(
+        self_id, peer_id, io_context, std::move(crypto), std::move(callbacks), kcp_config);
+
+    if (!controller->init_lan_direct(peer_ip, peer_kcp_port)) {
+        return nullptr;
+    }
+
+    return controller;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 构造与析构
 // ═══════════════════════════════════════════════════════════════
 
@@ -126,6 +161,98 @@ bool PeerController::init_ice_and_bind_callbacks(const IceConfig& ice_config) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// LAN 直连初始化
+// ═══════════════════════════════════════════════════════════════
+
+bool PeerController::init_lan_direct(const std::string& peer_ip, uint16_t peer_kcp_port) {
+    try {
+        m_is_lan_direct = true;
+        m_lan_udp_socket = std::make_unique<boost::asio::ip::udp::socket>(m_io_context);
+        m_lan_udp_socket->open(boost::asio::ip::udp::v4());
+        m_lan_udp_socket->bind(boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0));
+        m_lan_peer_endpoint = boost::asio::ip::udp::endpoint(
+            boost::asio::ip::make_address(peer_ip), peer_kcp_port);
+
+        if (g_logger) {
+            auto local_port = m_lan_udp_socket->local_endpoint().port();
+            g_logger->info("[PeerController] LAN 直连初始化: {} <-> {} @ {}:{}, 本地端口={}",
+                           m_self_id, m_peer_id, peer_ip, peer_kcp_port, local_port);
+        }
+
+        return true;
+    } catch (const std::exception& e) {
+        if (g_logger) {
+            g_logger->error("[PeerController] LAN 直连初始化失败: {}", e.what());
+        }
+        return false;
+    }
+}
+
+/// KCP 输出回调（LAN 直连模式：加密后直接发 UDP）
+int PeerController::on_lan_kcp_output(const char* data, int len) {
+    if (m_state.load() == PeerState::Disconnected) return -1;
+
+    // 加密
+    std::string plaintext(data, len);
+    std::string ciphertext = m_crypto->encrypt(plaintext);
+    if (ciphertext.empty()) {
+        if (g_logger) g_logger->error("[PeerController] ❌ 加密失败");
+        return -1;
+    }
+
+    // 直接 UDP 发送给对端
+    boost::system::error_code ec;
+    auto sent = m_lan_udp_socket->send_to(
+        boost::asio::buffer(ciphertext), m_lan_peer_endpoint, 0, ec);
+    if (ec) {
+        if (g_logger) g_logger->debug("[PeerController] LAN KCP 发送失败: {}", ec.message());
+        return -1;
+    }
+    return static_cast<int>(sent);
+}
+
+/// 启动 LAN UDP 异步接收
+void PeerController::start_lan_receive() {
+    if (!m_lan_udp_socket || !m_lan_udp_socket->is_open()) return;
+    auto self = shared_from_this();
+    m_lan_udp_socket->async_receive_from(
+        boost::asio::buffer(m_lan_recv_buffer), m_lan_peer_endpoint,
+        [self](boost::system::error_code ec, size_t length) {
+            if (!ec) {
+                self->on_lan_data_received(ec, length);
+            }
+        });
+}
+
+/// LAN UDP 数据接收回调
+void PeerController::on_lan_data_received(const boost::system::error_code& /*ec*/, size_t length) {
+    if (length == 0) {
+        start_lan_receive();  // 空包也继续监听
+        return;
+    }
+
+    // 解密
+    std::string ciphertext(m_lan_recv_buffer.data(), length);
+    std::string plaintext = m_crypto->decrypt(ciphertext);
+    if (plaintext.empty()) {
+        if (g_logger) g_logger->warn("[PeerController] LAN 解密失败，丢弃数据包 ({} bytes)", length);
+        start_lan_receive();  // 继续监听
+        return;
+    }
+
+    // 喂给 KCP
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_kcp) {
+            m_kcp->input(plaintext.data(), plaintext.size());
+        }
+    }
+
+    // 锁外启动下一次接收
+    start_lan_receive();
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Conv ID 计算
 // ═══════════════════════════════════════════════════════════════
 
@@ -143,13 +270,49 @@ uint32_t PeerController::calculate_conv() const {
 // ═══════════════════════════════════════════════════════════════
 
 void PeerController::initiate_connection() {
+    if (m_is_lan_direct) {
+        // LAN 直连模式：跳过 ICE，直接初始化 KCP
+        // 注意：不能在持锁时调用 setup_kcp_session()（它也会锁 m_mutex）
+        // 先做简单的原子检查
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_lan_udp_socket || !m_lan_udp_socket->is_open()) return;
+        }
+
+        setup_kcp_session();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            start_lan_receive();
+
+            // KCP 就绪后直接标记 Connected
+            m_state.store(PeerState::Connected);
+            auto now = std::chrono::system_clock::now();
+            m_connected_at_ts.store(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now.time_since_epoch()).count());
+        }
+
+        if (g_logger) {
+            g_logger->info("[PeerController] LAN 直连就绪: {} <-> {} @ {}:{}",
+                           m_self_id, m_peer_id,
+                           m_lan_peer_endpoint.address().to_string(),
+                           m_lan_peer_endpoint.port());
+        }
+
+        // 通知上层（锁外，避免回调中死锁）
+        if (m_callbacks.on_state_changed) {
+            m_callbacks.on_state_changed(PeerState::Connected);
+        }
+        return;
+    }
+
+    // ICE 模式
     std::lock_guard<std::mutex> lock(m_mutex);
-    
     if (!m_ice) return;
-    
+
     m_state.store(PeerState::Connecting);
     m_ice->gather_candidates();
-    
+
     if (g_logger) {
         g_logger->info("[PeerController] {} initiating connection to {} (offer_side={})",
                        m_self_id, m_peer_id, m_is_offer_side);
@@ -158,9 +321,15 @@ void PeerController::initiate_connection() {
 
 void PeerController::handle_signaling(const std::string& signal_type, const std::string& payload) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
+
+    // LAN 直连模式：无 ICE 信令
+    if (m_is_lan_direct) {
+        if (g_logger) g_logger->debug("[PeerController] LAN 模式忽略 ICE 信令: {}={}", signal_type, payload);
+        return;
+    }
+
     if (!m_ice) return;
-    
+
     if (signal_type == "ice_candidate") {
         m_ice->add_remote_candidate(payload);
     } else if (signal_type == "sdp_offer") {
@@ -194,6 +363,10 @@ void PeerController::close() {
     // 释放资源
     m_kcp.reset();
     m_ice.reset();
+    if (m_lan_udp_socket) {
+        m_lan_udp_socket->close();
+        m_lan_udp_socket.reset();
+    }
     m_kcp_initialized.store(false);
 }
 
@@ -220,9 +393,13 @@ int PeerController::send_message(const std::string& message) {
 
 void PeerController::update_kcp(uint32_t current_ms) {
     // 在锁内仅拷贝 KcpSession 的 shared_ptr
+    // 使用 try_lock：如果 mutex 被其他线程持有（如 worker_pool 在批量发送文件请求），
+    // 跳过本次 update 而不是阻塞等待。KCP 更新是高频操作（~20ms 一次），
+    // 跳过一次不会影响整体性能，但阻塞会导致连接超时。
     std::shared_ptr<KcpSession> kcp;
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) return;  // mutex 被占用，跳过本次 update
         if (!m_kcp) return;
         kcp = m_kcp;
     }
@@ -247,7 +424,10 @@ uint32_t PeerController::check_kcp(uint32_t current_ms) const {
 
 IceConnectionType PeerController::get_connection_type() const {
     std::lock_guard<std::mutex> lock(m_mutex);  // 加锁保护
-    
+
+    if (m_is_lan_direct) {
+        return IceConnectionType::Direct;
+    }
     if (m_ice) {
         return m_ice->get_connection_type();
     }
@@ -442,9 +622,15 @@ void PeerController::setup_kcp_session() {
 
     // 捕获 shared_from_this() 防止 KCP 回调期间 PeerController 被析构
     auto self = shared_from_this();
-    kcp_callbacks.on_output = [self](const char* data, int len) -> int {
-        return self->on_kcp_output(data, len);
-    };
+    if (m_is_lan_direct) {
+        kcp_callbacks.on_output = [self](const char* data, int len) -> int {
+            return self->on_lan_kcp_output(data, len);
+        };
+    } else {
+        kcp_callbacks.on_output = [self](const char* data, int len) -> int {
+            return self->on_kcp_output(data, len);
+        };
+    }
 
     kcp_callbacks.on_message_received = [self](const std::string& message) {
         self->on_kcp_message_received(message);

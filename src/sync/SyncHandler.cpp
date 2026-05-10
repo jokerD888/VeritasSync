@@ -268,13 +268,29 @@ void SyncHandler::send_file_requests(const std::string& peer_id,
         }
     }
 
-    boost::asio::post(m_io_context, [this, peer_id, file_infos = std::move(file_infos)]() {
+    // 投递到 worker_pool 而非 io_context，避免批量发送大量文件请求时阻塞 io_context。
+    // 阻塞 io_context 会推迟 KCP 更新、数据接收和定时器处理，导致连接超时或误判掉线。
+    boost::asio::post(m_worker_pool, [this, peer_id, file_infos = std::move(file_infos)]() {
         pace_and_send_files(peer_id, std::move(file_infos), 0);
     });
 }
 
 std::optional<FileInfo> SyncHandler::process_single_file(const std::string& peer_id,
                                                          const FileInfo& remote_info) {
+    // 【修复】先检查是否有未完成的下载（部分接收的文件），防止回声抑制错误地跳过续传。
+    // 如果文件是回声（源端声称的 hash 与上次发送的记录一致），但本地有未完成的
+    // [.veritas_tmp] 临时文件（只接收了部分 chunk），should_ignore_echo 会返回 true
+    // 导致 file 被跳过，永远无法完成下载。检查续传 eligibility 能识别这种情况。
+    if (m_transfer_manager) {
+        auto resume_info = m_transfer_manager->check_resume_eligibility(
+            remote_info.path, remote_info.hash, remote_info.size);
+        if (resume_info) {
+            g_logger->info("[Sync] 检测到未完成的下载，发送续传请求: {} (已收 {}/{} 块)",
+                          remote_info.path, resume_info->received_chunks, resume_info->total_chunks);
+            return remote_info;
+        }
+    }
+
     if (m_state_manager->should_ignore_echo(peer_id, remote_info.path, remote_info.hash)) {
         return std::nullopt;
     }
@@ -296,22 +312,25 @@ void SyncHandler::pace_and_send_files(const std::string& peer_id,
                                        size_t index) {
     if (index >= files_to_request.size()) return;
 
-    // 查找 peer 并注册 drain 回调
-    m_with_peer(peer_id,
-        [this, peer_id, files = std::move(files_to_request), index](PeerController* peer_ctrl) mutable {
-            if (!peer_ctrl || !peer_ctrl->is_connected()) return;
+    // 分批发送文件请求，每批最多 500 个
+    // 单次发送过多请求会长时间持有 PeerController 互斥锁，
+    // 阻塞 KCP 更新线程导致连接超时。
+    constexpr size_t BURST_LIMIT = 500;
+    size_t end = std::min(index + BURST_LIMIT, files_to_request.size());
 
-            // 不在 on_send_ready 回调中捕获 raw PeerController*（可能已失效）
-            // 使用 m_send_to_peer_safe 通过 peer_id 安全发送
-            peer_ctrl->on_send_ready(
-                [this, peer_id, files = std::move(files), index]() {
-                    const auto& remote_info = files[index];
-                    std::string msg = build_file_request(
-                        remote_info.path, peer_id, remote_info.hash, remote_info.size);
-                    m_send_to_peer_safe(msg, peer_id);
-                    pace_and_send_files(peer_id, std::move(files), index + 1);
-                });
+    for (size_t i = index; i < end; ++i) {
+        const auto& remote_info = files_to_request[i];
+        std::string msg = build_file_request(
+            remote_info.path, peer_id, remote_info.hash, remote_info.size);
+        m_send_to_peer_safe(msg, peer_id);
+    }
+
+    // 还有剩余请求，投递到 worker_pool 继续
+    if (end < files_to_request.size()) {
+        boost::asio::post(m_worker_pool, [this, peer_id, files = std::move(files_to_request), end]() mutable {
+            pace_and_send_files(peer_id, std::move(files), end);
         });
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -520,6 +539,10 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
     std::string peer_id = from_peer ? from_peer->get_peer_id() : "";
     if (peer_id.empty()) return;
 
+    // 将 process_single_file 投递到 worker_pool 执行：
+    // resolve_conflict 对于已存在的文件会调用 Hashing::CalculateSHA256（文件 I/O），
+    // 阻塞 io_context 会导致 KCP 更新被延迟、ICE consent 超时。大量文件（如 5000+ 个）
+    // 的 SHA256 计算会让 io_context 阻塞数秒，造成连接断开。
     boost::asio::post(m_worker_pool, [this, files = std::move(files), peer_id]() {
         try {
         if (!m_state_manager) return;
@@ -534,9 +557,8 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
         }
 
         if (!files_to_request.empty()) {
-            boost::asio::post(m_io_context, [this, peer_id, reqs = std::move(files_to_request)]() {
-                pace_and_send_files(peer_id, std::move(reqs), 0);
-            });
+            // pace_and_send_files 现在直接批量发送（无需 drain 回调），可在 worker_pool 上执行
+            pace_and_send_files(peer_id, std::move(files_to_request), 0);
         }
     } catch (const std::exception& e) {
         g_logger->error("[KCP] handle_file_update_batch 异常: {}", e.what());

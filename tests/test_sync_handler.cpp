@@ -57,10 +57,12 @@ TEST_F(SyncHandlerRoleTest, Construction_DefaultRole) {
     // Source + OneWay 模式下，can_receive() 应返回 false
     // 通过 handle_file_update 传入 nullptr peer 来间接验证
 
-    // handle_file_update 在 Source + OneWay 模式下应该直接 return
-    json payload = {{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}};
+    // handle_file_update_batch 在 Source + OneWay 模式下应该直接 return
+    json payload;
+    payload["files"] = json::array();
+    payload["files"].push_back({{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}});
     // 不应崩溃
-    handler.handle_file_update(payload, nullptr);
+    handler.handle_file_update_batch(payload, nullptr);
 }
 
 TEST_F(SyncHandlerRoleTest, SetRole_Destination_CanReceive) {
@@ -72,9 +74,11 @@ TEST_F(SyncHandlerRoleTest, SetRole_Destination_CanReceive) {
     handler.set_mode(SyncMode::OneWay);
 
     // Destination + OneWay: 应该可以接收
-    // handle_file_update 应进入处理流程（但因为 StateManager 是 nullptr，会提前返回）
-    json payload = {{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}};
-    handler.handle_file_update(payload, nullptr);
+    // handle_file_update_batch 应进入处理流程（但因为 StateManager 是 nullptr，会提前返回）
+    json payload;
+    payload["files"] = json::array();
+    payload["files"].push_back({{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}});
+    handler.handle_file_update_batch(payload, nullptr);
     // 不崩溃即通过
 }
 
@@ -87,8 +91,10 @@ TEST_F(SyncHandlerRoleTest, SetRole_Source_BiDirectional_CanReceive) {
     handler.set_mode(SyncMode::BiDirectional);
 
     // Source + BiDirectional: 应该可以接收
-    json payload = {{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}};
-    handler.handle_file_update(payload, nullptr);
+    json payload;
+    payload["files"] = json::array();
+    payload["files"].push_back({{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}});
+    handler.handle_file_update_batch(payload, nullptr);
 }
 
 // ============================================================================
@@ -121,14 +127,15 @@ protected:
     }
 };
 
-TEST_F(SyncHandlerParsingTest, HandleFileDelete_InvalidPayload_NoStateManager) {
+TEST_F(SyncHandlerParsingTest, HandleFileDeleteBatch_InvalidPayload_NoStateManager) {
     SyncHandler handler(nullptr, tm, worker_pool, io_ctx,
                         noop_send, noop_send_safe, noop_with_peer);
     handler.set_role(SyncRole::Destination);
 
     // 没有 StateManager 应提前返回（不崩溃）
-    json payload = {{"path", "deleted.txt"}};
-    handler.handle_file_delete(payload, nullptr);
+    json payload;
+    payload["paths"] = {"deleted.txt"};
+    handler.handle_file_delete_batch(payload, nullptr);
 
     // 等待 worker 线程处理
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -284,10 +291,15 @@ TEST_F(SyncHandlerCallbackTest, SetStateManager_NullSafety) {
     handler.set_state_manager(nullptr);
 
     handler.set_role(SyncRole::Destination);
-    // 任何操作都不应崩溃
-    json payload = {{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}};
-    handler.handle_file_update(payload, nullptr);
-    handler.handle_file_delete(payload, nullptr);
+    // 任何操作都不应崩溃（使用 batch 接口）
+    json update_payload;
+    update_payload["files"] = json::array();
+    update_payload["files"].push_back({{"path", "test.txt"}, {"hash", "abc"}, {"mtime", 1000}, {"size", 100}});
+    handler.handle_file_update_batch(update_payload, nullptr);
+
+    json delete_payload;
+    delete_payload["paths"] = {"test.txt"};
+    handler.handle_file_delete_batch(delete_payload, nullptr);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }

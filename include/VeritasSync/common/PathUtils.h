@@ -129,26 +129,35 @@ public:
         if (ec) return false;
 
         // 检查 full 路径是否以 root 为前缀
+        // 注意：Windows 上 path::string() 使用 ANSI 代码页 (CP_ACP)，
+        // 会抛 "No mapping for the Unicode character" 异常。
+        // 使用 wstring() 避免编码转换失真。
+        #ifdef _WIN32
+        auto root_wstr = canonical_root.wstring();
+        auto full_wstr = full.wstring();
+        // Windows 路径不区分大小写（使用全局 towlower，MSVC 中 std::towlower 不可用）
+        for (auto& c : root_wstr) c = towlower(c);
+        for (auto& c : full_wstr) c = towlower(c);
+        // 比较 wstring 避免编码问题
+        if (full_wstr.length() < root_wstr.length()) return false;
+        if (full_wstr.compare(0, root_wstr.length(), root_wstr) != 0) return false;
+        if (full_wstr.length() > root_wstr.length()) {
+            wchar_t next_char = full_wstr[root_wstr.length()];
+            if (next_char != L'/' && next_char != L'\\') return false;
+        }
+        return true;
+        #else
         auto root_str = canonical_root.string();
         auto full_str = full.string();
-
-        #ifdef _WIN32
-        // Windows 路径不区分大小写
-        std::transform(root_str.begin(), root_str.end(), root_str.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        std::transform(full_str.begin(), full_str.end(), full_str.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        #endif
-
-        // full_str 必须以 root_str 为前缀，且紧接着是分隔符或结尾
+        // 非 Windows：直接比较大小写敏感路径
         if (full_str.length() < root_str.length()) return false;
         if (full_str.compare(0, root_str.length(), root_str) != 0) return false;
         if (full_str.length() > root_str.length()) {
             char next_char = full_str[root_str.length()];
             if (next_char != '/' && next_char != '\\') return false;
         }
-
         return true;
+        #endif
     }
 
     /**

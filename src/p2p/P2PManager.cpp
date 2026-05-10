@@ -106,7 +106,7 @@ P2PManager::P2PManager()
     : m_io_context(),
       m_crypto(std::make_shared<CryptoLayer>()),
       m_cleanup_timer(m_io_context),
-      m_worker_pool(std::thread::hardware_concurrency()) {
+      m_worker_pool(std::thread::hardware_concurrency() * 2) {
 }
 
 void P2PManager::set_state_manager(StateManager* sm) {
@@ -119,6 +119,9 @@ void P2PManager::set_state_manager(StateManager* sm) {
     }
     if (m_sync_session) {
         m_sync_session->set_state_manager(sm);
+    }
+    if (m_broadcast_manager) {
+        m_broadcast_manager->set_state_manager(sm);
     }
 }
 
@@ -137,6 +140,157 @@ void P2PManager::set_mode(SyncMode mode) {
     if (m_sync_handler) m_sync_handler->set_mode(mode);
     if (m_sync_session) m_sync_session->set_mode(mode);
     if (m_broadcast_manager) m_broadcast_manager->set_mode(mode);
+}
+
+void P2PManager::set_lan_discovery_config(bool enabled,
+                                          const std::string& multicast_group,
+                                          uint16_t multicast_port) {
+    m_lan_discovery_enabled = enabled;
+    m_lan_multicast_group = multicast_group;
+    m_lan_multicast_port = multicast_port;
+}
+
+void P2PManager::start_lan_discovery(const std::string& device_id,
+                                     const std::string& sync_key) {
+    if (!m_lan_discovery_enabled) return;
+
+    if (m_lan_discovery) return; // 已启动
+
+    // 创建共享 KCP UDP socket（用于 LAN 直连 KCP 数据收发）
+    if (!m_lan_kcp_udp_socket) {
+        m_lan_kcp_udp_socket = std::make_unique<boost::asio::ip::udp::socket>(m_io_context);
+        boost::system::error_code ec;
+        m_lan_kcp_udp_socket->open(boost::asio::ip::udp::v4(), ec);
+        if (!ec) {
+            m_lan_kcp_udp_socket->bind(boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0), ec);
+            if (!ec) {
+                m_lan_kcp_udp_port = m_lan_kcp_udp_socket->local_endpoint(ec).port();
+                if (!ec && g_logger) {
+                    g_logger->info("[P2P] LAN KCP UDP socket 端口: {}", m_lan_kcp_udp_port);
+                }
+            }
+        }
+        if (ec && g_logger) {
+            g_logger->warn("[P2P] 创建 LAN KCP UDP socket 失败: {}", ec.message());
+        }
+    }
+
+    LanDiscoveryCallbacks cb;
+    cb.on_peer_discovered = [this](const LanPeerInfo& peer) {
+        on_lan_peer_found(peer);
+    };
+    cb.on_peer_lost = [this](const std::string& pid) {
+        on_lan_peer_lost(pid);
+    };
+    cb.on_signaling_received = [this](const std::string& from_id,
+                                      const std::string& type,
+                                      const std::string& payload) {
+        on_lan_signaling(from_id, type, payload);
+    };
+
+    m_lan_discovery = LanDiscovery::create(
+        m_io_context, device_id, sync_key, std::move(cb),
+        m_lan_multicast_port, m_lan_multicast_group, m_lan_kcp_udp_port);
+    m_lan_discovery->start();
+}
+
+void P2PManager::on_lan_peer_found(const LanPeerInfo& peer) {
+    std::string self_id = m_device_id;
+    if (self_id.empty()) {
+        if (m_tracker_client) self_id = m_tracker_client->get_self_id();
+        if (self_id.empty()) {
+            g_logger->warn("[LAN] 无法获取 self_id，跳过 LAN 对等点连接: {}", peer.device_id);
+            return;
+        }
+    }
+
+    if (peer.device_id == self_id) {
+        g_logger->debug("[LAN] 跳过自己的设备");
+        return;
+    }
+
+    // 检查是否已有连接
+    if (m_peer_registry.find(peer.device_id)) {
+        g_logger->debug("[LAN] 对等点 {} 已连接，跳过", peer.device_id);
+        return;
+    }
+
+    g_logger->info("[LAN] 发现 LAN 对等点: {} @ {}:{} (KCP端口={})",
+                   peer.device_id, peer.lan_ip, peer.signaling_port, peer.kcp_port);
+
+    if (peer.kcp_port != 0) {
+        // === LAN 直连模式：纯 KCP，无 ICE ===
+        PeerControllerCallbacks cb;
+        cb.on_state_changed = [this, peer_id = peer.device_id](PeerState state) {
+            handle_peer_state_changed(peer_id, state);
+        };
+        cb.on_signal_needed = [](const std::string&, const std::string&) {
+            // LAN 直连模式：无 ICE 信令，静默跳过
+        };
+        cb.on_message_received = [this, peer_id = peer.device_id](const std::string& msg) {
+            handle_peer_message(peer_id, msg);
+        };
+
+        KcpConfig kcp_cfg;
+        kcp_cfg.snd_wnd = static_cast<int>(m_kcp_window_size);
+        kcp_cfg.rcv_wnd = static_cast<int>(m_kcp_window_size);
+
+        auto controller = PeerController::create_lan_direct(
+            self_id, peer.device_id,
+            m_io_context, m_crypto,
+            std::move(cb), kcp_cfg,
+            peer.lan_ip, peer.kcp_port);
+
+        if (!controller) {
+            g_logger->error("[LAN] 创建 LAN 直连控制器失败: {}", peer.device_id);
+            return;
+        }
+
+        if (!m_peer_registry.try_add(peer.device_id, controller)) {
+            controller->close();
+            return;
+        }
+
+        controller->initiate_connection();
+    } else {
+        // === 回退到 ICE 模式（通过 Tracker） ===
+        g_logger->info("[LAN] 对端无 KCP 端口信息，使用 ICE 模式: {}", peer.device_id);
+
+        auto controller = create_peer_controller(self_id, peer.device_id);
+        if (!controller) return;
+
+        if (!m_peer_registry.try_add(peer.device_id, controller)) {
+            controller->close();
+            return;
+        }
+
+        if (controller->is_offer_side()) {
+            g_logger->info("[LAN] 我们是 Offer 方，主动发起连接 (对于 {})", peer.device_id);
+            controller->initiate_connection();
+        } else {
+            g_logger->info("[LAN] 我们是 Answer 方，等待 Offer (对于 {})", peer.device_id);
+            setup_answer_timeout(controller, peer.device_id);
+        }
+    }
+}
+
+void P2PManager::on_lan_peer_lost(const std::string& device_id) {
+    g_logger->info("[LAN] LAN 对等点离线: {}", device_id);
+    auto controller = m_peer_registry.find(device_id);
+    if (controller) {
+        handle_peer_leave(device_id);
+    }
+}
+
+void P2PManager::on_lan_signaling(const std::string& from_device_id,
+                                  const std::string& signal_type,
+                                  const std::string& payload) {
+    auto controller = m_peer_registry.find(from_device_id);
+    if (!controller) {
+        g_logger->warn("[LAN] 收到未知对等点 {} 的信令", from_device_id);
+        return;
+    }
+    controller->handle_signaling(signal_type, payload);
 }
 
 // --- 初始化子方法 ---
@@ -223,9 +377,15 @@ void P2PManager::create_sync_components() {
 
 void P2PManager::start_background_services() {
     m_thread = std::jthread([this]() {
-        g_logger->info("[P2P] IO context 在后台线程运行...");
-        auto work_guard = boost::asio::make_work_guard(m_io_context);
-        m_io_context.run();
+        try {
+            g_logger->info("[P2P] IO context 在后台线程运行...");
+            auto work_guard = boost::asio::make_work_guard(m_io_context);
+            m_io_context.run();
+        } catch (const std::exception& e) {
+            g_logger->critical("[P2P] IO context 线程异常终止: {}", e.what());
+        } catch (...) {
+            g_logger->critical("[P2P] IO context 线程未知异常");
+        }
     });
     m_kcp_scheduler->start();
     schedule_cleanup_task();
@@ -273,6 +433,13 @@ P2PManager::~P2PManager() {
     if (m_broadcast_manager) m_broadcast_manager->stop();
 
     m_peer_registry.close_all();
+
+    // 关闭 LAN KCP UDP socket
+    if (m_lan_kcp_udp_socket) {
+        boost::system::error_code ec;
+        m_lan_kcp_udp_socket->close(ec);
+        m_lan_kcp_udp_socket.reset();
+    }
 
     m_io_context.stop();
     m_worker_pool.join();
@@ -436,6 +603,11 @@ void P2PManager::handle_peer_message(const std::string& peer_id, const std::stri
     if (!controller) {
         g_logger->warn("[KCP] 收到来自未知对等点 {} 的消息", peer_id);
         return;
+    }
+
+    // 有数据收发说明对端还在线，刷新 LAN 发现中的最后活跃时间（防止大流量时心跳超时误判）
+    if (m_lan_discovery) {
+        m_lan_discovery->refresh_peer(peer_id);
     }
 
     handle_kcp_message(encrypted_msg, controller.get());

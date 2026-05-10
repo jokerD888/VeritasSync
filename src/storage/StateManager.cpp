@@ -387,9 +387,10 @@ namespace VeritasSync {
         }
 
         // 并行计算 SHA256 哈希（与 scan_directory 相同的模式）
+        // 使用 2 线程限制，避免 I/O 饱和（单块磁盘大量并发读会降低吞吐量）
         if (!files_needing_hash.empty()) {
             size_t num_threads = std::min(
-                static_cast<size_t>(std::thread::hardware_concurrency()),
+                static_cast<size_t>(2),
                 files_needing_hash.size()
             );
             num_threads = std::max(num_threads, size_t{1});

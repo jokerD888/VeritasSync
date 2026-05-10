@@ -22,7 +22,8 @@ class TrackerClient : public std::enable_shared_from_this<TrackerClient> {
     enum class State : uint8_t { DISCONNECTED, CONNECTING, REGISTERING, CONNECTED, STOPPING };
 
     static constexpr size_t MAX_PACKET_SIZE = 1024 * 1024;  // 1MB
-    static constexpr std::chrono::seconds RECONNECT_INTERVAL{5};
+    static constexpr std::chrono::seconds RECONNECT_BASE{5};     // 退避基数
+    static constexpr std::chrono::seconds RECONNECT_MAX{60};     // 退避上限
 
     /**
      * @brief 构造 TrackerClient
@@ -81,6 +82,7 @@ private:
     std::deque<std::string> m_write_queue;
 
     boost::asio::steady_timer m_retry_timer;
+    int m_reconnect_attempts = 0;  // 重连尝试次数（用于指数退避）
 
     using MessageHandler = std::function<void(const nlohmann::json&)>;
     std::unordered_map<std::string, MessageHandler> m_handlers;

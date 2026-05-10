@@ -16,6 +16,7 @@
 #include "VeritasSync/common/CryptoLayer.h"    // CryptoLayer（成员变量值类型）
 #include "VeritasSync/sync/Protocol.h"         // 协议常量
 #include "VeritasSync/sync/TransferManager.h"  // TransferManager::SessionStats（返回值类型）
+#include "VeritasSync/net/LanDiscovery.h"      // LanDiscovery（unique_ptr）
 #include "VeritasSync/net/UpnpManager.h"       // UpnpManager（成员变量值类型）
 
 // === 子组件 ===
@@ -69,6 +70,14 @@ public:
     void set_tracker_client(TrackerClient* tc);
     void set_role(SyncRole role);
     void set_mode(SyncMode mode);
+
+    // --- LAN 发现 ---
+    void set_device_id(const std::string& device_id) { m_device_id = device_id; }
+    void set_sync_key(const std::string& sync_key) { m_sync_key = sync_key; }
+    void set_lan_discovery_config(bool enabled,
+                                  const std::string& multicast_group = "239.255.0.100",
+                                  uint16_t multicast_port = 9989);
+    void start_lan_discovery(const std::string& device_id, const std::string& sync_key);
 
     virtual ~P2PManager();
 
@@ -136,6 +145,13 @@ private:
     void setup_answer_timeout(std::shared_ptr<PeerController> controller,
                               const std::string& peer_id);
 
+    // --- LAN 发现 ---
+    void on_lan_peer_found(const LanPeerInfo& peer);
+    void on_lan_peer_lost(const std::string& device_id);
+    void on_lan_signaling(const std::string& from_device_id,
+                          const std::string& signal_type,
+                          const std::string& payload);
+
     // --- 初始化子方法 ---
     void create_transfer_manager();     // 创建 TransferManager 及其回调
     void create_sync_components();      // 创建 SyncHandler 和 SyncSession
@@ -166,6 +182,10 @@ private:
     SyncRole m_role = SyncRole::Source;
     SyncMode m_mode = SyncMode::OneWay;
 
+    // --- LAN 发现相关 ---
+    std::string m_device_id;
+    std::string m_sync_key;
+
     // Peer 管理（委托给 PeerRegistry）
     PeerRegistry m_peer_registry;
 
@@ -194,6 +214,17 @@ private:
     boost::asio::steady_timer m_cleanup_timer;
     void schedule_cleanup_task();
     void cleanup_stale_buffers();
+
+    // --- LAN 发现 ---
+    std::shared_ptr<LanDiscovery> m_lan_discovery;
+    std::string m_lan_multicast_group;
+    uint16_t m_lan_multicast_port = 9989;
+    bool m_lan_discovery_enabled = false;
+
+    // LAN 直连共享 KCP UDP socket
+    std::unique_ptr<boost::asio::ip::udp::socket> m_lan_kcp_udp_socket;
+    uint16_t m_lan_kcp_udp_port = 0;
+    // --------------------------
 
     // --- UPnP 管理器 ---
     UpnpManager m_upnp;

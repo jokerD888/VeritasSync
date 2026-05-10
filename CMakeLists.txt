@@ -70,6 +70,7 @@ add_executable(veritas_sync WIN32
     src/common/Logger.cpp
     src/net/IceTransport.cpp
     src/net/KcpSession.cpp
+    src/net/LanDiscovery.cpp
     src/net/UpnpManager.cpp
     src/p2p/TrackerClient.cpp
     src/p2p/P2PManager.cpp
@@ -297,6 +298,7 @@ add_executable(unit_tests
     src/storage/NLFilterGenerator.cpp
     src/net/KcpSession.cpp
     src/net/IceTransport.cpp
+    src/net/LanDiscovery.cpp
     src/net/UpnpManager.cpp
     src/p2p/PeerController.cpp
     src/p2p/PeerRegistry.cpp

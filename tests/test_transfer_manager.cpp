@@ -276,7 +276,7 @@ TEST_F(TransferManagerTest, ResumeEligibility_CanResume) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 4. CancelReceivesForPeer：断开后清理
+// 4. CancelReceivesForPeer：断开后保留记录和临时文件（支持续传）
 // ═══════════════════════════════════════════════════════════════
 TEST_F(TransferManagerTest, CancelReceivesForPeer) {
     const std::string path1 = "peer_a_file1.txt";
@@ -290,23 +290,28 @@ TEST_F(TransferManagerTest, CancelReceivesForPeer) {
 
     drain_workers(2000);
 
-    // 清理 peer_a 的所有任务
+    // 清理 peer_a 的所有任务（当前策略：保留记录和临时文件，仅解除 peer 关联）
     tm->cancel_receives_for_peer("peer_a");
 
-    // 验证 peer_a 的任务已清理
+    // 验证 peer_a 的任务仍出现在活跃传输中（保留记录等待续传）
     auto transfers = tm->get_active_transfers();
+    bool found_a1 = false, found_a2 = false, found_b1 = false;
     for (const auto& t : transfers) {
         if (!t.is_upload) {
-            EXPECT_NE(t.path, path1) << "peer_a 的 file1 应该已清理";
-            EXPECT_NE(t.path, path2) << "peer_a 的 file2 应该已清理";
+            if (t.path == path1) found_a1 = true;
+            if (t.path == path2) found_a2 = true;
+            if (t.path == path3) found_b1 = true;
         }
     }
+    EXPECT_TRUE(found_a1) << "peer_a 的 file1 应保留记录等待续传";
+    EXPECT_TRUE(found_a2) << "peer_a 的 file2 应保留记录等待续传";
+    EXPECT_TRUE(found_b1) << "peer_b 的任务应不受影响";
 
-    // 验证 peer_a 的临时文件已删除
-    EXPECT_FALSE(std::filesystem::exists(test_root / (path1 + ".veritas_tmp")))
-        << "peer_a 的临时文件应该已删除";
-    EXPECT_FALSE(std::filesystem::exists(test_root / (path2 + ".veritas_tmp")))
-        << "peer_a 的临时文件应该已删除";
+    // 验证临时文件保留（支持续传）
+    EXPECT_TRUE(std::filesystem::exists(test_root / (path1 + ".veritas_tmp")))
+        << "peer_a 的临时文件应保留（用于断线后续传）";
+    EXPECT_TRUE(std::filesystem::exists(test_root / (path2 + ".veritas_tmp")))
+        << "peer_a 的临时文件应保留（用于断线后续传）";
 }
 
 // ═══════════════════════════════════════════════════════════════

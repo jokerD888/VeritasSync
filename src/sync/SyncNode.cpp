@@ -205,6 +205,12 @@ bool SyncNode::start() {
     // 暴露在 Tracker 明文通信和用于 AES 密钥派生
     p2p->set_encryption_key("encrypt:" + m_task.sync_key);
     p2p->set_mode(m_task.mode);
+    p2p->set_device_id(m_global_config.device_id);
+    p2p->set_sync_key(m_task.sync_key);
+    p2p->set_lan_discovery_config(
+        m_global_config.network.lan_discovery_enabled,
+        m_global_config.network.lan_multicast_group,
+        static_cast<uint16_t>(m_global_config.network.lan_multicast_port));
 
     // 记录关键配置参数
     g_logger->info("[Config] Sync Mode: {}",
@@ -262,6 +268,9 @@ bool SyncNode::start() {
 
     // 8. 注入 StateManager
     p2p->set_state_manager(m_state_manager.get());
+
+    // 启动 LAN 发现（无 tracker 时也能发现同一局域网的对等点）
+    p2p->start_lan_discovery(m_global_config.device_id, m_task.sync_key);
 
 
     // 9. 初始扫描

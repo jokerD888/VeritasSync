@@ -203,6 +203,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
 
     // 2. 启动异步任务链
     boost::asio::post(m_worker_pool, [self = shared_from_this(), ctx, start_chunk, expected_hash, expected_size]() {
+        // thread_pool 任务异常会触发 std::terminate() → abort
+        try {
         // --- 准备阶段 ---
         if (!self->m_state_manager) return;
 
@@ -259,8 +261,9 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         // --- 直接进入循环，由循环内部负责按需打开和关闭句柄 ---
 
 
-        // --- 定义递归上传逻辑 ---
-        auto upload_loop = [self, ctx, full_path](auto& loop_ref) -> void {
+        // --- 定义上传循环（使用 shared_ptr<function> 避免递归 lambda 生命周期问题） ---
+        auto upload_loop = std::make_shared<std::function<void()>>();
+        *upload_loop = [self, ctx, full_path, upload_loop]() {
             // 如果句柄由于刚开始或由于流控被关闭，在此处异步重开
             if (!ctx->file.is_open()) {
                 ctx->file.clear(); // 关键：清除之前的错误状态位
@@ -278,11 +281,11 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         
                         // 【异步退让核心】不阻塞当前线程，设置闹钟后立即返回
                         ctx->timer.expires_after(std::chrono::milliseconds(wait_ms));
-                        ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
+                        ctx->timer.async_wait([self, ctx, upload_loop](const boost::system::error_code& ec) {
                             if (!ec) {
                                 // 时间到了，把自己 post 会线程池继续干活
-                                boost::asio::post(self->m_worker_pool, [loop_ref]() {
-                                    loop_ref(loop_ref);
+                                boost::asio::post(self->m_worker_pool, [upload_loop]() {
+                                    (*upload_loop)();
                                 });
                             }
                         });
@@ -378,10 +381,10 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                     // 增加等待时间，给 KCP 更多时间消耗发送队列
                     int sleep_ms = (pending > ctx->CONGESTION_THRESHOLD * self->m_transfer_config.congestion_high_multiplier) ? self->m_transfer_config.congestion_wait_high_ms : self->m_transfer_config.congestion_wait_low_ms;
                     ctx->timer.expires_after(std::chrono::milliseconds(sleep_ms));
-                    ctx->timer.async_wait([self, ctx, loop_ref](const boost::system::error_code& ec) {
+                    ctx->timer.async_wait([self, ctx, upload_loop](const boost::system::error_code& ec) {
                         if (!ec) {
-                            boost::asio::post(self->m_worker_pool, [loop_ref]() {
-                                loop_ref(loop_ref);
+                            boost::asio::post(self->m_worker_pool, [upload_loop]() {
+                                (*upload_loop)();
                             });
                         }
                     });
@@ -407,7 +410,14 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         };
 
         // 启动循环
-        upload_loop(upload_loop);
+        (*upload_loop)();
+        } catch (const std::exception& e) {
+            g_logger->error("[Transfer] queue_upload 异常: peer={}, path={}, error={}",
+                           ctx->peer_id, ctx->path, e.what());
+        } catch (...) {
+            g_logger->error("[Transfer] queue_upload 未知异常: peer={}, path={}",
+                           ctx->peer_id, ctx->path);
+        }
     });
 }
 // ═══════════════════════════════════════════════════════════════

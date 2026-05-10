@@ -37,6 +37,7 @@ public:
 
     void set_role(SyncRole role);
     void set_mode(SyncMode mode);
+    void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
     // --- 单条广播 ---
     void broadcast_current_state();
@@ -92,7 +93,8 @@ private:
     // Anti-Entropy 对账
     // 增量广播是 Gossip（快但不保证可靠），对账是 Anti-Entropy（保证最终一致）。
     // 每次增量广播后重置定时器，静默 N 秒后自动触发 flood sync 补全。
-    static constexpr int RECONCILIATION_DELAY_SECONDS = 30;
+    // 60 秒延迟给初始同步留出充足时间，避免 SHA256 计算 I/O 饱和导致死锁。
+    static constexpr int RECONCILIATION_DELAY_SECONDS = 60;
     std::unique_ptr<boost::asio::steady_timer> m_reconciliation_timer;
     void trigger_reconciliation();
 };

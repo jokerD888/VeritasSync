@@ -25,18 +25,20 @@ static std::once_flag s_logger_init_flag;
 static size_t s_max_file_size    = LOG_MAX_FILE_SIZE;
 static size_t s_max_files        = LOG_MAX_FILES;
 static size_t s_thread_pool_size = LOG_THREAD_POOL_SIZE;
+static std::string s_log_filename = "veritas_sync.log";
 
-void init_logger(size_t max_file_size, size_t max_files, size_t thread_pool_size) {
+void init_logger(size_t max_file_size, size_t max_files, size_t thread_pool_size, const std::string& log_filename) {
     // 保存参数，供 call_once 内部使用
     s_max_file_size    = max_file_size;
     s_max_files        = max_files;
     s_thread_pool_size = thread_pool_size;
+    s_log_filename     = log_filename;
 
     std::call_once(s_logger_init_flag, []() {
         try {
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
             console_sink->set_level(spdlog::level::info);  // 调试级别: info
-            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("veritas_sync.log", s_max_file_size, s_max_files);
+            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(s_log_filename, s_max_file_size, s_max_files);
             file_sink->set_level(spdlog::level::info);     // 调试级别: info
 
             spdlog::init_thread_pool(s_thread_pool_size, 1);

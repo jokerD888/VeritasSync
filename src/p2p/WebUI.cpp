@@ -51,8 +51,8 @@ static void mask_field(nlohmann::json& j, const std::string& section, const std:
 // 构造函数
 // ═══════════════════════════════════════════════════════════════
 
-WebUIServer::WebUIServer(int port, const std::string& config_path)
-    : m_port(port), m_config_path(config_path) {
+WebUIServer::WebUIServer(int port, const std::string& config_path, const std::string& log_filename)
+    : m_port(port), m_config_path(config_path), m_log_filename(log_filename) {
     try {
         m_absolute_config_path = std::filesystem::absolute(m_config_path).string();
     } catch (...) {
@@ -141,20 +141,90 @@ WebUIServer::RouteHandler WebUIServer::guarded_route(RouteHandler handler) {
 // 公有方法
 // ═══════════════════════════════════════════════════════════════
 
+/// 尝试绑定端口并返回创建的 socket，失败返回 INVALID_SOCKET
+/// @param out_err 输出 WinSock 错误码（失败时设置）
+static SOCKET try_bind_port(const std::string& host, int port, int* out_err = nullptr) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        if (out_err) *out_err = WSAGetLastError();
+        return INVALID_SOCKET;
+    }
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    if (host == "0.0.0.0") {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    }
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        int err = WSAGetLastError();
+        closesocket(sock);
+        if (out_err) *out_err = err;
+        return INVALID_SOCKET;
+    }
+    if (listen(sock, SOMAXCONN) != 0) {
+        int err = WSAGetLastError();
+        closesocket(sock);
+        if (out_err) *out_err = err;
+        return INVALID_SOCKET;
+    }
+    return sock;
+}
+
 void WebUIServer::start(const std::function<void(bool)>& on_ready) {
     if (g_logger) g_logger->info("[WebUI] 正在尝试监听 127.0.0.1:{} ...", m_port);
 
-    const bool bind_ok = m_svr.bind_to_port("127.0.0.1", m_port);
+    // Windows 会保留某些 TCP 端口范围（WSAEACCES=10013，如 Hyper-V 占用的 8000-9000），自动回退到安全区
+    bool bind_ok = false;
+    int actual_port = m_port;
+    // 如果配置的端口在排除范围内，先尝试附近端口；如果超过 50 个都失败，跳到 30000+ 安全区
+    const std::vector<int> fallback_ranges = {m_port, 30000};
+    const std::string hosts[] = {"127.0.0.1", "0.0.0.0"};
+
+    for (const auto& host : hosts) {
+        for (int base_port : fallback_ranges) {
+            for (int offset = 0; offset < 50; ++offset) {
+                int port = base_port + offset;
+                int wsa_err = 0;
+                SOCKET sock = try_bind_port(host, port, &wsa_err);
+                if (sock != INVALID_SOCKET) {
+                    m_svr.stop();
+                    m_svr.adopt_socket(sock);
+                    bind_ok = true;
+                    if (g_logger) {
+                        if (port != m_port)
+                            g_logger->info("[WebUI] 绑定到 {}:{} 成功（原配置端口 {} 被系统保留，自动回退）", host, port, m_port);
+                        else
+                            g_logger->info("[WebUI] 绑定到 {}:{} 成功", host, port);
+                    }
+                    m_port = port;
+                    actual_port = port;
+                    break;
+                }
+                // 非权限错误则停止（如端口已被占用）
+                if (wsa_err != 10013) {
+                    if (g_logger) g_logger->error("[WebUI] {}:{} bind() 失败, WSA错误码={}（非权限错误）", host, port, wsa_err);
+                    break;
+                }
+            }
+            if (bind_ok) break;
+        }
+        if (bind_ok) break;
+    }
+
     if (on_ready) {
         on_ready(bind_ok);
     }
 
     if (!bind_ok) {
-        if (g_logger) g_logger->error("[WebUI] 监听失败：无法绑定 127.0.0.1:{}（端口可能被占用）", m_port);
+        if (g_logger) g_logger->error("[WebUI] 监听失败：无法绑定端口 {}（所有地址都已尝试）", m_port);
         return;
     }
 
-    if (g_logger) g_logger->info("[WebUI] 服务启动于 http://127.0.0.1:{}", m_port);
+    if (g_logger) g_logger->info("[WebUI] 服务启动于端口 {}", m_port);
 
     const bool listen_ok = m_svr.listen_after_bind();
     if (!listen_ok && g_logger) {
@@ -378,7 +448,7 @@ void WebUIServer::setup_status_routes() {
     // GET /api/log
     m_svr.Get("/api/log", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_auth(req, res)) return;
-        res.set_content(tail_log("veritas_sync.log", m_config.webui.log_tail_status_bytes), "text/plain; charset=utf-8");
+        res.set_content(tail_log(m_log_filename, m_config.webui.log_tail_status_bytes), "text/plain; charset=utf-8");
     });
 }
 
@@ -644,7 +714,7 @@ void WebUIServer::setup_task_detail_routes() {
                 res.set_content(R"({"success":false,"error":"任务不存在"})", "application/json");
                 return;
             }
-            std::string raw = tail_log("veritas_sync.log", m_config.webui.log_tail_task_bytes);
+            std::string raw = tail_log(m_log_filename, m_config.webui.log_tail_task_bytes);
             std::ostringstream oss;
             std::istringstream iss(raw);
             std::string line;

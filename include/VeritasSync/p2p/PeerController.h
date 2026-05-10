@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 
+#include <boost/asio.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/io_context.hpp>
 
@@ -95,13 +96,7 @@ struct PeerControllerCallbacks {
 class PeerController : public std::enable_shared_from_this<PeerController> {
 public:
     /**
-     * @brief 创建 PeerController 实例
-     * @param self_id 本地 Peer ID（用于 Conv 计算和角色判断）
-     * @param peer_id 对端 Peer ID
-     * @param io_context 用于定时器和异步操作
-     * @param ice_config ICE 配置
-     * @param callbacks 事件回调
-     * @return 智能指针，失败返回 nullptr
+     * @brief 创建 PeerController 实例（ICE 模式，通过 Tracker 连接）
      */
     static std::shared_ptr<PeerController> create(
         const std::string& self_id,
@@ -111,6 +106,21 @@ public:
         std::shared_ptr<CryptoLayer> crypto,
         PeerControllerCallbacks callbacks,
         const KcpConfig& kcp_config = KcpConfig{});
+
+    /**
+     * @brief 创建 PeerController 实例（LAN 直连模式，纯 KCP 无 ICE）
+     * @param peer_ip 对端 LAN IP
+     * @param peer_kcp_port 对端 KCP UDP 端口
+     */
+    static std::shared_ptr<PeerController> create_lan_direct(
+        const std::string& self_id,
+        const std::string& peer_id,
+        boost::asio::io_context& io_context,
+        std::shared_ptr<CryptoLayer> crypto,
+        PeerControllerCallbacks callbacks,
+        const KcpConfig& kcp_config,
+        const std::string& peer_ip,
+        uint16_t peer_kcp_port);
     
     ~PeerController();
     
@@ -287,17 +297,25 @@ private:
     
     /// 创建 IceTransport 并绑定回调（在 shared_ptr 创建后调用）
     bool init_ice_and_bind_callbacks(const IceConfig& ice_config);
+
+    /// 初始化 LAN 直连 UDP socket 并启动异步接收
+    bool init_lan_direct(const std::string& peer_ip, uint16_t peer_kcp_port);
     
     // ICE 回调处理（在 io_context 线程中执行）
     void on_ice_state_changed(IceState state);
     void on_ice_local_candidate(const std::string& candidate);
     void on_ice_gathering_done(const std::string& local_desc);
     void on_ice_data_received(const char* data, size_t size);
-    
+
+    // LAN 直连回调处理
+    void on_lan_data_received(const boost::system::error_code& ec, size_t length);
+    void start_lan_receive();
+
     // KCP 回调处理
     int on_kcp_output(const char* data, int len);
+    int on_lan_kcp_output(const char* data, int len);
     void on_kcp_message_received(const std::string& message);
-    
+
     /// 设置 KCP 会话
     void setup_kcp_session();
     
@@ -314,8 +332,15 @@ private:
     KcpConfig m_kcp_config;  // KCP 配置（窗口大小等）
     
     std::shared_ptr<IceTransport> m_ice;
+
+    // LAN 直连（与 m_ice 互斥）
+    std::unique_ptr<boost::asio::ip::udp::socket> m_lan_udp_socket;
+    boost::asio::ip::udp::endpoint m_lan_peer_endpoint;
+    std::array<char, 2048> m_lan_recv_buffer;
+    bool m_is_lan_direct = false;
+
     std::shared_ptr<KcpSession> m_kcp;
-    
+
     std::atomic<PeerState> m_state{PeerState::Disconnected};
     std::atomic<bool> m_closed{false};             // 替代 m_is_valid，close() 后为 true
     std::atomic<bool> m_kcp_initialized{false};  // 防止重复初始化

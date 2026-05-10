@@ -179,13 +179,13 @@ TEST_F(P2PManagerTest, BroadcastFileUpdate) {
     fi.path = "test/file.txt";
     fi.hash = "abcd1234";
     fi.modified_time = 12345;
-    
+
     // 无连接时不应崩溃
-    m_manager->broadcast_file_update(fi);
+    m_manager->broadcast_file_updates_batch({fi});
 }
 
 TEST_F(P2PManagerTest, BroadcastFileDelete) {
-    m_manager->broadcast_file_delete("test/file.txt");
+    m_manager->broadcast_file_deletes_batch({"test/file.txt"});
 }
 
 TEST_F(P2PManagerTest, BroadcastDirCreate) {
@@ -208,8 +208,8 @@ TEST_F(P2PManagerTest, BroadcastInBidirectionalModeAsDestination) {
     fi.modified_time = 12345;
     
     // 这些调用不应崩溃
-    m_manager->broadcast_file_update(fi);
-    m_manager->broadcast_file_delete("test/file.txt");
+    m_manager->broadcast_file_updates_batch({fi});
+    m_manager->broadcast_file_deletes_batch({"test/file.txt"});
     m_manager->broadcast_dir_create("test/subdir");
     m_manager->broadcast_dir_delete("test/subdir");
 }
@@ -226,8 +226,8 @@ TEST_F(P2PManagerTest, BroadcastInOneWayModeAsDestination) {
     fi.modified_time = 12345;
     
     // 这些调用应该安静退出，不崩溃
-    m_manager->broadcast_file_update(fi);
-    m_manager->broadcast_file_delete("test/file.txt");
+    m_manager->broadcast_file_updates_batch({fi});
+    m_manager->broadcast_file_deletes_batch({"test/file.txt"});
     m_manager->broadcast_dir_create("test/subdir");
     m_manager->broadcast_dir_delete("test/subdir");
 }
@@ -461,22 +461,22 @@ TEST_F(P2PManagerTest, DestructionWithPendingOperations) {
 
 TEST_F(P2PManagerTest, SpecialCharactersInPath) {
     // 测试特殊字符路径
-    m_manager->broadcast_file_delete("path/with spaces/file.txt");
-    m_manager->broadcast_file_delete("path/中文路径/文件.txt");
-    m_manager->broadcast_file_delete("path/with\"quotes\"/file.txt");
+    m_manager->broadcast_file_deletes_batch({"path/with spaces/file.txt"});
+    m_manager->broadcast_file_deletes_batch({"path/中文路径/文件.txt"});
+    m_manager->broadcast_file_deletes_batch({"path/with\"quotes\"/file.txt"});
     m_manager->broadcast_dir_create("目录/子目录");
 }
 
 TEST_F(P2PManagerTest, VeryLongPath) {
     // 测试超长路径
     std::string long_path(500, 'a');
-    m_manager->broadcast_file_delete(long_path);
+    m_manager->broadcast_file_deletes_batch({long_path});
     m_manager->broadcast_dir_create(long_path);
 }
 
 TEST_F(P2PManagerTest, EmptyPath) {
     // 空路径应该安全处理
-    m_manager->broadcast_file_delete("");
+    m_manager->broadcast_file_deletes_batch({""});
     m_manager->broadcast_dir_create("");
     m_manager->broadcast_dir_delete("");
 }

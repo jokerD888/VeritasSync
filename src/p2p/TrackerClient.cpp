@@ -84,9 +84,17 @@ void TrackerClient::schedule_reconnect() {
     // 清理写队列，防止重连后发送旧包
     m_write_queue.clear();
 
-    g_logger->warn("[TrackerClient] 连接断开，{}秒后尝试重连...", RECONNECT_INTERVAL.count());
+    // 指数退避：5s → 10s → 20s → 40s → 60s（上限）
+    ++m_reconnect_attempts;
+    auto delay = RECONNECT_BASE;
+    for (int i = 1; i < m_reconnect_attempts; ++i) {
+        delay = std::min(delay * 2, RECONNECT_MAX);
+    }
 
-    m_retry_timer.expires_after(RECONNECT_INTERVAL);
+    g_logger->warn("[TrackerClient] 连接断开，{}秒后尝试重连（第{}次）...",
+                   delay.count(), m_reconnect_attempts);
+
+    m_retry_timer.expires_after(delay);
     m_retry_timer.async_wait([self = shared_from_this()](const boost::system::error_code& ec) {
         if (!ec && !self->is_stopping()) {
             self->do_connect();
@@ -363,6 +371,7 @@ void TrackerClient::handle_message(const nlohmann::json& msg) {
 void TrackerClient::register_handlers() {
     m_handlers[SignalProto::TYPE_REG_ACK] = [this](const nlohmann::json& payload) {
         m_state.store(State::CONNECTED, std::memory_order_release);
+        m_reconnect_attempts = 0;  // 重置退避计数
         m_self_id = payload.at("self_id").get<std::string>();
         std::vector<std::string> peers = payload.at("peers").get<std::vector<std::string>>();
         g_logger->info("[TrackerClient] 注册成功。我的 ID: {}。收到 {} 个对等点。", m_self_id, peers.size());

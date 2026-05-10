@@ -15,9 +15,16 @@
 
 namespace VeritasSync {
 
+// 辅助类：通过继承暴露 httplib::Server 的 protected svr_sock_ 成员
+// 用于绕过 httplib is_decommissioned 状态问题，手动接管 socket
+class HttpBindHelper : public httplib::Server {
+public:
+    void adopt_socket(socket_t sock) { svr_sock_ = sock; }
+};
+
 class WebUIServer {
 public:
-    WebUIServer(int port, const std::string& config_path);
+    WebUIServer(int port, const std::string& config_path, const std::string& log_filename = "veritas_sync.log");
 
     using StatusProvider = std::function<nlohmann::json()>;
     using OnTaskAddCallback = std::function<bool(const SyncTask&, const Config&)>;
@@ -49,10 +56,11 @@ public:
     static std::string pick_folder_dialog();
 
 private:
-    httplib::Server m_svr;
+    HttpBindHelper m_svr;
     int m_port;
     std::string m_config_path;
     std::string m_absolute_config_path;
+    std::string m_log_filename;
     Config m_config;
     std::mutex m_config_mutex;
     StatusProvider m_status_provider;

@@ -63,36 +63,17 @@ void BroadcastManager::send_to_peers_with_flow_control(
     const std::string& packet) {
     if (peers.empty()) return;
 
-    boost::asio::post(m_io_context,
-        [peers, packet]() {
-            g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)",
-                          peers.size(), packet.length());
-
-            struct State {
-                std::vector<std::shared_ptr<PeerController>> peers;
-                std::string packet;
-                size_t index = 0;
-            };
-            auto state = std::make_shared<State>(State{peers, packet, 0});
-
-            // shared_ptr<function> 解决递归 lambda 自引用生命周期问题
-            auto send_next = std::make_shared<std::function<void()>>();
-            *send_next = [state, send_next]() {
-                if (state->index >= state->peers.size()) return;
-                auto ctrl = state->peers[state->index];  // 按值捕获 shared_ptr
-                if (!ctrl->is_valid()) {
-                    state->index++;
-                    (*send_next)();
-                    return;
-                }
-                ctrl->on_send_ready([ctrl, state, send_next]() {
-                    ctrl->send_message(state->packet);
-                    state->index++;
-                    (*send_next)();
-                });
-            };
-            (*send_next)();
-        });
+    // 广播消息体积小，直接发送即可，不需要 drain 回调流控。
+    // 之前的 drain 回调在 KCP 有空间时会同步触发，导致 io_context 被长时间占用，
+    // 无法处理其他事件（如清理定时器、LAN 心跳、KCP 数据接收），最终形成死锁。
+    for (auto& ctrl : peers) {
+        if (ctrl->is_valid()) {
+            ctrl->send_message(packet);
+        }
+    }
+    if (g_logger) {
+        g_logger->info("[KCP] 广播消息到 {} 个对等点 ({} bytes)", peers.size(), packet.length());
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -160,6 +141,7 @@ void BroadcastManager::broadcast_file_updates_batch(const std::vector<FileInfo>&
     if (files.empty()) return;
 
     boost::asio::post(m_worker_pool, [this, files]() {
+        try {
         g_logger->info("[P2P] (Source) 批量广播 {} 个文件更新", files.size());
 
         for (size_t i = 0; i < files.size(); i += FILE_UPDATE_BATCH_SIZE) {
@@ -182,6 +164,11 @@ void BroadcastManager::broadcast_file_updates_batch(const std::vector<FileInfo>&
         }
 
         schedule_reconciliation();
+        } catch (const std::exception& e) {
+            if (g_logger) g_logger->error("[Broadcast] broadcast_file_updates_batch 异常: {}", e.what());
+        } catch (...) {
+            if (g_logger) g_logger->error("[Broadcast] broadcast_file_updates_batch 未知异常");
+        }
     });
 }
 
@@ -296,9 +283,11 @@ void BroadcastManager::perform_flood_sync(std::shared_ptr<PeerController> contro
                    peer_id, files.size(), dirs.size(), session_id);
 
     // 2-4 全部在 io_context 上串行执行，文件发送使用异步背压
+    // io_context 处理器异常在 Asio 内部会触发 std::terminate → abort
     boost::asio::post(m_io_context, [this, controller, session_id,
                                      files = std::move(files),
                                      dirs = std::move(dirs)]() {
+        try {
         if (!controller->is_valid()) return;
 
         std::string peer_id = controller->get_peer_id();
@@ -331,6 +320,11 @@ void BroadcastManager::perform_flood_sync(std::shared_ptr<PeerController> contro
             g_logger->info("[Broadcast] 向 {} 批量推送完成 (0 个文件, {} 个目录, session: {})",
                            peer_id, dirs.size(), session_id);
         }
+        } catch (const std::exception& e) {
+            if (g_logger) g_logger->error("[Broadcast] perform_flood_sync io_context handler 异常: {}", e.what());
+        } catch (...) {
+            if (g_logger) g_logger->error("[Broadcast] perform_flood_sync io_context handler 未知异常");
+        }
     });
 }
 
@@ -359,8 +353,9 @@ void BroadcastManager::pace_and_send_file_batches(
         return;
     }
 
-    // KCP drain 回调驱动：等待发送队列有余量后再发送
-    controller->on_send_ready(
+    // 通过 worker_pool 串行调度下一批发送（不在 io_context 上执行）
+    // 防止 io_context 被批量发送占满，导致 KCP 更新/数据接收定时器被延迟
+    boost::asio::post(m_worker_pool,
         [this, controller, session_id, files = std::move(files), batch_index, total_batches]() {
             if (!controller->is_valid()) return;
             if (controller->get_sync_session_id() != session_id) return;
@@ -379,6 +374,7 @@ void BroadcastManager::pace_and_send_file_batches(
             g_logger->debug("[Broadcast] 发送文件批次 {}/{} ({} 个文件)",
                             batch_index + 1, total_batches, end - start);
 
+            // 调度下一批（最终一批会进入下一帧后因 batch_index>=total_batches 立即返回）
             pace_and_send_file_batches(controller, session_id, std::move(files), batch_index + 1);
         });
 }
@@ -393,7 +389,10 @@ void BroadcastManager::schedule_reconciliation() {
 
     boost::asio::post(m_io_context, [this]() {
         m_reconciliation_timer->cancel();
-        m_reconciliation_timer->expires_after(std::chrono::seconds(RECONCILIATION_DELAY_SECONDS));
+        // 增加随机抖动（0~30 秒），防止多个对等点同时触发对账
+        int jitter = std::rand() % 30;
+        m_reconciliation_timer->expires_after(
+            std::chrono::seconds(RECONCILIATION_DELAY_SECONDS + jitter));
         m_reconciliation_timer->async_wait([this](const boost::system::error_code& ec) {
             if (!ec) {
                 trigger_reconciliation();
