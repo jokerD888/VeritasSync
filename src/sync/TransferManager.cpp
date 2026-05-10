@@ -55,7 +55,7 @@ struct UploadContext {
     std::string compressed_data;
     boost::asio::steady_timer timer;
 
-    // 流控阈值：当 KCP 发送队列超过此值时触发流控等待
+    // 流控阈值：当 KCP 发送队列（包数）超过此值时触发流控等待
     static constexpr int CONGESTION_THRESHOLD = 256;
 
     // 运行时 chunk 大小
@@ -191,25 +191,28 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         m_session_total++;
     }
 
-    // 创建上下文，持有 io_context 用于定时器
-    auto ctx = std::make_shared<UploadContext>(m_io_context, CHUNK_DATA_SIZE);
-    ctx->peer_id = peer_id;
-    ctx->path = request->path;
-
     const uint32_t start_chunk = request->start_chunk;
     const std::string expected_hash = request->expected_hash;
     const uint64_t expected_size = request->expected_size;
-
+    const std::string path = request->path;
 
     // 2. 启动异步任务链
-    boost::asio::post(m_worker_pool, [self = shared_from_this(), ctx, start_chunk, expected_hash, expected_size]() {
+    // 【关键修复】不在此处创建 UploadContext（含 16KB buffer + ~18KB compressed_data），
+    // 而是仅传递轻量参数。当 1.5w+ 个文件请求同时涌入时，worker_pool 队列中的排队
+    // 任务若各持有 34KB 上下文 → ~510MB 泄漏在任务队列中。
+    // UploadContext 在 worker_pool 实际开始处理时再创建。
+    boost::asio::post(m_worker_pool, [self = shared_from_this(), peer_id, path, start_chunk, expected_hash, expected_size]() {
         // thread_pool 任务异常会触发 std::terminate() → abort
         try {
         // --- 准备阶段 ---
         if (!self->m_state_manager) return;
 
-        ctx->file_hash = self->m_state_manager->get_file_hash(ctx->path);
-        std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(ctx->path);
+        // 延迟创建 UploadContext（16KB buffer + 压缩缓冲在此分配）
+        auto ctx = std::make_shared<UploadContext>(self->m_io_context, self->CHUNK_DATA_SIZE);
+        ctx->peer_id = peer_id;
+        ctx->path = path;
+        ctx->file_hash = self->m_state_manager->get_file_hash(path);
+        std::filesystem::path full_path = self->m_state_manager->get_root_path() / Utf8ToPath(path);
         full_path.make_preferred(); // 确保 Windows 下使用反斜杠
 
 #ifdef _WIN32
@@ -297,6 +300,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                             self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                         }
                         self->m_session_done++;
+                        // 放弃发送：断开 shared_ptr<function> 循环引用
+                        boost::asio::post(self->m_worker_pool, [upload_loop]() { *upload_loop = nullptr; });
                         return;
                     }
                 }
@@ -358,6 +363,8 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                         self->m_sending_files.erase(make_sending_key(ctx->peer_id, ctx->path));
                     }
                     self->m_session_done++;
+                    // 连接断开：断开 shared_ptr<function> 循环引用
+                    boost::asio::post(self->m_worker_pool, [upload_loop]() { *upload_loop = nullptr; });
                     return;
                 }
 
@@ -406,6 +413,16 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
                 }
                 self->m_session_done++;
                 g_logger->info("[Transfer] 文件发送完成: {} (共 {} 块)", ctx->path, ctx->total_chunks);
+                
+                // 【关键修复】断开 shared_ptr<function> 循环引用
+                // upload_loop 是 shared_ptr<std::function<void()>>，而函数体通过捕获持有
+                // upload_loop（自引用）。上传完成后函数不再需要运行，但自引用导致引用计数
+                // 永远到不了 0，函数及其所有捕获（含 UploadContext 的 ~34KB buffer）永不释放。
+                // 15K 个完成后 = 510MB 泄漏。
+                // post 到 worker_pool 后由新任务清空函数内容，释放所有捕获。
+                boost::asio::post(self->m_worker_pool, [upload_loop]() {
+                    *upload_loop = nullptr;  // 清空函数：释放闭包中的所有捕获（含 upload_loop 自身）
+                });
             }
         };
 
@@ -413,10 +430,10 @@ void TransferManager::queue_upload(const std::string& peer_id, const nlohmann::j
         (*upload_loop)();
         } catch (const std::exception& e) {
             g_logger->error("[Transfer] queue_upload 异常: peer={}, path={}, error={}",
-                           ctx->peer_id, ctx->path, e.what());
+                           peer_id, path, e.what());
         } catch (...) {
             g_logger->error("[Transfer] queue_upload 未知异常: peer={}, path={}",
-                           ctx->peer_id, ctx->path);
+                           peer_id, path);
         }
     });
 }
@@ -576,8 +593,36 @@ void TransferManager::finalize_received_file(
     std::filesystem::path final_path = m_state_manager->get_root_path() / relative_path;
     std::filesystem::path temp_path_obj = Utf8ToPath(recv_ptr->temp_path);
 
+    // 重命名 .veritas_tmp → 最终文件，确保不留残留
+    //
+    //   rename 成功 → temp 被移动，remove 是安全空操作
+    //   rename 失败 → copy_file 后备创建 final，再 remove temp
+    //   都失败     → 保留 .veritas_tmp 不动，它是唯一的数据！
+    //
+    bool final_created = false;  // 标记 final 文件是否已安全创建
     std::error_code ec;
     std::filesystem::rename(temp_path_obj, final_path, ec);
+    if (!ec) {
+        final_created = true;
+    } else {
+        g_logger->warn("[Transfer] 重命名失败，尝试 copy+remove 后备: {} -> {} | {}",
+                       recv_ptr->temp_path, PathToUtf8(final_path), ec.message());
+        std::filesystem::remove(final_path, ec);  // 先清掉目标（如果有残留）
+        std::filesystem::copy_file(temp_path_obj, final_path,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) {
+            final_created = true;
+        } else {
+            g_logger->error("[Transfer] ❌ 重命名+copy均失败，保留 .veritas_tmp: {} -> {} | {}",
+                            recv_ptr->temp_path, PathToUtf8(final_path), ec.message());
+            // ⚠️ 不要删 .veritas_tmp，它是唯一的数据副本
+        }
+    }
+
+    // 只有 final 文件已确认存在才清理 .veritas_tmp（防止 rename "伪成功"）
+    if (final_created) {
+        std::filesystem::remove(temp_path_obj, ec);
+    }
 
     if (!ec) {
         // 计算本地哈希并与对端声称的 expected_hash 校验
@@ -799,10 +844,25 @@ void TransferManager::cleanup_stale_buffers() {
     std::lock_guard<std::mutex> lock(m_transfer_mutex);
     auto now = std::chrono::steady_clock::now();
 
-    for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ++it) {
+    for (auto it = m_receiving_files.begin(); it != m_receiving_files.end(); ) {
         auto& recv = *it->second;
         // 如果条目正在被 handle_chunk 处理，跳过
-        if (recv.busy) continue;
+        if (recv.busy) {
+            ++it;
+            continue;
+        }
+        
+        // 清理从未收到 chunk 的预注册僵尸条目
+        // register_expected_metadata 创建的条目 total_chunks=0（无 bitmap、无文件），
+        // 如果对应的请求丢失或源端无法发送，该条目永久残留。超过超时时间后安全删除。
+        if (recv.total_chunks == 0) {
+            auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - recv.last_active);
+            if (duration.count() > m_transfer_config.receive_timeout_minutes) {
+                g_logger->warn("[Transfer] ⏰ 清理僵尸预注册任务（从未收到chunk）: {}", it->first);
+                it = m_receiving_files.erase(it);
+                continue;
+            }
+        }
         
         // 接收超时：只关闭文件流，保留记录和临时文件以便续传
         auto duration = std::chrono::duration_cast<std::chrono::minutes>(now - recv.last_active);
@@ -813,6 +873,8 @@ void TransferManager::cleanup_stale_buffers() {
             }
             // 【断点续传】不删除记录和临时文件，由 cancel_receives_for_peer 或后续校验决定
         }
+        
+        ++it;
     }
 
     // 周期性持久化：将当前下载任务状态写入 DB

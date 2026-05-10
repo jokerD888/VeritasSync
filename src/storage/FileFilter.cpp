@@ -12,7 +12,7 @@ namespace VeritasSync {
 // --- 定义默认忽略规则 ---
 static const std::vector<std::string> kDefaultIgnorePatterns = {".git",
                                                                 ".git/",           // Git 仓库
-                                                                ".veritas_tmp",    // 自身临时文件
+                                                                "*.veritas_tmp",   // 自身临时文件（含 .tmp、.veritas_tmp 后缀）
                                                                 ".veritasignore",  // 忽略文件本身
                                                                 "*.part",          // 下载中间文件
                                                                 ".DS_Store",

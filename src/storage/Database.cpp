@@ -51,12 +51,13 @@ Database::Database(const std::filesystem::path& db_path, int busy_timeout_ms) : 
     }
 
     // --- 性能优化 PRAGMA ---
-    // 内存映射 I/O：省去 read() 系统调用和内核态→用户态 DMA 拷贝，上限 256MB
-    sqlite3_exec(m_db, "PRAGMA mmap_size=268435456;", nullptr, nullptr, nullptr);
-    // 扩大 page cache 至 20MB，减少并发批量写入时的磁盘 I/O
-    sqlite3_exec(m_db, "PRAGMA cache_size=-20000;", nullptr, nullptr, nullptr);
-    // 临时表放内存，避免排序等操作生成磁盘文件
-    sqlite3_exec(m_db, "PRAGMA temp_store=MEMORY;", nullptr, nullptr, nullptr);
+    // 内存映射 I/O：省去 read() 系统调用和内核态→用户态 DMA 拷贝，上限 16MB
+    // DB 通常只有几 MB（文件元数据），16MB 绰绰有余。原 256MB 浪费虚拟地址空间。
+    sqlite3_exec(m_db, "PRAGMA mmap_size=16777216;", nullptr, nullptr, nullptr);
+    // page cache 设为 4MB（1000 页 @ 4096 页大小），适配小型 metadata DB
+    // 原 -20000（20,000 页 = 80MB）对于 ~5MB 的数据库过于浪费
+    sqlite3_exec(m_db, "PRAGMA cache_size=-1000;", nullptr, nullptr, nullptr);
+    // 临时表放内存，避免排序等操作生成磁盘文件（保持开启，其内存用量通常很小）
 
     // 初始化表结构
     init_schema();

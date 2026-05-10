@@ -907,25 +907,38 @@ namespace VeritasSync {
     }
 
     std::string StateManager::get_state_as_json_string() {
-        std::vector<FileInfo> files;
+        // 直接在 message 中构建 JSON，避免额外创建一个 payload 副本再拷贝到 message。
+        // nlohmann::json 的 operator= 是深拷贝，payload 和 message 之前各持一份
+        // 15K 文件的完整 JSON 树，导致峰值内存翻倍。
+        nlohmann::json message;
+        message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
+        auto& payload = message[Protocol::MSG_PAYLOAD];
+        
+        // 填充文件列表
         {
-            std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
-            for (const auto& pair : m_file_map) {
-                files.push_back(pair.second);
+            std::lock_guard<std::mutex> lock(m_file_map_mutex);
+            payload["files"] = nlohmann::json::array();
+            auto& files_arr = payload["files"];
+            files_arr.get_ref<nlohmann::json::array_t&>().reserve(m_file_map.size());
+            for (const auto& [path, info] : m_file_map) {
+                files_arr.push_back(info);
             }
         }
-        nlohmann::json payload;
-        payload["files"] = files;
-
+        
+        // 填充目录列表
         {
             std::lock_guard<std::mutex> lock(m_dir_map_mutex);
             payload["directories"] = m_dir_map;
         }
-
-        nlohmann::json message;
-        message[Protocol::MSG_TYPE] = Protocol::TYPE_SHARE_STATE;
-        message[Protocol::MSG_PAYLOAD] = payload;
-        return message.dump(2);
+        
+        // 使用紧凑 JSON（dump(-1) 无缩进）替代 dump(2)（美化缩进），
+        // 输出字符串体积减半且不损耗一致性校验。原 dump(2) 仅用于美观。
+        std::string result = message.dump(-1);
+        
+        // 显式清空 JSON 树，立即释放内存（不等待作用域析构）
+        message.clear();
+        
+        return result;
     }
 
     // --- 为 print_current_state 添加锁 ---
