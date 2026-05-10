@@ -169,10 +169,6 @@ TEST_F(P2PManagerTest, GetTransferStats) {
 // 7. 广播测试（无连接时）
 // ═══════════════════════════════════════════════════════════════
 
-TEST_F(P2PManagerTest, BroadcastWithoutConnections) {
-    // 没有连接时广播应该安全（无操作）
-    m_manager->broadcast_current_state();
-}
 
 TEST_F(P2PManagerTest, BroadcastFileUpdate) {
     FileInfo fi;
@@ -186,14 +182,6 @@ TEST_F(P2PManagerTest, BroadcastFileUpdate) {
 
 TEST_F(P2PManagerTest, BroadcastFileDelete) {
     m_manager->broadcast_file_deletes_batch({"test/file.txt"});
-}
-
-TEST_F(P2PManagerTest, BroadcastDirCreate) {
-    m_manager->broadcast_dir_create("test/subdir");
-}
-
-TEST_F(P2PManagerTest, BroadcastDirDelete) {
-    m_manager->broadcast_dir_delete("test/subdir");
 }
 
 // 测试 BiDirectional 模式下 Destination 角色也可以广播
@@ -228,8 +216,6 @@ TEST_F(P2PManagerTest, BroadcastInOneWayModeAsDestination) {
     // 这些调用应该安静退出，不崩溃
     m_manager->broadcast_file_updates_batch({fi});
     m_manager->broadcast_file_deletes_batch({"test/file.txt"});
-    m_manager->broadcast_dir_create("test/subdir");
-    m_manager->broadcast_dir_delete("test/subdir");
 }
 
 // 测试 Source 角色在任何模式下都可以广播
@@ -237,13 +223,9 @@ TEST_F(P2PManagerTest, BroadcastAsSourceInAllModes) {
     // OneWay 模式
     m_manager->set_role(SyncRole::Source);
     m_manager->set_mode(SyncMode::OneWay);
-    m_manager->broadcast_current_state();
-    m_manager->broadcast_dir_create("dir1");
     
     // BiDirectional 模式
     m_manager->set_mode(SyncMode::BiDirectional);
-    m_manager->broadcast_current_state();
-    m_manager->broadcast_dir_delete("dir2");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -274,13 +256,6 @@ TEST_F(P2PManagerTest, ConcurrentOperations) {
         while (running) {
             m_manager->get_active_transfers();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-    
-    threads.emplace_back([this, &running]() {
-        while (running) {
-            m_manager->broadcast_current_state();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
     
@@ -355,7 +330,6 @@ TEST_F(P2PManagerTest, CreateUseAndDestroy) {
         
         manager->set_role(SyncRole::Source);
         manager->set_mode(SyncMode::OneWay);
-        manager->broadcast_current_state();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -370,10 +344,7 @@ TEST(ProtocolTest, MessageTypeConstants) {
     EXPECT_NE(Protocol::MSG_TYPE, nullptr);
     EXPECT_NE(Protocol::MSG_PAYLOAD, nullptr);
     EXPECT_NE(Protocol::TYPE_SHARE_STATE, nullptr);
-    EXPECT_NE(Protocol::TYPE_FILE_UPDATE, nullptr);
-    EXPECT_NE(Protocol::TYPE_FILE_DELETE, nullptr);
     EXPECT_NE(Protocol::TYPE_REQUEST_FILE, nullptr);
-    EXPECT_NE(Protocol::TYPE_FILE_CHUNK, nullptr);
     EXPECT_NE(Protocol::TYPE_DIR_CREATE, nullptr);
     EXPECT_NE(Protocol::TYPE_DIR_DELETE, nullptr);
     EXPECT_NE(Protocol::TYPE_SYNC_BEGIN, nullptr);
@@ -388,10 +359,7 @@ TEST(ProtocolTest, MessageTypeUniqueness) {
     // 验证消息类型唯一
     std::vector<std::string> types = {
         Protocol::TYPE_SHARE_STATE,
-        Protocol::TYPE_FILE_UPDATE,
-        Protocol::TYPE_FILE_DELETE,
         Protocol::TYPE_REQUEST_FILE,
-        Protocol::TYPE_FILE_CHUNK,
         Protocol::TYPE_DIR_CREATE,
         Protocol::TYPE_DIR_DELETE,
         Protocol::TYPE_SYNC_BEGIN,
@@ -444,9 +412,6 @@ TEST_F(P2PManagerTest, ChainedConfiguration) {
 
 TEST_F(P2PManagerTest, DestructionWithPendingOperations) {
     // 在有待处理操作时销毁
-    m_manager->set_role(SyncRole::Source);
-    m_manager->broadcast_current_state();
-    
     // 立即销毁，不应崩溃
     m_manager.reset();
     
@@ -471,14 +436,11 @@ TEST_F(P2PManagerTest, VeryLongPath) {
     // 测试超长路径
     std::string long_path(500, 'a');
     m_manager->broadcast_file_deletes_batch({long_path});
-    m_manager->broadcast_dir_create(long_path);
 }
 
 TEST_F(P2PManagerTest, EmptyPath) {
     // 空路径应该安全处理
     m_manager->broadcast_file_deletes_batch({""});
-    m_manager->broadcast_dir_create("");
-    m_manager->broadcast_dir_delete("");
 }
 
 // ═══════════════════════════════════════════════════════════════

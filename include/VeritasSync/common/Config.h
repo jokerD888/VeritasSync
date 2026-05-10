@@ -37,7 +37,7 @@ struct Config {
     // --- 网络配置 ---
     struct Network {
         std::string tracker_host = "47.121.187.240";
-        unsigned short tracker_port = 9988;
+        unsigned short tracker_port = 8800;
         int tracker_reconnect_interval_seconds = 5;
         int tracker_max_packet_size_mb = 1;
 

@@ -259,9 +259,6 @@ TEST(SyncSessionProtocol, AllProtocolTypes_NotEmpty) {
     EXPECT_NE(std::string(Protocol::MSG_PAYLOAD), "");
     EXPECT_NE(std::string(Protocol::TYPE_SYNC_BEGIN), "");
     EXPECT_NE(std::string(Protocol::TYPE_SYNC_ACK), "");
-    EXPECT_NE(std::string(Protocol::TYPE_SYNC_COMPLETE), "");
-    EXPECT_NE(std::string(Protocol::TYPE_FILE_UPDATE), "");
-    EXPECT_NE(std::string(Protocol::TYPE_FILE_DELETE), "");
     EXPECT_NE(std::string(Protocol::TYPE_FILE_UPDATE_BATCH), "");
     EXPECT_NE(std::string(Protocol::TYPE_FILE_DELETE_BATCH), "");
     EXPECT_NE(std::string(Protocol::TYPE_DIR_BATCH), "");

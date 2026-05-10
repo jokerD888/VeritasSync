@@ -89,9 +89,6 @@ public:
     virtual void connect_to_peers(const std::vector<std::string>& peer_addresses, bool force = false);
 
     // --- 广播方法（委托给 BroadcastManager）---
-    virtual void broadcast_current_state();
-    virtual void broadcast_dir_create(const std::string& relative_path);
-    virtual void broadcast_dir_delete(const std::string& relative_path);
     virtual void broadcast_file_updates_batch(const std::vector<FileInfo>& files);
     virtual void broadcast_file_deletes_batch(const std::vector<std::string>& paths);
     virtual void broadcast_dir_changes_batch(const std::vector<std::string>& creates,

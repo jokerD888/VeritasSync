@@ -436,17 +436,22 @@ int main(int argc, char* argv[]) {
             }
 
             // D. 推导任务运行状态
+            // 【LAN 优先】不再要求 tracker_online 作为显示"就绪"的前提条件。
+            // 只要 P2P 对等点已连接（LAN 直连），即使无 tracker 也视为 idle。
             bool tracker_online = node->is_tracker_online();
             std::string status = "stopped";
             if (node->is_started()) {
                 if (has_active_transfers) {
                     status = "syncing";
-                } else if (tracker_online && node_connected_peers > 0) {
+                } else if (node_connected_peers > 0) {
+                    // 有对等点连接（LAN 直连或 Tracker 信令），视为就绪
                     status = "idle";
                 } else if (tracker_online) {
                     status = "waiting";
                 } else {
-                    status = "offline";
+                    // 无 tracker 也无 LAN 对等点 → 局域网发现会持续广播，
+                    // 随时可能发现新对等点，用"waiting"替代"offline"更准确
+                    status = "waiting";
                 }
             }
             node_json["status"] = status;

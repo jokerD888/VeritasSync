@@ -61,9 +61,6 @@ namespace VeritasSync {
         // 将当前的文件状态打包成一个 share_state 类型的JSON字符串
         std::string get_state_as_json_string();
 
-        // (用于调试) 打印当前所有文件的状态到控制台
-        void print_current_state() const;
-
         const std::filesystem::path& get_root_path() const { return m_root_path; }
         Database& get_db() { return *m_db; }
         std::unordered_set<std::string> get_local_directories() const;
@@ -88,8 +85,6 @@ namespace VeritasSync {
 
         // 记录同步成功 (更新 Base Hash)
         void record_sync_success(const std::string& peer_id, const std::string& path, const std::string& hash);
-
-        void clear_sync_history(const std::string& path);
 
         std::optional<SyncHistory> get_full_history(const std::string& peer_id, const std::string& path);
 

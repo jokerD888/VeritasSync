@@ -255,16 +255,6 @@ TEST_F(StateManagerCoverageTest, RecordSyncSuccess_UpdatesBaseHash) {
     EXPECT_EQ(sm->get_base_hash("peer_1", "file.txt"), "hash_v2");
 }
 
-TEST_F(StateManagerCoverageTest, ClearSyncHistory_RemovesAllPeers) {
-    sm->record_sync_success("peer_1", "file.txt", "hash_1");
-    sm->record_sync_success("peer_2", "file.txt", "hash_2");
-    
-    sm->clear_sync_history("file.txt");
-    
-    EXPECT_EQ(sm->get_base_hash("peer_1", "file.txt"), "");
-    EXPECT_EQ(sm->get_base_hash("peer_2", "file.txt"), "");
-}
-
 TEST_F(StateManagerCoverageTest, GetFullHistory_ExistingRecord) {
     sm->record_sync_success("peer_1", "file.txt", "hash_1");
     

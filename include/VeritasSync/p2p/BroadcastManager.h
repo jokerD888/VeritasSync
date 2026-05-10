@@ -39,11 +39,6 @@ public:
     void set_mode(SyncMode mode);
     void set_state_manager(StateManager* sm) { m_state_manager = sm; }
 
-    // --- 单条广播 ---
-    void broadcast_current_state();
-    void broadcast_dir_create(const std::string& relative_path);
-    void broadcast_dir_delete(const std::string& relative_path);
-
     // --- 批量广播 ---
     void broadcast_file_updates_batch(const std::vector<FileInfo>& files);
     void broadcast_file_deletes_batch(const std::vector<std::string>& paths);

@@ -151,9 +151,6 @@ TEST(ProtocolCoverage, AllProtocolConstants_NonEmpty) {
     EXPECT_NE(std::string(Protocol::MSG_PAYLOAD), "");
     EXPECT_NE(std::string(Protocol::TYPE_SHARE_STATE), "");
     EXPECT_NE(std::string(Protocol::TYPE_REQUEST_FILE), "");
-    EXPECT_NE(std::string(Protocol::TYPE_FILE_CHUNK), "");
-    EXPECT_NE(std::string(Protocol::TYPE_FILE_UPDATE), "");
-    EXPECT_NE(std::string(Protocol::TYPE_FILE_DELETE), "");
     EXPECT_NE(std::string(Protocol::TYPE_DIR_CREATE), "");
     EXPECT_NE(std::string(Protocol::TYPE_DIR_DELETE), "");
     EXPECT_NE(std::string(Protocol::TYPE_FILE_UPDATE_BATCH), "");
@@ -161,7 +158,6 @@ TEST(ProtocolCoverage, AllProtocolConstants_NonEmpty) {
     EXPECT_NE(std::string(Protocol::TYPE_DIR_BATCH), "");
     EXPECT_NE(std::string(Protocol::TYPE_SYNC_BEGIN), "");
     EXPECT_NE(std::string(Protocol::TYPE_SYNC_ACK), "");
-    EXPECT_NE(std::string(Protocol::TYPE_SYNC_COMPLETE), "");
     EXPECT_NE(std::string(Protocol::TYPE_GOODBYE), "");
 }
 
@@ -170,9 +166,6 @@ TEST(ProtocolCoverage, ProtocolConstants_Uniqueness) {
     std::set<std::string> types;
     types.insert(Protocol::TYPE_SHARE_STATE);
     types.insert(Protocol::TYPE_REQUEST_FILE);
-    types.insert(Protocol::TYPE_FILE_CHUNK);
-    types.insert(Protocol::TYPE_FILE_UPDATE);
-    types.insert(Protocol::TYPE_FILE_DELETE);
     types.insert(Protocol::TYPE_DIR_CREATE);
     types.insert(Protocol::TYPE_DIR_DELETE);
     types.insert(Protocol::TYPE_FILE_UPDATE_BATCH);
@@ -180,8 +173,7 @@ TEST(ProtocolCoverage, ProtocolConstants_Uniqueness) {
     types.insert(Protocol::TYPE_DIR_BATCH);
     types.insert(Protocol::TYPE_SYNC_BEGIN);
     types.insert(Protocol::TYPE_SYNC_ACK);
-    types.insert(Protocol::TYPE_SYNC_COMPLETE);
     types.insert(Protocol::TYPE_GOODBYE);
     
-    EXPECT_EQ(types.size(), 14) << "所有 14 个消息类型常量应该各不相同";
+    EXPECT_EQ(types.size(), 10) << "所有 10 个消息类型常量应该各不相同";
 }

@@ -1430,9 +1430,11 @@
                     statusTextDiv.innerHTML = '<span class="led" style="background:#10b981;box-shadow:0 0 10px #10b981;animation:pulse 2s infinite;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> 在线';
                     statusTextDiv.style.color = 'var(--text-main)';
                 } else {
-                    // 红色
-                    statusTextDiv.innerHTML = '<span class="led" style="background:#ef4444;box-shadow:0 0 10px #ef4444;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> 离线';
-                    statusTextDiv.style.color = '#ef4444'; 
+                    // Tracker 离线但 LAN 发现仍可工作 → 显示黄色"LAN 模式"而非红色"离线"
+                    ledEl.style.background = '#f59e0b';
+                    ledEl.style.boxShadow = '0 0 10px #f59e0b';
+                    statusTextDiv.innerHTML = '<span class="led" style="background:#f59e0b;box-shadow:0 0 10px #f59e0b;margin-right:8px;display:inline-block;width:10px;height:10px;border-radius:50%"></span> LAN 模式';
+                    statusTextDiv.style.color = '#f59e0b';
                 }
 
                 // --- 2. 更新“会话统计” ---

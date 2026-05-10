@@ -61,9 +61,6 @@ boost::asio::io_context& P2PManager::get_io_context() { return m_io_context; }
 // 广播方法（委托给 BroadcastManager）
 // ═══════════════════════════════════════════════════════════════
 
-void P2PManager::broadcast_current_state()       { m_broadcast_manager->broadcast_current_state(); }
-void P2PManager::broadcast_dir_create(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_create(relative_path); }
-void P2PManager::broadcast_dir_delete(const std::string& relative_path) { m_broadcast_manager->broadcast_dir_delete(relative_path); }
 void P2PManager::broadcast_file_updates_batch(const std::vector<FileInfo>& files) { m_broadcast_manager->broadcast_file_updates_batch(files); }
 void P2PManager::broadcast_file_deletes_batch(const std::vector<std::string>& paths) { m_broadcast_manager->broadcast_file_deletes_batch(paths); }
 void P2PManager::broadcast_dir_changes_batch(const std::vector<std::string>& creates,
@@ -565,14 +562,18 @@ void P2PManager::connect_to_peers(const std::vector<std::string>& peer_addresses
 }
 
 void P2PManager::handle_peer_state_changed(const std::string& peer_id, PeerState state) {
-    g_logger->info("[ICE] Peer {} 状态变化: {}", peer_id, static_cast<int>(state));
+    // 区分 LAN 直连和 ICE 连接（日志前缀准确反映实际传输路径）
+    auto controller = m_peer_registry.find(peer_id);
+    bool is_lan = controller && controller->get_connection_type() == IceConnectionType::Direct;
+    const char* prefix = is_lan ? "[LAN]" : "[ICE]";
+
+    g_logger->info("{} Peer {} 状态变化: {}", prefix, peer_id, static_cast<int>(state));
 
     if (state == PeerState::Connected) {
-        g_logger->info("[ICE] ✅ 与 {} 建立连接成功！", peer_id);
+        g_logger->info("{} ✅ 与 {} 建立连接成功！", prefix, peer_id);
 
         if (m_role == SyncRole::Source || m_mode == SyncMode::BiDirectional) {
-            auto controller = m_peer_registry.find(peer_id);
-
+            // controller 已在外部查找过，此处复用
             if (controller) {
                 if (m_transfer_manager) {
                     auto pending = m_transfer_manager->get_pending_receives_for_peer(peer_id);
@@ -650,6 +651,12 @@ void P2PManager::handle_peer_leave(const std::string& peer_id) {
         g_logger->debug("[P2P] peer_leave: {} 是主动退出（已收到 goodbye），跳过清理", peer_id);
     } else {
         g_logger->info("[P2P] {} 掉线（未收到 goodbye），保留传输状态等待续传", peer_id);
+    }
+
+    // 清理发送端和接收端的传输状态
+    if (m_transfer_manager) {
+        m_transfer_manager->cancel_receives_for_peer(peer_id);
+        m_transfer_manager->cancel_sends_for_peer(peer_id);
     }
 
     controller->close();
@@ -913,6 +920,7 @@ void P2PManager::handle_goodbye(PeerController* from_peer) {
 
     if (m_transfer_manager) {
         m_transfer_manager->cancel_receives_for_peer(peer_id);
+        m_transfer_manager->cancel_sends_for_peer(peer_id);
     }
 
     auto controller = m_peer_registry.find(peer_id);

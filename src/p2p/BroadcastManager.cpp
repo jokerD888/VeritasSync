@@ -77,62 +77,6 @@ void BroadcastManager::send_to_peers_with_flow_control(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 单条广播
-// ═══════════════════════════════════════════════════════════════
-
-void BroadcastManager::broadcast_current_state() {
-    if (!can_broadcast()) return;
-    if (!m_state_manager) return;
-
-    boost::asio::post(m_worker_pool, [this]() {
-        m_state_manager->scan_directory();
-        std::string json_state = m_state_manager->get_state_as_json_string();
-
-        std::string json_packet;
-        json_packet.push_back(MSG_TYPE_JSON);
-        json_packet.append(json_state);
-
-        boost::asio::post(m_io_context, [this, json_packet = std::move(json_packet)]() {
-            auto peers = m_peer_registry.collect_connected();
-            for (auto& controller : peers) {
-                controller->send_message(json_packet);
-            }
-            if (!peers.empty()) {
-                g_logger->info("[P2P] (Source) 广播状态完成 (发送给 {} 个对等点)", peers.size());
-            }
-        });
-    });
-}
-
-// --- 通用路径广播辅助（消除 3 个函数的重复结构）---
-static bool broadcast_path_event(SyncRole role, SyncMode mode,
-                                 const std::string& msg_type,
-                                 const std::string& log_label,
-                                 const std::string& relative_path,
-                                 std::function<bool(const std::string&)> send_fn) {
-    if (!(role == SyncRole::Source || mode == SyncMode::BiDirectional)) return false;
-    g_logger->info("[P2P] (Source) 广播增量{}: {}", log_label, relative_path);
-    nlohmann::json msg;
-    msg[Protocol::MSG_TYPE] = msg_type;
-    msg[Protocol::MSG_PAYLOAD] = {{"path", relative_path}};
-    bool ok = send_fn(msg.dump());
-    if (!ok) {
-        g_logger->warn("[P2P] 广播{}失败（无可用对等点）: {}", log_label, relative_path);
-    }
-    return ok;
-}
-
-void BroadcastManager::broadcast_dir_create(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_CREATE, "目录创建", relative_path,
-                         [this](const std::string& s){ return m_send_fn(s); });
-}
-
-void BroadcastManager::broadcast_dir_delete(const std::string& relative_path) {
-    broadcast_path_event(m_role, m_mode, Protocol::TYPE_DIR_DELETE, "目录删除", relative_path,
-                         [this](const std::string& s){ return m_send_fn(s); });
-}
-
-// ═══════════════════════════════════════════════════════════════
 // 批量广播
 // ═══════════════════════════════════════════════════════════════
 

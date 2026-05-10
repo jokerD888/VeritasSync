@@ -566,11 +566,6 @@ namespace VeritasSync {
             schedule_retry(1);
         }
     }
-    void StateManager::clear_sync_history(const std::string& path) {
-        if (m_db) {
-            m_db->remove_sync_history(path);
-        }
-    }
     std::optional<SyncHistory> StateManager::get_full_history(const std::string& peer_id, const std::string& path) {
         if (m_db) {
             return m_db->get_sync_history(peer_id, path);
@@ -939,18 +934,6 @@ namespace VeritasSync {
         message.clear();
         
         return result;
-    }
-
-    // --- 为 print_current_state 添加锁 ---
-    void StateManager::print_current_state() const {
-        std::lock_guard<std::mutex> lock(m_file_map_mutex);  // 锁定
-        g_logger->info("--- Current Directory State ---");
-        for (const auto& pair : m_file_map) {
-            g_logger->info("  - Path: {}", pair.second.path);
-            g_logger->info("    MTime: {}", pair.second.modified_time);
-            g_logger->info("    Hash: {}...", pair.second.hash.substr(0, 12));
-        }
-        g_logger->info("-----------------------------");
     }
     
     bool StateManager::should_ignore_echo(const std::string& peer_id, const std::string& path,

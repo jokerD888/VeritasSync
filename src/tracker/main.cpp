@@ -38,8 +38,8 @@ int main() {
     init_tracker_logger();
     try {
         boost::asio::io_context io_context;
-        TrackerServer server(io_context, 9988);
-        g_logger->info("Tracker server (JSON async) started on port 9988...");
+        TrackerServer server(io_context, 8800);
+        g_logger->info("Tracker server (JSON async) started on port 8800...");
         io_context.run();
     } catch (const std::exception& e) {
         g_logger->critical("Exception: {}", e.what());
