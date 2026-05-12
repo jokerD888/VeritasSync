@@ -50,6 +50,10 @@ public:
     /// 收到不完整的 ACK 时，请求重新同步的回调
     using ResyncCallback = std::function<void(std::shared_ptr<PeerController> controller, uint64_t session_id)>;
 
+    /// Flood sync 开始时通知 SyncHandler 初始化累积器的回调
+    using OnFloodSyncBeginFunc = std::function<void(const std::string& peer_id,
+        uint64_t session_id, size_t file_count, size_t dir_count)>;
+
     SyncSession(StateManager* state_manager,
                 boost::asio::thread_pool& worker_pool,
                 boost::asio::io_context& io_context,
@@ -86,7 +90,10 @@ public:
      * @brief 处理收到的 sync_ack 确认消息
      */
     void handle_sync_ack(const nlohmann::json& payload, PeerController* from_peer);
-    
+
+    /// 设置 flood sync 开始回调
+    void set_on_flood_sync_begin(OnFloodSyncBeginFunc fn) { m_on_flood_sync_begin = std::move(fn); }
+
 private:
     StateManager* m_state_manager;
     boost::asio::thread_pool& m_worker_pool;
@@ -100,6 +107,7 @@ private:
     WithPeerFunc m_with_peer;
     GetPeerFunc m_get_peer;
     ResyncCallback m_resync_fn;
+    OnFloodSyncBeginFunc m_on_flood_sync_begin;
 
     int m_sync_timeout_seconds = 60;
 };

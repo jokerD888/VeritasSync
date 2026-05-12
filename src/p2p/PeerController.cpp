@@ -216,9 +216,15 @@ void PeerController::start_lan_receive() {
     if (!m_lan_udp_socket || !m_lan_udp_socket->is_open()) return;
     auto self = shared_from_this();
     m_lan_udp_socket->async_receive_from(
-        boost::asio::buffer(m_lan_recv_buffer), m_lan_peer_endpoint,
+        boost::asio::buffer(m_lan_recv_buffer), m_lan_recv_endpoint,
         [self](boost::system::error_code ec, size_t length) {
             if (!ec) {
+                // 校验来源：丢弃非预期发送者的数据包（LAN 环境可能收到广播/误发包）
+                if (self->m_lan_recv_endpoint.address() != self->m_lan_peer_endpoint.address() ||
+                    self->m_lan_recv_endpoint.port() != self->m_lan_peer_endpoint.port()) {
+                    self->start_lan_receive();
+                    return;
+                }
                 self->on_lan_data_received(ec, length);
             }
         });

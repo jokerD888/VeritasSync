@@ -621,10 +621,16 @@ void TransferManager::finalize_received_file(
 
     // 只有 final 文件已确认存在才清理 .veritas_tmp（防止 rename "伪成功"）
     if (final_created) {
-        std::filesystem::remove(temp_path_obj, ec);
+        std::error_code rm_ec;
+        std::filesystem::remove(temp_path_obj, rm_ec);
+        // temp 删除失败不影响后续流程（final 已安全创建），仅记录警告
+        if (rm_ec) {
+            g_logger->warn("[Transfer] 临时文件删除失败（不影响同步）: {} | {}",
+                           recv_ptr->temp_path, rm_ec.message());
+        }
     }
 
-    if (!ec) {
+    if (final_created) {
         // 计算本地哈希并与对端声称的 expected_hash 校验
         // 原因：KCP 虽然有序传输，但不保证数据完整性；UDP 校验和不可靠。
         // 必须本地校验哈希，否则损坏的数据会污染同步状态。

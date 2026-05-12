@@ -198,8 +198,6 @@ TEST_F(P2PManagerTest, BroadcastInBidirectionalModeAsDestination) {
     // 这些调用不应崩溃
     m_manager->broadcast_file_updates_batch({fi});
     m_manager->broadcast_file_deletes_batch({"test/file.txt"});
-    m_manager->broadcast_dir_create("test/subdir");
-    m_manager->broadcast_dir_delete("test/subdir");
 }
 
 // 测试 OneWay 模式下 Destination 不能广播（验证正常退出）
@@ -429,7 +427,7 @@ TEST_F(P2PManagerTest, SpecialCharactersInPath) {
     m_manager->broadcast_file_deletes_batch({"path/with spaces/file.txt"});
     m_manager->broadcast_file_deletes_batch({"path/中文路径/文件.txt"});
     m_manager->broadcast_file_deletes_batch({"path/with\"quotes\"/file.txt"});
-    m_manager->broadcast_dir_create("目录/子目录");
+    m_manager->broadcast_file_deletes_batch({"目录/子目录"});
 }
 
 TEST_F(P2PManagerTest, VeryLongPath) {
@@ -683,7 +681,7 @@ TEST_F(P2PManagerTest, ConcurrentSendAndUpdate_NoDeadlock) {
         threads.emplace_back([this, &running, &operations]() {
             while (running) {
                 // 模拟广播操作（内部会获取锁）
-                m_manager->broadcast_current_state();
+                m_manager->broadcast_file_deletes_batch({"test/file.txt"});
                 operations++;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }

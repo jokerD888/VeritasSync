@@ -4,9 +4,12 @@
 #include <boost/asio/thread_pool.hpp>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "VeritasSync/common/Config.h"
 #include "VeritasSync/sync/Protocol.h"
@@ -80,6 +83,10 @@ public:
     void handle_file_delete_batch(const nlohmann::json& payload, PeerController* from_peer);
     void handle_dir_batch(const nlohmann::json& payload, PeerController* from_peer);
 
+    // --- Flood sync 累积器初始化（由 SyncSession 调用） ---
+    void begin_flood_sync_accumulation(const std::string& peer_id, uint64_t session_id,
+                                       size_t expected_files, size_t expected_dirs);
+
 private:
     // 刷新 peer 的同步超时定时器
     void refresh_peer_timeout(PeerController* from_peer);
@@ -105,6 +112,13 @@ private:
     void send_file_requests(const std::string& peer_id,
                             const std::vector<std::string>& files_to_request,
                             const std::vector<FileInfo>& remote_files);
+
+    // 核心对账逻辑：扫描本地 → 与远端状态对比 → 删除/目录同步/文件请求
+    // handle_share_state 和 on_flood_sync_complete 共用
+    void reconcile_with_remote_state(const std::string& peer_id,
+                                     std::vector<FileInfo> remote_files,
+                                     std::unordered_set<std::string> remote_dirs,
+                                     bool send_file_reqs);
 
     // 提取的辅助函数：安全地从 JSON 解析字段
     template<typename T>
@@ -156,6 +170,24 @@ private:
     SendToPeerFunc m_send_to_peer;
     SendToPeerSafeFunc m_send_to_peer_safe;
     WithPeerFunc m_with_peer;
+
+    // --- Flood sync 累积器：收集远端全量状态用于删除检测 ---
+    struct FloodSyncAccumulator {
+        uint64_t session_id = 0;
+        std::vector<FileInfo> remote_files;
+        std::unordered_set<std::string> remote_dirs;
+        size_t expected_files = 0;
+        size_t expected_dirs = 0;
+        size_t received_files = 0;
+        size_t received_dirs = 0;
+        bool completed = false;
+    };
+
+    std::mutex m_accumulator_mutex;
+    std::unordered_map<std::string, FloodSyncAccumulator> m_accumulators;  // peer_id → accumulator
+
+    void check_and_run_completion(const std::string& peer_id);
+    void on_flood_sync_complete(const std::string& peer_id, FloodSyncAccumulator acc);
 };
 
 }  // namespace VeritasSync

@@ -90,9 +90,14 @@ void SyncSession::handle_sync_begin(const nlohmann::json& payload, PeerControlle
         from_peer->set_expected_dir_count(dir_count);
         from_peer->reset_received_file_count();
         from_peer->reset_received_dir_count();
-        
-        // 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
+
+        // 通知 SyncHandler 初始化 flood sync 累积器（用于重连后的删除检测）
         std::string peer_id = from_peer->get_peer_id();
+        if (m_on_flood_sync_begin) {
+            m_on_flood_sync_begin(peer_id, session_id, file_count, dir_count);
+        }
+
+        // 通过封装方法设置超时定时器（内部加锁，消除数据竞争）
         from_peer->start_sync_timeout(m_sync_timeout_seconds,
             [this, peer_id, session_id](const boost::system::error_code& ec) {
                 if (ec) return;  // 被取消
@@ -156,3 +161,4 @@ void SyncSession::handle_sync_ack(const nlohmann::json& payload, PeerController*
 }
 
 }  // namespace VeritasSync
+

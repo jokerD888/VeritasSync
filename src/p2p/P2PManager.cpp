@@ -370,6 +370,14 @@ void P2PManager::create_sync_components() {
     );
     m_sync_session->set_role(m_role);
     m_sync_session->set_mode(m_mode);
+
+    // 注入 flood sync 开始回调：SyncSession 收到 sync_begin 时通知 SyncHandler 初始化累积器
+    m_sync_session->set_on_flood_sync_begin(
+        [this](const std::string& peer_id, uint64_t session_id, size_t files, size_t dirs) {
+            if (m_sync_handler) {
+                m_sync_handler->begin_flood_sync_accumulation(peer_id, session_id, files, dirs);
+            }
+        });
 }
 
 void P2PManager::start_background_services() {

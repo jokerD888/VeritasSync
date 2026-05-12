@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <set>
+#include <random>
 
 #include <boost/asio/post.hpp>
 #include <nlohmann/json.hpp>
@@ -334,7 +334,9 @@ void BroadcastManager::schedule_reconciliation() {
     boost::asio::post(m_io_context, [this]() {
         m_reconciliation_timer->cancel();
         // 增加随机抖动（0~30 秒），防止多个对等点同时触发对账
-        int jitter = std::rand() % 30;
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        std::uniform_int_distribution<int> dist(0, 30);
+        int jitter = dist(rng);
         m_reconciliation_timer->expires_after(
             std::chrono::seconds(RECONCILIATION_DELAY_SECONDS + jitter));
         m_reconciliation_timer->async_wait([this](const boost::system::error_code& ec) {

@@ -22,6 +22,10 @@ KcpScheduler::~KcpScheduler() {
 
 void KcpScheduler::start() {
     if (m_running.exchange(true)) return;
+    {
+        std::lock_guard<std::mutex> lock(m_stop_mutex);
+        m_stop_requested = false;
+    }
     m_update_thread = std::thread(&KcpScheduler::update_thread_func, this);
 }
 
@@ -41,14 +45,12 @@ void KcpScheduler::update_thread_func() {
     while (m_running.load()) {
         auto start_time = std::chrono::steady_clock::now();
 
-        if (m_running.load()) {
-            try {
-                update_all_kcps();
-            } catch (const std::exception& e) {
-                if (g_logger) g_logger->error("[KcpScheduler] update_all_kcps 异常: {}", e.what());
-            } catch (...) {
-                if (g_logger) g_logger->error("[KcpScheduler] update_all_kcps 未知异常");
-            }
+        try {
+            update_all_kcps();
+        } catch (const std::exception& e) {
+            if (g_logger) g_logger->error("[KcpScheduler] update_all_kcps 异常: {}", e.what());
+        } catch (...) {
+            if (g_logger) g_logger->error("[KcpScheduler] update_all_kcps 未知异常");
         }
 
         // 计算下次唤醒时间

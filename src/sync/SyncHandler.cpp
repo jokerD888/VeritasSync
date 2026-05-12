@@ -351,12 +351,10 @@ void SyncHandler::handle_share_state(const nlohmann::json& payload, PeerControll
             g_logger->error("[Sync] StateManager 为空，无法处理状态。");
             return;
         }
-        
-        m_state_manager->scan_directory();
-        
+
         std::vector<FileInfo> remote_files;
         std::unordered_set<std::string> remote_dirs;
-        
+
         try {
             if (payload.contains("files")) {
                 for (const auto& file_json : payload["files"]) {
@@ -379,39 +377,9 @@ void SyncHandler::handle_share_state(const nlohmann::json& payload, PeerControll
             g_logger->error("[Sync] 解析远程状态失败: {}", e.what());
             return;
         }
-        
-        // 使用 SyncManager 进行比较
-        auto get_history = [this, peer_id](const std::string& path) -> std::optional<SyncHistory> {
-            return m_state_manager->get_full_history(peer_id, path);
-        };
-        
-        SyncActions file_actions = SyncManager::compare_states_and_get_requests(
-            m_state_manager->get_all_files(), remote_files, get_history, m_mode);
-        DirSyncActions dir_actions = SyncManager::compare_dir_states(
-            m_state_manager->get_local_directories(), remote_dirs);
 
-        // 删除多余文件
-        if (!file_actions.files_to_delete.empty()) {
-            g_logger->info("[Sync] 计划删除 {} 个本地多余的文件。", file_actions.files_to_delete.size());
-            for (const auto& file_path_str : file_actions.files_to_delete) {
-                std::filesystem::path relative_path = Utf8ToPath(file_path_str);
-                std::filesystem::path full_path = m_state_manager->get_root_path() / relative_path;
-                std::error_code ec;
-
-                if (std::filesystem::remove(full_path, ec)) {
-                    g_logger->info("[Sync] -> 已删除 (相对路径): {}", file_path_str);
-                    m_state_manager->remove_path_from_map(file_path_str);
-                } else if (ec != std::errc::no_such_file_or_directory) {
-                    g_logger->error("[Sync] ❌ 删除文件失败: {} | {}", file_path_str, FormatErrorCode(ec));
-                }
-            }
-        }
-
-        // 目录同步
-        sync_directory_actions(dir_actions, m_mode);
-
-        // 发送文件请求（异步背压）
-        send_file_requests(peer_id, file_actions.files_to_request, remote_files);
+        reconcile_with_remote_state(peer_id, std::move(remote_files),
+                                    std::move(remote_dirs), /*send_file_reqs=*/true);
     });
 }
 
@@ -539,6 +507,18 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
     std::string peer_id = from_peer ? from_peer->get_peer_id() : "";
     if (peer_id.empty()) return;
 
+    // 累积远端文件列表（用于 flood sync 完成后的删除检测）
+    uint64_t session_id = from_peer ? from_peer->get_sync_session_id() : 0;
+    if (session_id != 0) {
+        std::lock_guard<std::mutex> lock(m_accumulator_mutex);
+        auto it = m_accumulators.find(peer_id);
+        if (it != m_accumulators.end() && it->second.session_id == session_id) {
+            auto& acc = it->second;
+            acc.remote_files.insert(acc.remote_files.end(), files.begin(), files.end());
+            acc.received_files += files.size();
+        }
+    }
+
     // 将 process_single_file 投递到 worker_pool 执行：
     // resolve_conflict 对于已存在的文件会调用 Hashing::CalculateSHA256（文件 I/O），
     // 阻塞 io_context 会导致 KCP 更新被延迟、ICE consent 超时。大量文件（如 5000+ 个）
@@ -564,6 +544,11 @@ void SyncHandler::handle_file_update_batch(const nlohmann::json& payload, PeerCo
         g_logger->error("[KCP] handle_file_update_batch 异常: {}", e.what());
     }
     });
+
+    // 检查 flood sync 是否已收集完所有文件（触发删除检测）
+    if (session_id != 0) {
+        check_and_run_completion(peer_id);
+    }
 }
 
 void SyncHandler::handle_file_delete_batch(const nlohmann::json& payload, PeerController* from_peer) {
@@ -663,7 +648,22 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
         from_peer->add_received_dir_count(creates.size() + deletes.size());
         refresh_peer_timeout(from_peer);
     }
-    
+
+    // 累积远端目录列表（用于 flood sync 完成后的删除检测）
+    std::string peer_id = from_peer ? from_peer->get_peer_id() : "";
+    uint64_t session_id = from_peer ? from_peer->get_sync_session_id() : 0;
+    if (session_id != 0 && !peer_id.empty()) {
+        std::lock_guard<std::mutex> lock(m_accumulator_mutex);
+        auto it = m_accumulators.find(peer_id);
+        if (it != m_accumulators.end() && it->second.session_id == session_id) {
+            auto& acc = it->second;
+            for (const auto& dir : creates) {
+                acc.remote_dirs.insert(dir);
+            }
+            acc.received_dirs += creates.size() + deletes.size();
+        }
+    }
+
     boost::asio::post(m_worker_pool, [this, creates, deletes]() {
         try {
             if (!m_state_manager) return;
@@ -721,6 +721,123 @@ void SyncHandler::handle_dir_batch(const nlohmann::json& payload, PeerController
             g_logger->error("[Sync] handle_dir_batch 异常: {}", e.what());
         }
     });
+
+    // 检查 flood sync 是否已收集完所有目录（可能触发删除检测）
+    if (session_id != 0 && !peer_id.empty()) {
+        check_and_run_completion(peer_id);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Flood Sync 累积与删除检测
+// ═══════════════════════════════════════════════════════════════
+
+void SyncHandler::begin_flood_sync_accumulation(const std::string& peer_id,
+                                                 uint64_t session_id,
+                                                 size_t expected_files,
+                                                 size_t expected_dirs) {
+    {
+        std::lock_guard<std::mutex> lock(m_accumulator_mutex);
+        auto& acc = m_accumulators[peer_id];
+        acc = {};  // 重置已有的累积器
+        acc.session_id = session_id;
+        acc.expected_files = expected_files;
+        acc.expected_dirs = expected_dirs;
+        acc.remote_files.reserve(expected_files);
+    }
+
+    g_logger->info("[Sync] 初始化 flood sync 累积器: peer={}, session={}, "
+                   "预期文件={}, 预期目录={}",
+                   peer_id, session_id, expected_files, expected_dirs);
+
+    // 特殊情况：远端为空（0 文件 0 目录），不会有后续批次到达，立即检查完成
+    if (expected_files == 0 && expected_dirs == 0) {
+        check_and_run_completion(peer_id);
+    }
+}
+
+void SyncHandler::check_and_run_completion(const std::string& peer_id) {
+    FloodSyncAccumulator acc_copy;
+    {
+        std::lock_guard<std::mutex> lock(m_accumulator_mutex);
+        auto it = m_accumulators.find(peer_id);
+        if (it == m_accumulators.end()) return;
+        auto& acc = it->second;
+        if (acc.completed) return;
+        if (acc.received_files < acc.expected_files) return;
+        if (acc.received_dirs < acc.expected_dirs) return;
+        // 标记完成，防止重复触发
+        acc.completed = true;
+        acc_copy = std::move(acc);
+        m_accumulators.erase(it);
+    }
+
+    g_logger->info("[Sync] Flood sync 所有批次已接收完毕，触发删除检测: peer={}", peer_id);
+
+    // 投递到 worker_pool 执行删除检测（避免阻塞 io_context）
+    boost::asio::post(m_worker_pool, [this, peer_id, acc = std::move(acc_copy)]() mutable {
+        on_flood_sync_complete(peer_id, std::move(acc));
+    });
+}
+
+void SyncHandler::on_flood_sync_complete(const std::string& peer_id,
+                                          FloodSyncAccumulator acc) {
+    if (!m_state_manager) return;
+
+    g_logger->info("[Sync] Flood sync 完成，开始对账: peer={}, 远端文件={}, 远端目录={}",
+                   peer_id, acc.remote_files.size(), acc.remote_dirs.size());
+
+    // 复用核心对账逻辑（不发文件请求，因为 handle_file_update_batch 已逐文件处理过）
+    reconcile_with_remote_state(peer_id, std::move(acc.remote_files),
+                                std::move(acc.remote_dirs), /*send_file_reqs=*/false);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// reconcile_with_remote_state — 核心对账逻辑
+// ═══════════════════════════════════════════════════════════════
+
+void SyncHandler::reconcile_with_remote_state(const std::string& peer_id,
+                                               std::vector<FileInfo> remote_files,
+                                               std::unordered_set<std::string> remote_dirs,
+                                               bool send_file_reqs) {
+    if (!m_state_manager) return;
+
+    // 扫描本地最新状态
+    m_state_manager->scan_directory();
+
+    // 使用 SyncManager 进行状态对比
+    auto get_history = [this, &peer_id](const std::string& path) -> std::optional<SyncHistory> {
+        return m_state_manager->get_full_history(peer_id, path);
+    };
+
+    SyncActions file_actions = SyncManager::compare_states_and_get_requests(
+        m_state_manager->get_all_files(), remote_files, get_history, m_mode);
+    DirSyncActions dir_actions = SyncManager::compare_dir_states(
+        m_state_manager->get_local_directories(), remote_dirs);
+
+    // 删除多余文件
+    if (!file_actions.files_to_delete.empty()) {
+        g_logger->info("[Sync] 对账：需删除 {} 个本地多余文件", file_actions.files_to_delete.size());
+        for (const auto& file_path_str : file_actions.files_to_delete) {
+            std::filesystem::path full_path =
+                m_state_manager->get_root_path() / Utf8ToPath(file_path_str);
+            std::error_code ec;
+            if (std::filesystem::remove(full_path, ec)) {
+                g_logger->info("[Sync] -> 已删除: {}", file_path_str);
+                m_state_manager->remove_path_from_map(file_path_str);
+            } else if (ec && ec != std::errc::no_such_file_or_directory) {
+                g_logger->error("[Sync] ❌ 删除失败: {} | {}", file_path_str, FormatErrorCode(ec));
+            }
+        }
+    }
+
+    // 目录同步
+    sync_directory_actions(dir_actions, m_mode);
+
+    // 发送文件请求（仅 handle_share_state 路径需要，flood sync 路径已逐文件处理过）
+    if (send_file_reqs && !file_actions.files_to_request.empty()) {
+        send_file_requests(peer_id, file_actions.files_to_request, remote_files);
+    }
 }
 
 }  // namespace VeritasSync

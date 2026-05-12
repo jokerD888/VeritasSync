@@ -335,8 +335,9 @@ private:
 
     // LAN 直连（与 m_ice 互斥）
     std::unique_ptr<boost::asio::ip::udp::socket> m_lan_udp_socket;
-    boost::asio::ip::udp::endpoint m_lan_peer_endpoint;
-    std::array<char, 2048> m_lan_recv_buffer;
+    boost::asio::ip::udp::endpoint m_lan_peer_endpoint;   // 发送目标（init 时设置，不可变）
+    boost::asio::ip::udp::endpoint m_lan_recv_endpoint;   // 接收来源（async_receive_from 写入）
+    std::array<char, 4096> m_lan_recv_buffer;
     bool m_is_lan_direct = false;
 
     std::shared_ptr<KcpSession> m_kcp;
